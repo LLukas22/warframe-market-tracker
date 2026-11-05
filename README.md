@@ -6,10 +6,13 @@ Its web UI lets you search rivens, follow their prices over time, and see which 
 ## Deploy
 
 ```sh
-cp .env.example .env    # set DATA_DIR, PORT and ADMIN_TOKEN here
+curl -O https://raw.githubusercontent.com/LLukas22/warframe-market-tracker/main/compose.yaml
+curl -o .env https://raw.githubusercontent.com/LLukas22/warframe-market-tracker/main/.env.example
+# set DATA_DIR, PORT and ADMIN_TOKEN in .env
 mkdir -p data           # or the folder you set as DATA_DIR
-docker compose up -d --build
+docker compose up -d
 ```
 
 The UI is then at `http://localhost:8080`, or on whichever `PORT` you set.
+To update, run `docker compose pull && docker compose up -d`.
 The scraper page needs `ADMIN_TOKEN` to start or cancel a scrape, and to move your data to a server with Export and Upload.

@@ -1,6 +1,6 @@
 services:
   tracker:
-    build: .
+    image: ghcr.io/llukas22/warframe-market-tracker:main
     restart: unless-stopped
     init: true
     user: "${PUID:-1000}:${PGID:-1000}"
