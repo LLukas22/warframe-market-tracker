@@ -1,0 +1,41 @@
+[package]
+name = "warframe-market-tracker"
+version = "0.1.0"
+edition = "2024"
+description = "Web app for browsing warframe.market riven auctions, which it scrapes in the background."
+license = "MIT"
+
+[workspace]
+members = ["scraper", "types"]
+
+[dependencies]
+anyhow = "1"
+wfmt-types = { path = "types" }
+wfmt-scraper = { path = "scraper", optional = true }
+gloo-timers = { version = "0.3", features = ["futures"] }
+dioxus = { version = "0.7", features = ["fullstack", "router"] }
+serde = { version = "1", features = ["derive"] }
+
+# Server only
+arrow = { version = "60", default-features = false, optional = true }
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "io-util"], optional = true }
+reqwest = { version = "0.13", optional = true }
+serde_json = { version = "1", optional = true }
+chrono = { version = "0.4", optional = true }
+flate2 = { version = "1", optional = true }
+futures-util = { version = "0.3", optional = true }
+tar = { version = "0.4", optional = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+server = ["dep:wfmt-scraper", "dioxus/server", "dep:arrow", "dep:parquet", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util"]
+
+# Must match the installed wasm-bindgen CLI (`wasm-bindgen --version`), dx refuses mismatches.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+
+[dev-dependencies]
+flate2 = "1"

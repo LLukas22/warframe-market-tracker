@@ -1,0 +1,9 @@
+[package]
+name = "wfmt-types"
+version = "0.1.0"
+edition = "2024"
+description = "Scraper status and control types shared by the scraper and the web UI."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

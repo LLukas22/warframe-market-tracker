@@ -1,0 +1,16 @@
+services:
+  tracker:
+    build: .
+    restart: unless-stopped
+    init: true
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      WFMT_ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: ${DATA_DIR:-./data}
+        target: /data
+        bind:
+          create_host_path: false

@@ -1,0 +1,23 @@
+[package]
+name = "wfmt-scraper"
+version = "0.1.0"
+edition = "2024"
+description = "The server's background scraper: fetches warframe.market riven auctions, normalizes the rolls and stores them as parquet."
+license = "MIT"
+
+[dependencies]
+wfmt-types = { path = "../types" }
+anyhow = "1"
+arrow = { version = "60", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+flate2 = "1"
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
+reqwest = { version = "0.13", features = ["json", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
