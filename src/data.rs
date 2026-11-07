@@ -1137,6 +1137,76 @@ mod storage_tests {
     }
 
     #[test]
+    fn feed_sightings_do_not_make_other_listings_unconfirmed() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("wfmt-web-feed-{}", now_ms()));
+        fs::create_dir_all(&root)?;
+        let mut body = String::new();
+        flate2::read::GzDecoder::new(
+            &include_bytes!("../scraper/tests/fixtures/kulstar_auctions.json.gz")[..],
+        )
+        .read_to_string(&mut body)?;
+        let page: serde_json::Value = serde_json::from_str(&body)?;
+        let mut sighted = page["payload"]["auctions"][0].clone();
+        sighted["buyout_price"] = 123_456.into();
+        sighted["item"]["weapon_url_name"] = "kulstar".into();
+        let weapon = Weapon {
+            slug: "kulstar".into(),
+            game_ref: String::new(),
+            group: "secondary".into(),
+            riven_type: "pistol".into(),
+            disposition: Some(1.3),
+            i18n: serde_json::json!({"en":{"name":"Kulstar"}}),
+        };
+        let mut pipeline = Pipeline {
+            normalizer: Normalizer::new("2026-10-22T00:00:00Z".parse()?),
+            registry: Registry::open(root.join("rivens.jsonl"))?,
+            tracker: Tracker::open(root.join("seen")),
+        };
+        let mut sink = ParquetSink::new(root.join("parquet"));
+        let swept_at: chrono::DateTime<chrono::Utc> = "2026-11-01T00:00:00Z".parse()?;
+        let raw = |at, id: &str, body: String| {
+            RawResponse::new(
+                at,
+                id.into(),
+                "pc".into(),
+                vec![RawPage {
+                    buyout_policy: None,
+                    sort_by: id.into(),
+                    body,
+                }],
+                Vec::new(),
+            )
+        };
+        pipeline.process(&weapon, &raw(swept_at, "kulstar", body), &mut sink)?;
+        sink.flush()?;
+        let feed = serde_json::json!({"payload": {"auctions": [sighted]}}).to_string();
+        pipeline.process_feed(
+            std::slice::from_ref(&weapon),
+            &raw(
+                swept_at + chrono::TimeDelta::hours(1),
+                wfmt_types::FEED_RECENT,
+                feed,
+            ),
+            &mut sink,
+        )?;
+        sink.flush()?;
+        let store = Store::new(root.clone());
+        store.refresh();
+        {
+            let inner = store.inner.read().unwrap();
+            assert_eq!(inner.weapons[0].last_scrape, swept_at.timestamp_millis());
+            assert!(
+                inner
+                    .auctions
+                    .iter()
+                    .any(|a| a.buyout_price == Some(123_456))
+            );
+        }
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn cache_reloads_compacted_history_without_duplicate_observations() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("wfmt-web-storage-{}", now_ms()));
         fs::create_dir_all(&root)?;
@@ -1359,6 +1429,9 @@ impl Inner {
             let riven_ids = b
                 .column_by_name("riven_id")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let sources = b
+                .column_by_name("source")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
             for i in 0..b.num_rows() {
                 if !visible.value(i) || closed.value(i) {
@@ -1371,8 +1444,12 @@ impl Inner {
                     "unknown"
                 };
                 let weapon = self.intern_weapon(weapon_slug.value(i), weapon_name.value(i), class);
-                let w = &mut self.weapons[weapon as usize];
-                w.last_scrape = w.last_scrape.max(t);
+                // A feed sighting says nothing about the weapon's other listings, so it must not
+                // make them look unconfirmed.
+                if !sources.is_some_and(|c| c.is_valid(i) && wfmt_types::is_feed(c.value(i))) {
+                    let w = &mut self.weapons[weapon as usize];
+                    w.last_scrape = w.last_scrape.max(t);
+                }
 
                 let auction_id = id.value(i);
                 let riven_key = riven_ids

@@ -43,10 +43,9 @@ pub fn reprocess(
     let body = store
         .load_weapons_raw()?
         .context("no cached weapon list; start the server first")?;
-    let weapons: HashMap<String, Weapon> = wfm::parse_weapons(&body)?
-        .into_iter()
-        .map(|w| (w.slug.clone(), w))
-        .collect();
+    let all_weapons = wfm::parse_weapons(&body)?;
+    let weapons: HashMap<&str, &Weapon> =
+        all_weapons.iter().map(|w| (w.slug.as_str(), w)).collect();
 
     let out = out.unwrap_or_else(|| store.root().join("reprocessed"));
     if out.exists() && std::fs::read_dir(&out)?.next().is_some() {
@@ -80,7 +79,14 @@ pub fn reprocess(
     let mut gone = 0;
     for (i, path) in files.iter().enumerate() {
         let raw = RawResponse::read(path)?;
-        let Some(weapon) = weapons.get(&raw.weapon) else {
+        if wfmt_types::is_feed(&raw.weapon) {
+            pipeline
+                .process_feed(&all_weapons, &raw, &mut sink)
+                .with_context(|| format!("processing {}", path.display()))?;
+            sink.acknowledge_raw(&raw);
+            continue;
+        }
+        let Some(weapon) = weapons.get(raw.weapon.as_str()) else {
             if replace {
                 bail!(
                     "weapon {} missing from cached list; refusing an incomplete replacement",

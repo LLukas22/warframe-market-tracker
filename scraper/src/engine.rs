@@ -34,6 +34,7 @@ use crate::wfm::{self, Client, Weapon};
 
 const RECENT: usize = 50;
 const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
+const FEED_PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
 
 #[derive(Args, Clone, Debug)]
 pub struct EngineArgs {
@@ -49,6 +50,19 @@ pub struct EngineArgs {
     /// Hours between scheduled sweeps over all weapons.
     #[arg(long, env = "WFMT_SWEEP_INTERVAL_HOURS", default_value_t = 4.0)]
     pub sweep_interval_hours: f64,
+
+    /// Seconds between polls of the site-wide "most recent" listings. 0 disables.
+    #[arg(long, env = "WFMT_RECENT_INTERVAL_SECS", default_value_t = 180)]
+    pub recent_interval_secs: u64,
+
+    /// Seconds between polls of the site-wide "popular" listings. 0 disables.
+    #[arg(long, env = "WFMT_POPULAR_INTERVAL_SECS", default_value_t = 600)]
+    pub popular_interval_secs: u64,
+
+    /// Hours to keep raw feed responses, checked hourly. 0 keeps them as long as other raw
+    /// responses (`WFMT_RAW_RETENTION_DAYS`).
+    #[arg(long, env = "WFMT_FEED_RAW_RETENTION_HOURS", default_value_t = 6)]
+    pub feed_raw_retention_hours: u64,
 
     /// Hours between checks of the riven manifest version (weapon list).
     #[arg(long, env = "WFMT_METADATA_INTERVAL_HOURS", default_value_t = 24.0)]
@@ -432,9 +446,18 @@ impl Engine {
         let body = self.store.load_weapons_raw()?.ok_or_else(|| {
             anyhow::anyhow!("pending raw responses require the cached weapon list")
         })?;
-        // Recovery includes weapons excluded by the current `WFMT_WEAPONS` filter.
+        // Recovery includes weapons excluded by the current `WFMT_WEAPONS` filter, except for
+        // feeds, which return every weapon no matter what was being tracked.
         let weapons = wfm::parse_weapons(&body)?;
+        let tracked = self.track(weapons.clone());
         for raw in pending {
+            if wfmt_types::is_feed(&raw.weapon) {
+                tracing::info!(feed = %raw.weapon, "recovering uncommitted raw fetch");
+                self.pipeline.process_feed(&tracked, &raw, &mut self.sink)?;
+                self.sink.acknowledge_raw(&raw);
+                self.sink.flush()?;
+                continue;
+            }
             let weapon = weapons
                 .iter()
                 .find(|w| w.slug == raw.weapon)
@@ -584,10 +607,50 @@ impl Engine {
         })
     }
 
-    fn log_fetch(&mut self, weapon: &str, started: Instant, result: &Result<FetchResult>) {
+    /// Polls one site-wide feed and publishes what it found right away, since the engine may
+    /// sit idle for hours afterwards.
+    async fn fetch_feed(&mut self, feed: &str) -> Result<FetchResult> {
+        let body = self.client.feed_raw(feed).await?;
+        wfm::parse_auctions(&body)?;
+        let raw = RawResponse::new(
+            Utc::now(),
+            feed.to_owned(),
+            self.client.platform().to_owned(),
+            vec![RawPage {
+                sort_by: feed.to_owned(),
+                buyout_policy: None,
+                body,
+            }],
+            Vec::new(),
+        );
+        self.processing = true;
+        self.archive_progress(&raw)?;
+        let summary = self
+            .pipeline
+            .process_feed(&self.weapons, &raw, &mut self.sink)?;
+        if !self.args.no_raw {
+            self.sink.acknowledge_raw(&raw);
+        }
+        self.sink.flush()?;
+        self.since_flush = 0;
+        self.processing = false;
+        tracing::info!(
+            feed,
+            auctions = summary.auctions,
+            skipped = summary.skipped,
+            "fetched feed"
+        );
+        Ok(FetchResult {
+            pages: 1,
+            auctions: summary.auctions as u32,
+            gone: 0,
+        })
+    }
+
+    fn push_log(&mut self, name: &str, started: Instant, result: &Result<FetchResult>) {
         let entry = FetchLog {
             t: ms(Utc::now()),
-            weapon: weapon.to_owned(),
+            weapon: name.to_owned(),
             duration_ms: started.elapsed().as_millis() as i64,
             pages: result.as_ref().map_or(0, |r| r.pages),
             auctions: result.as_ref().map_or(0, |r| r.auctions),
@@ -596,6 +659,10 @@ impl Engine {
         };
         self.status.recent.insert(0, entry);
         self.status.recent.truncate(RECENT);
+    }
+
+    fn log_fetch(&mut self, weapon: &str, started: Instant, result: &Result<FetchResult>) {
+        self.push_log(weapon, started, result);
         if let Some(sweep) = self.state.sweep.as_mut() {
             let p = &mut sweep.progress;
             p.done += 1;
@@ -638,6 +705,17 @@ impl Engine {
         let mut shutting_down = false;
         let mut metadata_failed_at: Option<DateTime<Utc>> = None;
         let mut next_maintenance = Instant::now();
+        let mut next_feed_prune = Instant::now();
+        // In memory only: polling once more after a restart costs next to nothing. Disabled
+        // feeds are dropped; the first poll happens as soon as the weapon list is ready.
+        let mut feeds: Vec<(&'static str, Duration, Instant)> = [
+            (wfmt_types::FEED_RECENT, self.args.recent_interval_secs),
+            (wfmt_types::FEED_POPULAR, self.args.popular_interval_secs),
+        ]
+        .into_iter()
+        .filter(|(_, secs)| *secs > 0)
+        .map(|(feed, secs)| (feed, Duration::from_secs(secs), Instant::now()))
+        .collect();
         loop {
             if *shutdown.borrow() {
                 break;
@@ -682,6 +760,17 @@ impl Engine {
                 });
                 continue;
             }
+            if self.args.feed_raw_retention_hours > 0 && Instant::now() >= next_feed_prune {
+                next_feed_prune = Instant::now() + FEED_PRUNE_INTERVAL;
+                let retention = hours(self.args.feed_raw_retention_hours as f64);
+                match maintenance::prune_feeds(&self.data_dir, Utc::now(), retention) {
+                    Ok(deleted) => tracing::debug!(deleted, "pruned feed archives"),
+                    Err(e) => {
+                        tracing::error!(error = %e, "feed archive cleanup failed");
+                        self.status.error = Some(format!("feed archive cleanup: {e:#}"));
+                    }
+                }
+            }
             while let Ok(command) = rx.try_recv() {
                 deferred.push_back(command);
             }
@@ -719,6 +808,61 @@ impl Engine {
 
             while let Some(command) = deferred.pop_front() {
                 self.handle(command)?;
+            }
+
+            // Feeds run between weapons, sharing the client's rate limit with the sweep.
+            let due = feeds
+                .iter_mut()
+                .find(|(_, _, next)| Instant::now() >= *next);
+            if let Some((feed, interval, next)) = due.filter(|_| !self.weapons.is_empty()) {
+                let feed = *feed;
+                *next = Instant::now() + *interval;
+                let started = Instant::now();
+                let result = {
+                    let fetch = self.fetch_feed(feed);
+                    tokio::pin!(fetch);
+                    loop {
+                        tokio::select! {
+                            result = &mut fetch => break Some(result),
+                            Some(command) = rx.recv() => {
+                                // A backing-off poll must not hold up a cancel for minutes.
+                                let cancel = command == Command::Cancel;
+                                deferred.push_back(command);
+                                if cancel {
+                                    break None;
+                                }
+                            }
+                            _ = shutdown.changed() => break None,
+                        }
+                    }
+                };
+                let Some(result) = result else {
+                    continue;
+                };
+                if self.processing {
+                    // Same as a weapon fetch: restart recovers the raw journal.
+                    return result.map(|_| ());
+                }
+                match &result {
+                    Ok(_) => {
+                        if self
+                            .status
+                            .error
+                            .as_deref()
+                            .is_some_and(|e| e.starts_with(feed))
+                        {
+                            self.status.error = None;
+                        }
+                    }
+                    Err(e) => {
+                        // No cooldown: the next poll is minutes away anyway.
+                        tracing::warn!(feed, error = %e, "feed fetch failed");
+                        self.status.error = Some(format!("{feed}: {e:#}"));
+                    }
+                }
+                self.push_log(feed, started, &result);
+                self.publish();
+                continue;
             }
 
             if self.state.sweep.is_none() {
@@ -857,6 +1001,9 @@ mod tests {
             platform: "pc".into(),
             request_interval_secs: 0.0,
             sweep_interval_hours: 4.0,
+            recent_interval_secs: 180,
+            popular_interval_secs: 600,
+            feed_raw_retention_hours: 6,
             metadata_interval_hours: 24.0,
             flush_every: 3,
             sort_by: vec!["price_asc".into(), "price_desc".into()],
@@ -931,6 +1078,104 @@ mod tests {
         fs::remove_dir_all(root)?;
         Ok(())
     }
+    #[tokio::test]
+    async fn running_engine_prunes_expired_feed_archives() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("wfmt-prune-{}", crate::dataset::unique_id()));
+        let store = Store::new(root.clone());
+        store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
+        let raw = RawResponse::new(
+            Utc::now() - TimeDelta::hours(7),
+            wfmt_types::FEED_RECENT.into(),
+            "pc".into(),
+            Vec::new(),
+            Vec::new(),
+        );
+        store.save_raw(&raw)?;
+        let mut sink = ParquetSink::new(root.join("parquet"));
+        sink.prepare(raw.scraped_at)?;
+        sink.acknowledge_raw(&raw);
+        sink.flush()?;
+
+        let mut engine = Engine::new(
+            root.clone(),
+            "2026-10-22T00:00:00Z".parse()?,
+            options(false),
+        )?;
+        // Nothing listens here: the cleanup must not depend on the API being reachable.
+        engine.client.set_api("http://127.0.0.1:1".into());
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(engine.run(shutdown));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !store.raw_files()?.is_empty() {
+            assert!(Instant::now() < deadline, "archive was not pruned");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stop.send(true)?;
+        running.await??;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn feed_poll_requests_its_endpoint_and_commits_right_away() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("wfmt-feed-{}", crate::dataset::unique_id()));
+        let store = Store::new(root.clone());
+        store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
+        let mut engine = Engine::new(
+            root.clone(),
+            "2026-10-22T00:00:00Z".parse()?,
+            options(false),
+        )?;
+        let mut body = String::new();
+        flate2::read::GzDecoder::new(
+            &include_bytes!("../tests/fixtures/kulstar_auctions.json.gz")[..],
+        )
+        .read_to_string(&mut body)?;
+        let page: serde_json::Value = serde_json::from_str(&body)?;
+        let mut auction = page["payload"]["auctions"][0].clone();
+        auction["item"]["weapon_url_name"] = "kulstar".into();
+        auction["buyout_price"] = 500.into();
+        let body = serde_json::json!({"payload": {"auctions": [auction]}}).to_string();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        engine
+            .client
+            .set_api(format!("http://{}", listener.local_addr()?));
+        let server = std::thread::spawn(move || -> Result<()> {
+            for (path, response) in [
+                ("/v1/auctions/popular ", body.as_str()),
+                ("/v1/auctions ", "not json"),
+            ] {
+                let (mut stream, _) = listener.accept()?;
+                let mut request = Vec::new();
+                let mut buf = [0; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf)?;
+                    anyhow::ensure!(n > 0, "request ended before headers");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                assert!(String::from_utf8_lossy(&request).starts_with(&format!("GET {path}")));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    response.len()
+                )?;
+            }
+            Ok(())
+        });
+        let polled = engine.fetch_feed(wfmt_types::FEED_POPULAR).await?;
+        assert_eq!(polled.auctions, 1);
+        assert!(store.pending_raw()?.is_empty(), "committed by the poll");
+        assert!(store.seen_dir().join("kulstar.json").exists());
+
+        // A garbled response is retried at the next poll, never archived or treated as fatal.
+        assert!(engine.fetch_feed(wfmt_types::FEED_RECENT).await.is_err());
+        assert!(!engine.processing);
+        assert_eq!(store.raw_files()?.len(), 1);
+        server.join().unwrap()?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn capped_null_buyouts_fetch_direct_sales_without_claiming_full_coverage() -> Result<()> {
         let root =

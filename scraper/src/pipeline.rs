@@ -1,7 +1,7 @@
 //! Processing of one weapon fetch, shared by the engine and `reprocess` so both produce
 //! identical output from the same raw responses.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 
@@ -119,13 +119,102 @@ impl Pipeline {
                         .starting_price
                         .is_some_and(|p| p > 1 && i128::from(p) * count > sum))
         });
+        let verified: HashMap<String, bool> = raw
+            .verified
+            .iter()
+            .map(|v| (v.auction_id.clone(), v.exists))
+            .collect();
+        let (fitted, gone) =
+            self.commit(weapon, raw, &auctions, &coverage, &verified, &present, sink)?;
+        Ok(Summary {
+            auctions: auctions.len(),
+            fitted,
+            skipped,
+            gone,
+            complete: coverage.is_complete(),
+        })
+    }
+
+    /// Records a site-wide feed. A feed only proves that its listings exist, so nothing is ever
+    /// inferred from what it leaves out. Raw feed archives are short-lived, so the rows are the
+    /// lasting record; only sightings that add nothing are skipped (see `Tracker::needs_row`),
+    /// because consecutive polls overlap. Starting-only listings wait for a weapon search, which
+    /// has the reference prices they are judged against. `weapons` limits what gets recorded.
+    pub fn process_feed(
+        &mut self,
+        weapons: &[Weapon],
+        raw: &RawResponse,
+        sink: &mut ParquetSink,
+    ) -> Result<Summary> {
+        let Pages {
+            auctions, skipped, ..
+        } = parse_pages(&raw.pages)?;
+        // Even a poll with nothing to record needs its receipt filed under its own date.
+        sink.prepare(raw.scraped_at)?;
+        let mut by_weapon: BTreeMap<String, Vec<(Auction, String)>> = BTreeMap::new();
+        for entry in auctions {
+            by_weapon
+                .entry(entry.0.item.weapon_url_name.clone())
+                .or_default()
+                .push(entry);
+        }
+        let coverage = Coverage {
+            incomplete: true,
+            ..Coverage::default()
+        };
+        let mut summary = Summary {
+            auctions: 0,
+            fitted: 0,
+            skipped,
+            gone: 0,
+            complete: false,
+        };
+        for (slug, listings) in by_weapon {
+            let Some(weapon) = weapons.iter().find(|w| w.slug == slug) else {
+                continue;
+            };
+            let present: HashSet<String> = listings.iter().map(|(a, _)| a.id.clone()).collect();
+            let fresh: Vec<(Auction, String)> = listings
+                .into_iter()
+                .filter(|(a, _)| {
+                    a.market_price().is_some() && self.tracker.needs_row(&slug, a, raw.scraped_at)
+                })
+                .collect();
+            let (fitted, gone) = self.commit(
+                weapon,
+                raw,
+                &fresh,
+                &coverage,
+                &HashMap::new(),
+                &present,
+                sink,
+            )?;
+            summary.auctions += fresh.len();
+            summary.fitted += fitted;
+            summary.gone += gone;
+        }
+        Ok(summary)
+    }
+
+    /// Normalizes one weapon's listings and updates its tracking. Returns (fitted, gone).
+    #[allow(clippy::too_many_arguments)]
+    fn commit(
+        &mut self,
+        weapon: &Weapon,
+        raw: &RawResponse,
+        auctions: &[(Auction, String)],
+        coverage: &Coverage,
+        verified: &HashMap<String, bool>,
+        present: &HashSet<String>,
+        sink: &mut ParquetSink,
+    ) -> Result<(usize, usize)> {
         sink.prepare(raw.scraped_at)?;
         let before = sink.auctions.len();
         self.normalizer.normalize(
             weapon,
             &raw.platform,
             raw.scraped_at,
-            &auctions,
+            auctions,
             &mut self.registry,
             &mut sink.auctions,
             &mut sink.attributes,
@@ -141,6 +230,9 @@ impl Pipeline {
                         riven_id: r.riven_id.clone(),
                         price: r.price(),
                         buyout: r.buyout_price,
+                        top_bid: r.top_bid,
+                        updated: Some(r.updated),
+                        row_at: Some(raw.scraped_at),
                         direct_sell: r.is_direct_sell,
                         owner_name: r.owner_name.clone(),
                         created: r.created,
@@ -151,32 +243,21 @@ impl Pipeline {
             })
             .collect();
         let fitted = rows.iter().filter(|r| r.fit_ok).count();
-        let verified: HashMap<String, bool> = raw
-            .verified
-            .iter()
-            .map(|v| (v.auction_id.clone(), v.exists))
-            .collect();
         let gone = self.tracker.update_present(
             &weapon.slug,
             raw.scraped_at,
             current,
-            &coverage,
-            &verified,
-            &present,
+            coverage,
+            verified,
+            present,
         );
-        let summary = Summary {
-            auctions: auctions.len(),
-            fitted,
-            skipped,
-            gone: gone.len(),
-            complete: coverage.is_complete(),
-        };
+        let gone_count = gone.len();
         sink.gone.extend(gone);
         self.registry.flush()?;
         sink.checkpoint(
             std::path::PathBuf::from("seen").join(format!("{}.json", weapon.slug)),
             self.tracker.snapshot(&weapon.slug)?,
         );
-        Ok(summary)
+        Ok((fitted, gone_count))
     }
 }

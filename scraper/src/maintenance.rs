@@ -192,13 +192,10 @@ fn compact_group(
     Ok(())
 }
 
-fn prune_day(root: &Path, date: NaiveDate, now: DateTime<Utc>, report: &mut Report) -> Result<()> {
-    let relative = PathBuf::from("raw").join(date.to_string());
-    let directory = root.join(&relative);
-    let receipts_dir = directory.join(".committed");
-    let receipts = json_files(&receipts_dir)?;
+/// Names of the raw archives whose rows were durably published, per the given receipts.
+fn confirmed_archives(receipts: &[PathBuf]) -> Result<HashSet<String>> {
     let mut confirmed = HashSet::new();
-    for path in &receipts {
+    for path in receipts {
         let names: Vec<String> = serde_json::from_slice(&fs::read(path)?)
             .with_context(|| format!("reading raw receipt {}", path.display()))?;
         for name in names {
@@ -209,6 +206,69 @@ fn prune_day(root: &Path, date: NaiveDate, now: DateTime<Utc>, report: &mut Repo
             confirmed.insert(name);
         }
     }
+    Ok(confirmed)
+}
+
+/// When a feed archive was fetched, in unix ms. `None` for anything that isn't a feed archive.
+fn feed_archive_time(name: &str) -> Option<i64> {
+    let (id, time) = name.strip_suffix(".json.gz")?.rsplit_once('-')?;
+    wfmt_types::is_feed(id).then(|| time.parse().ok())?
+}
+
+/// Deletes committed feed archives older than `retention`, returning how many. They overlap
+/// heavily, so unlike weapon archives they aren't worth keeping for days. Receipts stay until
+/// their day is pruned, as they can also cover weapon archives. Deletions count towards
+/// [`RetentionState`], since the rows they produced can no longer be rebuilt either.
+pub fn prune_feeds(root: &Path, now: DateTime<Utc>, retention: TimeDelta) -> Result<u64> {
+    let _lock = DatasetLock::write(root)?;
+    let cutoff = (now - retention).timestamp_millis();
+    let mut expired = Vec::new();
+    for date in dated_dirs(&root.join("raw"), "")? {
+        let relative = PathBuf::from("raw").join(date.to_string());
+        let directory = root.join(&relative);
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&directory)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if feed_archive_time(&name).is_some_and(|t| t < cutoff) {
+                names.push(name);
+            }
+        }
+        if names.is_empty() {
+            continue;
+        }
+        let confirmed = confirmed_archives(&json_files(&directory.join(".committed"))?)?;
+        expired.extend(
+            names
+                .into_iter()
+                .filter(|name| confirmed.contains(name))
+                .map(|name| relative.join(name)),
+        );
+    }
+    if expired.is_empty() {
+        return Ok(0);
+    }
+    let deleted = expired.len() as u64;
+    let mut tx = Transaction::new(root)?;
+    for path in expired {
+        tx.delete(path);
+    }
+    let mut state = retention_state(root)?;
+    state.deleted_files += deleted;
+    state.last_cleanup_at = Some(now);
+    fs::write(
+        tx.stage("storage/raw-retention.json".into()),
+        serde_json::to_vec(&state)?,
+    )?;
+    tx.commit()?;
+    Ok(deleted)
+}
+
+fn prune_day(root: &Path, date: NaiveDate, now: DateTime<Utc>, report: &mut Report) -> Result<()> {
+    let relative = PathBuf::from("raw").join(date.to_string());
+    let directory = root.join(&relative);
+    let receipts_dir = directory.join(".committed");
+    let receipts = json_files(&receipts_dir)?;
+    let confirmed = confirmed_archives(&receipts)?;
     let mut tx = Transaction::new(root)?;
     let mut deleted = 0;
     let mut bytes = 0;
@@ -454,6 +514,45 @@ mod tests {
             Vec::new(),
             Vec::new(),
         ))
+    }
+
+    #[test]
+    fn feed_archives_expire_in_hours_only_once_committed() -> Result<()> {
+        let temp = TempRoot::new()?;
+        let root = &temp.0;
+        let store = Store::new(root.clone());
+        let mut sink = ParquetSink::new(root.join("parquet"));
+        let now: DateTime<Utc> = "2026-11-03T12:00:00Z".parse()?;
+        let expired = raw("2026-11-03T05:59:59Z", wfmt_types::FEED_RECENT)?;
+        let yesterday = raw("2026-11-02T23:00:00Z", wfmt_types::FEED_POPULAR)?;
+        let fresh = raw("2026-11-03T06:00:01Z", wfmt_types::FEED_RECENT)?;
+        let weapon = raw("2026-11-03T01:00:00Z", "kulstar")?;
+        let uncommitted = raw("2026-11-03T02:00:00Z", wfmt_types::FEED_POPULAR)?;
+        for raw in [&yesterday, &expired, &fresh, &weapon] {
+            store.save_raw(raw)?;
+            sink.prepare(raw.scraped_at)?;
+            sink.acknowledge_raw(raw);
+            sink.flush()?;
+        }
+        store.save_raw(&uncommitted)?;
+
+        assert_eq!(prune_feeds(root, now, TimeDelta::hours(6))?, 2);
+        let exists = |raw: &RawResponse| {
+            root.join("raw")
+                .join(raw.scraped_at.date_naive().to_string())
+                .join(raw.file_name())
+                .exists()
+        };
+        assert!(!exists(&expired) && !exists(&yesterday));
+        assert!(exists(&fresh), "still inside the window");
+        assert!(exists(&weapon), "weapon archives keep their own retention");
+        assert!(exists(&uncommitted), "still needed for crash recovery");
+        assert_eq!(retention_state(root)?.deleted_files, 2);
+        // A deleted archive stays committed, so a restart doesn't look for it.
+        assert_eq!(store.pending_raw()?.len(), 1);
+        assert_eq!(prune_feeds(root, now, TimeDelta::hours(6))?, 0);
+        assert_eq!(retention_state(root)?.deleted_files, 2);
+        Ok(())
     }
 
     #[test]

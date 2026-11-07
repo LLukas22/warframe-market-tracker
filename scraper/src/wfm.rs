@@ -162,6 +162,16 @@ impl Client {
         }
         self.get(&path).await
     }
+
+    /// Raw body of a site-wide feed. Same shape as a search, but mixes weapons and item types.
+    pub async fn feed_raw(&mut self, feed: &str) -> Result<String> {
+        let path = match feed {
+            wfmt_types::FEED_RECENT => "/v1/auctions",
+            wfmt_types::FEED_POPULAR => "/v1/auctions/popular",
+            _ => bail!("unknown feed {feed}"),
+        };
+        self.get(path).await
+    }
 }
 
 #[derive(Deserialize)]
@@ -274,6 +284,8 @@ pub struct Owner {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Riven {
+    #[serde(default)]
+    pub weapon_url_name: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]

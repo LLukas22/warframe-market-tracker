@@ -13,6 +13,17 @@ pub const LOCK_FILE: &str = "scraper/lock";
 /// The engine rewrites its status at least this often, so older status means it's not running.
 pub const HEARTBEAT_MS: i64 = 15_000;
 
+/// warframe.market's site-wide "most recent" listings. Feed ids name the raw archive, the fetch
+/// log entry and the `source` of the rows they produce.
+pub const FEED_RECENT: &str = "feed_recent";
+/// warframe.market's site-wide "popular" listings.
+pub const FEED_POPULAR: &str = "feed_popular";
+
+/// Whether an archive name, log entry or row source is a feed rather than a weapon search.
+pub fn is_feed(id: &str) -> bool {
+    id == FEED_RECENT || id == FEED_POPULAR
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     /// Start a sweep over every weapon now (ignored while a sweep runs).

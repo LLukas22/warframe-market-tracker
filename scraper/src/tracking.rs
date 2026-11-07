@@ -13,9 +13,13 @@ use anyhow::Result;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::wfm::Auction;
+
 /// warframe.market's page size for auction searches.
 pub const PAGE_CAP: usize = 100;
 pub const EXPIRE_AFTER: TimeDelta = TimeDelta::days(4);
+/// A listing a feed keeps returning unchanged still gets a row this often, to record its sightings.
+pub const FEED_ROW_REFRESH: TimeDelta = TimeDelta::hours(1);
 
 /// Search coverage hints. Price bounds describe observed pages, not proof of removal.
 #[derive(Clone, Debug, Default)]
@@ -79,6 +83,14 @@ pub struct Seen {
     /// What the search sorts on. Missing in state written before this field existed.
     #[serde(default)]
     pub buyout: Option<i64>,
+    /// These three are missing in state written before feeds; that only costs one extra row.
+    #[serde(default)]
+    pub top_bid: Option<i64>,
+    #[serde(default)]
+    pub updated: Option<DateTime<Utc>>,
+    /// When this auction last got a row in the dataset.
+    #[serde(default)]
+    pub row_at: Option<DateTime<Utc>>,
     pub direct_sell: bool,
     pub owner_name: String,
     pub created: DateTime<Utc>,
@@ -145,6 +157,18 @@ impl Tracker {
             self.weapons.insert(slug.to_owned(), loaded);
         }
         self.weapons.get_mut(slug).unwrap()
+    }
+
+    /// Whether a feed sighting is worth a row: the listing is new or edited, has a new bid, or
+    /// hasn't had a row for a while. Sightings without a row are lost with their raw archive.
+    pub fn needs_row(&mut self, weapon: &str, auction: &Auction, now: DateTime<Utc>) -> bool {
+        self.weapon(weapon).get(&auction.id).is_none_or(|s| {
+            s.price != auction.price()
+                || s.buyout != auction.buyout_price
+                || s.top_bid != auction.top_bid()
+                || s.updated != Some(auction.updated)
+                || s.row_at.is_none_or(|t| now - t >= FEED_ROW_REFRESH)
+        })
     }
 
     /// All absent auctions from incomplete coverage, regardless of their old prices.
@@ -271,6 +295,9 @@ mod tests {
             riven_id: "r".into(),
             price: Some(price),
             buyout: Some(price),
+            top_bid: None,
+            updated: None,
+            row_at: None,
             direct_sell: true,
             owner_name: "x".into(),
             created: at,

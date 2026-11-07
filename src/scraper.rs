@@ -390,6 +390,11 @@ fn RecentFetches(entries: Vec<FetchLog>, now: i64) -> Element {
 }
 
 fn weapon_name(slug: &str) -> String {
+    match slug {
+        wfmt_types::FEED_RECENT => return "Most recent feed".into(),
+        wfmt_types::FEED_POPULAR => return "Popular feed".into(),
+        _ => {}
+    }
     slug.split('_')
         .map(|word| {
             let mut chars = word.chars();
