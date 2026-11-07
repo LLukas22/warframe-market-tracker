@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 use crate::api::{self, HistoryPoint, StatEffect, attribute_name};
 use crate::ui::{format_date, format_plat};
 
-const W: f64 = 900.0;
+const INITIAL_WIDTH: f64 = 900.0;
 const H: f64 = 260.0;
 const LEFT: f64 = 56.0;
 const RIGHT: f64 = 16.0;
@@ -28,6 +28,9 @@ fn nice_axis(max: f64) -> (f64, f64) {
 #[component]
 pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
     let mut hovered = use_signal(|| None::<usize>);
+    let mut width = use_signal(|| INITIAL_WIDTH);
+    // Match SVG units to CSS pixels so labels and markers keep their proportions.
+    let w = width();
 
     if points.is_empty() {
         return rsx! { div { class: "chart empty", "No price history for this search yet." } };
@@ -43,7 +46,7 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
         .unwrap_or(1);
     let (y_max, y_step) = nice_axis(top as f64);
 
-    let x = move |t: i64| LEFT + (t - t0) as f64 / (t1 - t0) as f64 * (W - LEFT - RIGHT);
+    let x = move |t: i64| LEFT + (t - t0) as f64 / (t1 - t0) as f64 * (w - LEFT - RIGHT);
     let y = move |v: i64| TOP + (1.0 - v as f64 / y_max) * (H - TOP - BOTTOM);
 
     let line = |f: fn(&HistoryPoint) -> i64| {
@@ -72,16 +75,31 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
         .take_while(|v| *v <= y_max + 1e-9)
         .collect();
     let x_ticks: Vec<i64> = {
-        let n = points.len().min(6);
+        let capacity = ((w - LEFT - RIGHT) / 120.0).floor().clamp(2.0, 6.0) as usize;
+        let n = points.len().min(capacity);
         (0..n)
             .map(|i| points[i * (points.len() - 1) / (n - 1).max(1)].t)
             .collect()
     };
 
+    // One column per point, so a tap or hover anywhere near a point selects it.
+    let columns: Vec<(f64, f64)> = (0..points.len())
+        .map(|i| {
+            let middle = |a: usize, b: usize| (x(points[a].t) + x(points[b].t)) / 2.0;
+            let start = if i == 0 { LEFT } else { middle(i - 1, i) };
+            let end = if i + 1 == points.len() {
+                w - RIGHT
+            } else {
+                middle(i, i + 1)
+            };
+            (start, end)
+        })
+        .collect();
+
     let tooltip = hovered().and_then(|i| points.get(i)).map(|p| {
-        let left = x(p.t) / W * 100.0;
+        let left = x(p.t) / w * 100.0;
         rsx! {
-            div { class: "tooltip", style: "left: {left:.1}%",
+            div { class: "tooltip", style: "left: clamp(110px, {left:.1}%, calc(100% - 110px))",
                 div { class: "tooltip-date", "{format_date(p.t)}" }
                 div { "median {format_plat(p.median)}" }
                 div { "p25–p75 {format_plat(p.p25)} – {format_plat(p.p75)}" }
@@ -96,15 +114,22 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
 
     rsx! {
         div { class: "chart",
+            onresize: move |event| {
+                if let Ok(size) = event.get_content_box_size() {
+                    if size.width > LEFT + RIGHT && (size.width - width()).abs() > 0.5 {
+                        width.set(size.width);
+                    }
+                }
+            },
             svg {
-                view_box: "0 0 {W} {H}",
-                preserve_aspect_ratio: "none",
+                view_box: "0 0 {w} {H}",
+                preserve_aspect_ratio: "xMinYMin meet",
                 onmouseleave: move |_| hovered.set(None),
                 for v in y_ticks {
                     line {
                         class: "grid",
                         x1: "{LEFT}",
-                        x2: "{W - RIGHT}",
+                        x2: "{w - RIGHT}",
                         y1: "{y(v as i64)}",
                         y2: "{y(v as i64)}",
                     }
@@ -121,7 +146,7 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
                         class: "axis",
                         x: "{x(t)}",
                         y: "{H - 8.0}",
-                        text_anchor: "middle",
+                        text_anchor: if t == t0 { "start" } else if t == points.last().unwrap().t { "end" } else { "middle" },
                         "{format_date(t)}"
                     }
                 }
@@ -144,16 +169,27 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
                         cx: "{x(p.t)}",
                         cy: "{y(p.median)}",
                         r: "4",
+                    }
+                }
+                for (i, (start, end)) in columns.into_iter().enumerate() {
+                    rect {
+                        key: "hit-{i}",
+                        class: "hit",
+                        x: "{start:.1}",
+                        y: "{TOP}",
+                        width: "{(end - start).max(0.0):.1}",
+                        height: "{H - TOP - BOTTOM}",
                         onmouseenter: move |_| hovered.set(Some(i)),
+                        onclick: move |_| hovered.set(Some(i)),
                     }
                 }
             }
             {tooltip}
             div { class: "legend",
-                span { class: "swatch median" } "median"
-                span { class: "swatch band" } "25–75%"
-                span { class: "swatch min" } "cheapest"
-                span { class: "swatch gone" } "disappeared (≈ sold), size = count"
+                span { class: "legend-item", span { class: "swatch median" } "median" }
+                span { class: "legend-item", span { class: "swatch band" } "25–75%" }
+                span { class: "legend-item", span { class: "swatch min" } "cheapest" }
+                span { class: "legend-item", span { class: "swatch gone" } "disappeared (≈ sold), size = count" }
             }
         }
     }
@@ -241,36 +277,23 @@ pub fn StatEffectsPanel(weapon: String) -> Element {
     rsx! {
         div { class: "section-head",
             h2 { "Which stats are wanted" }
-            span { class: "muted small",
-                "from the asking prices of {data.rivens} verified rivens ({price_range})"
+            span {
+                class: "muted small",
+                title: "From asking prices, so these are associations rather than proven effects. Bars show the model's uncertainty. Stats on fewer than 5 rivens aren't shown.",
+                "{data.rivens} rivens · {price_range}"
             }
         }
         div { class: "effects",
             div { class: "effects-grid",
                 EffectGroup {
                     title: "Positive stats",
-                    note: "compared with rivens without the stat",
                     stats: data.positive.clone(),
                     scale,
                 }
                 EffectGroup {
                     title: "Negative stats",
-                    note: "compared with rivens without a negative",
                     stats: data.negative.clone(),
                     scale,
-                }
-            }
-            div { class: "legend",
-                span { class: "swatch effect-up" } "sellers ask more"
-                span { class: "swatch effect-down" } "sellers ask less"
-                span { class: "swatch effect-range-swatch" } "model uncertainty"
-            }
-            p { class: "muted small effects-note",
-                "Estimates describe associations in sampled asking prices. Stats that cannot be separated are marked unclear; ranges show approximate model uncertainty."
-            }
-            if data.rare_stats > 0 {
-                p { class: "muted small effects-note",
-                    "{data.rare_stats} stats on fewer than 5 rivens aren't shown."
                 }
             }
         }
@@ -278,7 +301,7 @@ pub fn StatEffectsPanel(weapon: String) -> Element {
 }
 
 #[component]
-fn EffectGroup(title: String, note: String, stats: Vec<StatEffect>, scale: f64) -> Element {
+fn EffectGroup(title: String, stats: Vec<StatEffect>, scale: f64) -> Element {
     let (clear, unclear): (Vec<StatEffect>, Vec<StatEffect>) =
         stats.iter().cloned().partition(|s| s.certain);
     let unclear_names = unclear
@@ -289,7 +312,6 @@ fn EffectGroup(title: String, note: String, stats: Vec<StatEffect>, scale: f64) 
     rsx! {
         section {
             h3 { "{title}" }
-            p { class: "muted small", "{note}" }
             if stats.is_empty() {
                 p { class: "muted small", "Too few rivens to tell." }
             } else if clear.is_empty() {
@@ -298,8 +320,8 @@ fn EffectGroup(title: String, note: String, stats: Vec<StatEffect>, scale: f64) 
                 div { class: "effect-axis muted small",
                     span {}
                     span { class: "effect-axis-labels",
-                        span { "lower price" }
-                        span { "higher price" }
+                        span { "lower" }
+                        span { "higher" }
                     }
                 }
                 ul { class: "effect-list",
@@ -310,7 +332,7 @@ fn EffectGroup(title: String, note: String, stats: Vec<StatEffect>, scale: f64) 
             }
             if !unclear.is_empty() {
                 details { class: "effect-unclear-list",
-                    summary { "{unclear.len()} with no clear effect" }
+                    summary { "{unclear.len()} unclear" }
                     p { class: "muted small", "{unclear_names}" }
                 }
             }
@@ -320,6 +342,8 @@ fn EffectGroup(title: String, note: String, stats: Vec<StatEffect>, scale: f64) 
 
 #[component]
 fn EffectRow(stat: StatEffect, scale: f64) -> Element {
+    // Touch screens have no title tooltips, so a tap shows the same text in the row.
+    let mut open = use_signal(|| false);
     let name = attribute_name(&stat.slug);
     let position = |effect: f64| (50.0 + effect.ln_1p() / scale * 50.0).clamp(0.0, 100.0);
     let (low, dot, high) = (
@@ -346,7 +370,7 @@ fn EffectRow(stat: StatEffect, scale: f64) -> Element {
         stat.rivens
     );
     rsx! {
-        li { class: "effect-row", title: "{tooltip}",
+        li { class: "effect-row", title: "{tooltip}", onclick: move |_| open.toggle(),
             span { class: "effect-name", "{name}" }
             span { class: "effect-track {kind}",
                 span {
@@ -354,6 +378,9 @@ fn EffectRow(stat: StatEffect, scale: f64) -> Element {
                     style: "left: {low:.2}%; width: {width:.2}%; --center: {center:.1}%",
                 }
                 span { class: "effect-dot", style: "left: {dot:.2}%" }
+            }
+            if open() {
+                span { class: "effect-detail", "{tooltip}" }
             }
         }
     }

@@ -167,6 +167,25 @@ pub fn App() -> Element {
     }
 }
 
+/// How many filters differ from the defaults. Sorting and chart buckets don't filter anything.
+fn active_filters(q: &Query) -> usize {
+    let d = Query::default();
+    q.positives.len()
+        + [
+            q.curse != d.curse,
+            q.direct_only != d.direct_only,
+            q.include_legacy != d.include_legacy,
+            q.include_unfit != d.include_unfit,
+            q.include_outliers != d.include_outliers,
+            q.min_quality != d.min_quality,
+            q.min_price != d.min_price,
+            q.max_price != d.max_price,
+        ]
+        .into_iter()
+        .filter(|changed| *changed)
+        .count()
+}
+
 #[component]
 fn MarketPage(overview: Overview, query: Signal<Query>, data_version: Signal<u64>) -> Element {
     let mut query = query;
@@ -187,6 +206,9 @@ fn MarketPage(overview: Overview, query: Signal<Query>, data_version: Signal<u64
         .and_then(|slug| overview.weapons.iter().find(|w| &w.slug == slug).cloned());
     let loading = results.pending() && shown_query().as_ref() != Some(&query());
     let riven_search = query.read().riven_id.clone();
+    // Only matters on narrow screens, where the filters would otherwise push the results down.
+    let mut filters_open = use_signal(|| false);
+    let filter_count = active_filters(&query.read());
 
     let body = match &*results.read() {
         Some(Ok(r)) => rsx! {
@@ -231,7 +253,19 @@ fn MarketPage(overview: Overview, query: Signal<Query>, data_version: Signal<u64
             {selected.as_ref().map(|w| format!("{} rivens · Riven Tracker", w.name)).unwrap_or_else(|| "Riven Tracker".into())}
         }
         main {
-            aside { Filters { overview: overview.clone(), query } }
+            aside { class: if filters_open() { "filters-open" } else { "" },
+                button {
+                    class: "filters-toggle",
+                    aria_expanded: filters_open(),
+                    onclick: move |_| filters_open.toggle(),
+                    span {
+                        "Filters"
+                        if filter_count > 0 { " · {filter_count} changed" }
+                    }
+                    span { class: "filters-toggle-icon", if filters_open() { "▴" } else { "▾" } }
+                }
+                Filters { overview: overview.clone(), query }
+            }
             section { class: if loading { "content loading" } else { "content" }, {body} }
         }
     }
@@ -756,7 +790,7 @@ fn ListingDetail(listing: Listing, url: String) -> Element {
                             "Listing history"
                         }
                     }
-                    table {
+                    table { class: "history-table",
                         thead {
                             tr {
                                 th { "Seller" }
@@ -833,7 +867,6 @@ fn RivenId(id: String, short: bool) -> Element {
             class: "riven-id",
             title: "Riven id {id}: the same for every listing of this riven",
             onclick: move |e| e.stop_propagation(),
-            onmouseleave: move |_| copied.set(false),
             code { "{shown}" }
             button {
                 class: if copied() { "copy copied" } else { "copy" },
@@ -842,6 +875,10 @@ fn RivenId(id: String, short: bool) -> Element {
                     e.stop_propagation();
                     document::eval(&script);
                     copied.set(true);
+                    spawn(async move {
+                        sleep_ms(1500).await;
+                        copied.set(false);
+                    });
                 },
                 if copied() { "copied" } else { "copy" }
             }

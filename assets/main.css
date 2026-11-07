@@ -14,6 +14,8 @@
   --radius: 10px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 * { box-sizing: border-box; }
@@ -66,7 +68,7 @@ header {
   font-variant-numeric: tabular-nums;
 }
 .auction-count strong { color: var(--text); font-weight: 600; }
-.auction-count:hover { color: var(--text); border-color: var(--border); }
+@media (hover: hover) { .auction-count:hover { color: var(--text); border-color: var(--border); } }
 .auction-count.active { border-color: var(--accent); }
 .live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--positive); vertical-align: 1px; animation: live-pulse 1.6s ease-in-out infinite; }
 @keyframes live-pulse { 50% { opacity: .3; } }
@@ -86,7 +88,7 @@ input[type="checkbox"] { width: auto; padding: 0; accent-color: var(--accent); }
 input[type="range"] { padding: 0; accent-color: var(--accent); }
 input:focus, select:focus { outline: none; border-color: var(--accent); }
 button { cursor: pointer; }
-button:hover { border-color: var(--accent); }
+@media (hover: hover) { button:hover { border-color: var(--accent); } }
 select.compact { padding: 5px 8px; font-size: 13px; }
 
 /* ---------- weapon picker ---------- */
@@ -173,6 +175,8 @@ aside {
   overflow-y: auto;
 }
 
+.filters-toggle { display: none; }
+
 .content { min-width: 0; display: flex; flex-direction: column; gap: 14px; transition: opacity .15s; }
 .content.loading { opacity: .55; pointer-events: none; }
 
@@ -247,7 +251,7 @@ button.reset { background: transparent; color: var(--muted); }
   cursor: pointer;
   transition: border-color .1s, transform .1s;
 }
-.weapon-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+@media (hover: hover) { .weapon-card:hover { border-color: var(--accent); transform: translateY(-1px); } }
 .weapon-card.empty { opacity: .5; }
 .weapon-card-name { font-weight: 600; margin-top: 6px; }
 .weapon-card-stats { margin-top: 4px; }
@@ -265,13 +269,14 @@ button.reset { background: transparent; color: var(--muted); }
 }
 .chart.empty { color: var(--muted); padding: 40px; text-align: center; }
 .chart svg { width: 100%; height: 260px; display: block; }
-.chart .grid { stroke: var(--border); stroke-width: 1; }
+.chart .grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .chart .axis { fill: var(--muted); font-size: 11px; }
 .chart .band { fill: color-mix(in srgb, var(--accent) 18%, transparent); }
 .chart .median-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .chart .min-line { fill: none; stroke: var(--positive); stroke-width: 1.5; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
-.chart .dot { fill: var(--bg); stroke: var(--accent); stroke-width: 2; cursor: pointer; }
+.chart .dot { fill: var(--bg); stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; pointer-events: none; }
 .chart .dot.active { fill: var(--accent); }
+.chart .hit { fill: transparent; cursor: pointer; }
 
 .tooltip {
   position: absolute;
@@ -289,6 +294,8 @@ button.reset { background: transparent; color: var(--muted); }
 .tooltip-date { font-weight: 600; margin-bottom: 4px; }
 
 .legend { display: flex; gap: 14px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 6px; }
+.chart .legend { flex-wrap: wrap; gap: 8px 14px; }
+.legend-item { display: inline-flex; align-items: center; }
 .swatch { display: inline-block; width: 14px; height: 3px; margin-right: 4px; vertical-align: middle; }
 .swatch.median { background: var(--accent); }
 .swatch.band { height: 10px; background: color-mix(in srgb, var(--accent) 30%, transparent); }
@@ -302,7 +309,7 @@ button.reset { background: transparent; color: var(--muted); }
 .effects, .effects-empty { padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
 .effects-empty { color: var(--muted); }
 .effects-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; }
-.effects h3 { margin: 0; }
+.effects h3 { margin: 0 0 6px; }
 .effects section > p { margin: 2px 0 10px; }
 .effect-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .effect-row, .effect-axis { display: grid; grid-template-columns: minmax(0, 15em) 1fr; gap: 10px; align-items: center; padding: 3px 4px; font-size: 13px; }
@@ -311,6 +318,8 @@ button.reset { background: transparent; color: var(--muted); }
 .effect-axis { padding-bottom: 0; font-size: 11px; }
 .effect-axis-labels { display: flex; justify-content: space-between; }
 .effect-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.effect-detail { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
+@media (hover: hover) { .effect-detail { display: none; } }
 .effect-track { position: relative; height: 12px; }
 .effect-track::before { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--border); }
 .effect-up { --effect: #9b74f0; }
@@ -318,13 +327,10 @@ button.reset { background: transparent; color: var(--muted); }
 .effect-range { position: absolute; top: 4px; height: 4px; opacity: .55; background: linear-gradient(to right, transparent, var(--effect) var(--center), transparent); }
 .effect-dot { position: absolute; top: 2px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--effect); box-shadow: 0 0 0 2px var(--panel); }
 .effect-row:hover .effect-dot { box-shadow: 0 0 0 2px var(--panel-2); }
-.swatch.effect-up, .swatch.effect-down { width: 8px; height: 8px; border-radius: 50%; background: var(--effect); }
-.swatch.effect-range-swatch { width: 18px; height: 4px; background: linear-gradient(to right, transparent, var(--muted), transparent); }
 .effect-unclear-list { margin-top: 8px; padding: 0 4px; font-size: 12px; color: var(--muted); }
 .effect-unclear-list summary { cursor: pointer; }
 .effect-unclear-list summary:hover { color: var(--text); }
 .effect-unclear-list p { margin: 4px 0 0; }
-.effects-note { margin: 8px 0 0; }
 
 /* ---------- listings ---------- */
 
@@ -332,7 +338,8 @@ button.reset { background: transparent; color: var(--muted); }
 
 .listings { display: flex; flex-direction: column; gap: 6px; }
 .listing { background: var(--panel); border: 1px solid var(--border); border-radius: 9px; }
-.listing:hover, .listing.open { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.listing.open { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+@media (hover: hover) { .listing:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); } }
 
 .listing-main {
   display: flex;
@@ -381,23 +388,6 @@ button.reset { background: transparent; color: var(--muted); }
 .detail-history h4 { margin: 0; font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
 .detail tr.current td { color: var(--accent); }
 .sparkline polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; }
-
-/* ---------- narrow screens ---------- */
-
-@media (max-width: 1100px) {
-  header { grid-template-columns: auto 1fr auto; }
-  main { grid-template-columns: 1fr; }
-  aside { position: static; max-height: none; }
-  .effects-grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  .name { width: 170px; }
-  .meta { width: 110px; }
-}
-
-@media (max-width: 600px) {
-  .auction-count-label { display: none; }
-  header { gap: 12px; padding: 10px 12px; }
-  .brand h1 { font-size: 15px; }
-}
 
 /* ---------- riven ids ---------- */
 
@@ -480,3 +470,132 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 .scraper-recent li { display: grid; grid-template-columns: 1fr auto 80px; gap: 16px; }
 .scraper-recent li > span:last-of-type { text-align: right; }
 .scraper-recent li p { grid-column: 1 / -1; overflow-wrap: anywhere; }
+
+/* ---------- narrow screens ---------- */
+/* Last in the file, so these win over the base rules of the same specificity. */
+
+@media (max-width: 1100px) {
+  header { grid-template-columns: auto minmax(0, 1fr) auto; }
+  main { grid-template-columns: minmax(0, 1fr); }
+  aside { position: static; max-height: none; padding: 0; overflow: visible; }
+  .filters-toggle {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 16px;
+    border: none;
+    background: transparent;
+    font-weight: 600;
+  }
+  .filters-toggle-icon { color: var(--muted); }
+  .filters { padding: 4px 16px 16px; }
+  aside:not(.filters-open) .filters { display: none; }
+  .effects-grid { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .name { width: 170px; }
+  .meta { width: 110px; }
+}
+
+@media (max-width: 760px) {
+  main { gap: 14px; padding: 12px 12px 40px; }
+  .section-head { flex-wrap: wrap; gap: 2px 12px; }
+  .link-button { text-align: left; }
+
+  .weapon-header { flex-wrap: wrap; gap: 12px 16px; padding: 12px; }
+  .weapon-img.lg { width: 64px; height: 64px; font-size: 20px; }
+  .weapon-header-title { flex: 1 1 0; min-width: 0; }
+  .weapon-header-title h2 { font-size: 18px; }
+  .kpis { flex: 0 0 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); gap: 10px 12px; }
+  .kpi { text-align: left; }
+  .kpi-value { font-size: 18px; }
+
+  /* Listing rows: price and summary on top, then the name and the stats at full width. */
+  .listing-main { flex-wrap: wrap; gap: 8px 12px; padding: 10px 12px; }
+  .price { order: 1; width: auto; }
+  .meta { order: 2; flex: 1 1 0; width: auto; min-width: 0; }
+  .name { order: 3; flex: 0 0 100%; width: 100%; }
+  .attrs { order: 4; flex: 0 0 100%; }
+  .riven-name { white-space: normal; }
+  .seller { display: block; text-overflow: ellipsis; }
+  .attr { grid-template-columns: 64px minmax(0, 1fr) 56px; gap: 8px; }
+
+  .detail { padding: 10px 12px; }
+  .detail-id { flex-wrap: wrap; gap: 6px 10px; }
+  .riven-id { max-width: 100%; }
+  .riven-id code { overflow-wrap: anywhere; }
+}
+
+@media (max-width: 600px) {
+  .fatal { padding: 40px 16px; }
+
+  /* Search box on its own row, the page title and auction count above it. */
+  header { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; padding: 8px 12px; }
+  .brand h1 { font-size: 15px; }
+  .picker { grid-column: 1 / -1; grid-row: 2; }
+  .picker-menu { max-height: 50vh; max-height: 50dvh; }
+  .auction-count { grid-column: 2; grid-row: 1; }
+  .auction-count-label { display: none; }
+
+  .grid-head { gap: 8px 12px; }
+  .grid-head select { margin-left: auto; }
+  .tabs { order: 3; flex: 0 0 100%; }
+  .weapon-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+
+  .effects { padding: 12px; }
+  .effect-row, .effect-axis { grid-template-columns: minmax(0, 10em) minmax(0, 1fr); gap: 8px; }
+  .effect-name { white-space: normal; }
+
+  .id-banner { flex-wrap: wrap; gap: 4px 10px; padding: 10px 12px; }
+  .id-banner code { overflow-wrap: anywhere; min-width: 0; }
+
+  /* The history table has too many columns for a phone: one block per auction instead. */
+  .history-table, .history-table tbody { display: block; }
+  .history-table thead { display: none; }
+  .history-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 8px 0; border-top: 1px solid var(--border); }
+  .detail .history-table td { padding: 0; }
+  .detail .history-table td:nth-child(1) { font-weight: 600; overflow-wrap: anywhere; }
+  .detail .history-table td:nth-child(2) { grid-row: 2; grid-column: 1 / -1; color: var(--muted); }
+  .detail .history-table td:nth-child(2)::before { content: "listed "; }
+  .detail .history-table td:nth-child(3) { grid-row: 1; grid-column: 2; text-align: right; }
+  .detail .history-table td:nth-child(4) { grid-row: 4; grid-column: 1 / -1; }
+  .detail .history-table td:nth-child(5) { grid-row: 3; grid-column: 1 / -1; }
+  .detail td, .detail th { padding-right: 8px; }
+
+  .scraper-page { padding: 16px 12px 40px; }
+  .scraper-card { padding: 12px; }
+  .scraper-recent { padding: 0 12px; }
+  .scraper-recent li { gap: 10px; grid-template-columns: minmax(0, 1fr) auto auto; }
+}
+
+/* Phones held sideways: a sticky header would cover too much of the page. */
+@media (max-height: 500px) {
+  header { position: relative; }
+}
+
+/* ---------- touch ---------- */
+
+@media (pointer: coarse) {
+  /* iOS zooms the page when focusing a field with text under 16px. */
+  input, select, select.compact, .picker-box input { font-size: 16px; }
+  input:not([type="checkbox"], [type="range"]), select { min-height: 40px; }
+  input[type="checkbox"] { flex: none; width: 20px; height: 20px; }
+  input[type="range"] { height: 32px; }
+
+  .filter-group label.check { min-height: 36px; }
+  .brand button, .auction-count { min-height: 36px; }
+  .tab { padding: 8px 12px; font-size: 13px; }
+  .chip button { min-width: 32px; min-height: 28px; font-size: 16px; }
+  .picker-clear { min-width: 40px; min-height: 40px; }
+  .riven-id .copy { padding: 4px 10px; }
+  .link-button { padding: 8px 0; font-size: 13px; }
+  .scraper-action, .show-all, button.reset { min-height: 40px; }
+  .effect-unclear-list summary, .scraper-recent summary { padding: 8px 0; }
+}
+
+@media (hover: none) {
+  /* Nothing to hover on: always show what hovering reveals. */
+  .riven-id .copy { opacity: 1; }
+  /* Without this, iOS doesn't send taps on plain elements up to the app's event listener. */
+  .effect-row { cursor: pointer; }
+}
