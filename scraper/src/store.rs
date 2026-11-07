@@ -240,6 +240,9 @@ fn default_complete() -> bool {
 #[derive(Serialize, Deserialize)]
 pub struct RawPage {
     pub sort_by: String,
+    /// Search scope; absent in archives made before supplemental direct-sale sampling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buyout_policy: Option<String>,
     pub body: String,
 }
 
@@ -286,6 +289,7 @@ impl RawResponse {
             && raw.pages.is_empty()
         {
             raw.pages.push(RawPage {
+                buyout_policy: None,
                 sort_by: "price_asc".into(),
                 body,
             });

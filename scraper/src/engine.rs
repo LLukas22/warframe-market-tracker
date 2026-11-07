@@ -471,7 +471,11 @@ impl Engine {
             self.set_step(format!("{sort_by} page"));
             match self.client.auctions_raw(&weapon.slug, &sort_by).await {
                 Ok(body) => {
-                    raw.pages.push(RawPage { sort_by, body });
+                    raw.pages.push(RawPage {
+                        sort_by,
+                        buyout_policy: None,
+                        body,
+                    });
                     self.processing = true;
                     self.archive_progress(&raw)?;
                     self.processing = false;
@@ -494,6 +498,44 @@ impl Engine {
             return Err(
                 fetch_error.unwrap_or_else(|| anyhow::anyhow!("no search sort orders configured"))
             );
+        }
+        // Null buyouts sort before expensive buyouts on descending pages. On popular
+        // weapons they can occupy the entire cap, starving price analysis of good rolls.
+        let needs_buyouts = raw.pages.iter().any(|page| {
+            page.sort_by == "price_desc"
+                && wfm::parse_auctions(&page.body).is_ok_and(|(auctions, skipped)| {
+                    auctions.len() + skipped >= PAGE_CAP
+                        && auctions.iter().any(|a| a.buyout_price.is_none())
+                })
+        });
+        if fetch_error.is_none() && needs_buyouts {
+            // The API separates direct sales from bidding auctions with buyouts.
+            for policy in ["direct", "with"] {
+                self.set_step(format!("price_desc {policy} buyout page"));
+                match self
+                    .client
+                    .auctions_raw_scoped(&weapon.slug, "price_desc", Some(policy))
+                    .await
+                {
+                    Ok(body) => {
+                        raw.pages.push(RawPage {
+                            sort_by: "price_desc".into(),
+                            buyout_policy: Some(policy.into()),
+                            body,
+                        });
+                        self.processing = true;
+                        self.archive_progress(&raw)?;
+                        self.processing = false;
+                        if let Err(e) = wfm::parse_auctions(&raw.pages.last().unwrap().body) {
+                            fetch_error = Some(e);
+                        }
+                    }
+                    Err(e) => fetch_error = Some(e),
+                }
+                if fetch_error.is_some() {
+                    break;
+                }
+            }
         }
         raw.complete = fetch_error.is_none();
         if raw.complete && self.args.verify_missing > 0 {
@@ -889,6 +931,119 @@ mod tests {
         fs::remove_dir_all(root)?;
         Ok(())
     }
+    #[tokio::test]
+    async fn capped_null_buyouts_fetch_direct_sales_without_claiming_full_coverage() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("wfmt-direct-{}", crate::dataset::unique_id()));
+        let store = Store::new(root.clone());
+        store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
+        let mut engine = Engine::new(
+            root.clone(),
+            "2026-10-22T00:00:00Z".parse()?,
+            options(false),
+        )?;
+        let mut body = String::new();
+        flate2::read::GzDecoder::new(
+            &include_bytes!("../tests/fixtures/kulstar_auctions.json.gz")[..],
+        )
+        .read_to_string(&mut body)?;
+        let cheap: serde_json::Value = serde_json::from_str(&body)?;
+        let mut bids = cheap.clone();
+        for (i, auction) in bids["payload"]["auctions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            auction["id"] = format!("bid-{i}").into();
+            auction["buyout_price"] = serde_json::Value::Null;
+            auction["top_bid"] = serde_json::Value::Null;
+            auction["is_direct_sell"] = false.into();
+        }
+        let mut high = cheap["payload"]["auctions"][0].clone();
+        high["id"] = "expensive-direct".into();
+        high["starting_price"] = 5000.into();
+        high["buyout_price"] = 5000.into();
+        high["is_direct_sell"] = true.into();
+        let mut buyout = high.clone();
+        buyout["id"] = "expensive-buyout-auction".into();
+        buyout["is_direct_sell"] = false.into();
+        let direct = serde_json::json!({"payload": {"auctions": [high]}});
+        let with_buyout = serde_json::json!({"payload": {"auctions": [buyout]}});
+        bids["payload"]["auctions"][0]["top_bid"] = 1250.into();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        engine
+            .client
+            .set_api(format!("http://{}", listener.local_addr()?));
+        let server = std::thread::spawn(move || -> Result<()> {
+            for (i, response) in [cheap, bids, direct, with_buyout].iter().enumerate() {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut request = Vec::new();
+                let mut buf = [0; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf)?;
+                    anyhow::ensure!(n > 0, "request ended before headers");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let request = String::from_utf8(request)?;
+                assert_eq!(request.contains("buyout_policy=direct"), i == 2);
+                assert_eq!(request.contains("buyout_policy=with"), i == 3);
+                assert!(request.contains(if i == 0 {
+                    "sort_by=price_asc"
+                } else {
+                    "sort_by=price_desc"
+                }));
+                let response = response.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    response.len()
+                )?;
+            }
+            Ok(())
+        });
+        engine.fetch(&engine.weapons[0].clone()).await?;
+        server.join().unwrap()?;
+        assert_eq!(engine.client.requests(), 4);
+        assert!(
+            engine
+                .sink
+                .auctions
+                .iter()
+                .any(|a| a.auction_id == "expensive-direct" && a.buyout_price == Some(5000))
+        );
+        let raw = RawResponse::read(&store.raw_files()?[0])?;
+        assert!(raw.complete);
+        assert_eq!(raw.pages.len(), 4);
+        assert_eq!(raw.pages[2].buyout_policy.as_deref(), Some("direct"));
+        assert_eq!(raw.pages[3].buyout_policy.as_deref(), Some("with"));
+        assert!(
+            engine
+                .sink
+                .auctions
+                .iter()
+                .any(|a| a.auction_id == "bid-0" && a.top_bid == Some(1250))
+        );
+        assert!(!engine.sink.auctions.iter().any(|a| a.auction_id == "bid-1"));
+        assert!(
+            engine
+                .sink
+                .auctions
+                .iter()
+                .any(|a| a.auction_id == "expensive-buyout-auction" && !a.is_direct_sell)
+        );
+        let parsed = crate::pipeline::parse_pages(&raw.pages)?;
+        assert!(
+            !parsed.coverage.is_complete(),
+            "a short direct-sale page cannot remove unseen bidding auctions"
+        );
+        assert!(!parsed.coverage.no_buyout);
+        assert_eq!(parsed.auctions.len(), 202);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn no_raw_commits_tracking_before_fetch_returns() -> Result<()> {
         let root =

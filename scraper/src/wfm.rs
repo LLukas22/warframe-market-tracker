@@ -145,10 +145,22 @@ impl Client {
 
     /// Raw riven auction search body for one weapon.
     pub async fn auctions_raw(&mut self, weapon: &str, sort_by: &str) -> Result<String> {
-        self.get(&format!(
-            "/v1/auctions/search?type=riven&weapon_url_name={weapon}&sort_by={sort_by}"
-        ))
-        .await
+        self.auctions_raw_scoped(weapon, sort_by, None).await
+    }
+
+    /// Filtered pages supplement the ordinary search; they cannot establish full coverage.
+    pub async fn auctions_raw_scoped(
+        &mut self,
+        weapon: &str,
+        sort_by: &str,
+        buyout_policy: Option<&str>,
+    ) -> Result<String> {
+        let mut path =
+            format!("/v1/auctions/search?type=riven&weapon_url_name={weapon}&sort_by={sort_by}");
+        if let Some(policy) = buyout_policy {
+            path.push_str(&format!("&buyout_policy={policy}"));
+        }
+        self.get(&path).await
     }
 }
 
@@ -232,6 +244,13 @@ pub struct Auction {
 impl Auction {
     pub fn top_bid(&self) -> Option<i64> {
         self.top_bid.as_ref().and_then(|v| v.as_i64())
+    }
+
+    /// A positive seller buyout, otherwise an actual positive bid (excluding starting prices).
+    pub fn market_price(&self) -> Option<i64> {
+        self.buyout_price
+            .filter(|p| *p > 0)
+            .or_else(|| self.top_bid().filter(|p| *p > 0))
     }
 
     /// The price a buyer pays: buyout, else the current bid, else the starting bid.

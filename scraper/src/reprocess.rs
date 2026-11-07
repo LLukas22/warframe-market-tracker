@@ -204,6 +204,7 @@ mod tests {
             "kulstar".into(),
             "pc".into(),
             vec![RawPage {
+                buyout_policy: None,
                 sort_by: "price_asc".into(),
                 body: r#"{"payload":{"auctions":[]}}"#.into(),
             }],

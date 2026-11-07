@@ -790,6 +790,7 @@ mod storage_tests {
                 "kulstar".into(),
                 "pc".into(),
                 vec![RawPage {
+                    buyout_policy: None,
                     sort_by: "price_asc".into(),
                     body: body.clone(),
                 }],
@@ -825,6 +826,7 @@ mod storage_tests {
             "kulstar".into(),
             "pc".into(),
             vec![RawPage {
+                buyout_policy: None,
                 sort_by: "price_asc".into(),
                 body,
             }],

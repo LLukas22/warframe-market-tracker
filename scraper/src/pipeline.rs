@@ -50,7 +50,10 @@ pub fn parse_pages(pages: &[RawPage]) -> Result<Pages> {
         let mut buyouts: Vec<Option<i64>> = auctions.iter().map(|a| a.buyout_price).collect();
         // Malformed entries still count towards the page cap.
         buyouts.extend(std::iter::repeat_n(None, bad));
-        coverage.add_page(&page.sort_by, &buyouts);
+        // A filtered page says nothing about auctions outside its search scope, even if short.
+        if page.buyout_policy.is_none() {
+            coverage.add_page(&page.sort_by, &buyouts);
+        }
         for auction in auctions {
             match index.get(&auction.id) {
                 Some(&i) => {
@@ -93,12 +96,29 @@ impl Pipeline {
         sink: &mut ParquetSink,
     ) -> Result<Summary> {
         let Pages {
-            auctions,
+            mut auctions,
             mut coverage,
             skipped,
             present,
         } = parse_pages(&raw.pages)?;
         coverage.incomplete |= !raw.complete;
+        // Count the full response for coverage and presence first: discarding unpriced rows
+        // must not turn a capped page into proof that missing auctions have disappeared.
+        // Deduplication happens in parse_pages, so listings returned by several searches
+        // contribute only once. Starting-only listings never influence their own benchmark.
+        let (sum, count) = auctions
+            .iter()
+            .filter_map(|(a, _)| a.market_price())
+            .fold((0i128, 0i128), |(sum, count), p| {
+                (sum + i128::from(p), count + 1)
+            });
+        auctions.retain(|(auction, _)| {
+            auction.market_price().is_some()
+                || (count > 0
+                    && auction
+                        .starting_price
+                        .is_some_and(|p| p > 1 && i128::from(p) * count > sum))
+        });
         sink.prepare(raw.scraped_at)?;
         let before = sink.auctions.len();
         self.normalizer.normalize(

@@ -98,6 +98,7 @@ fn restart_replays_uncommitted_gone_with_tracking_and_does_not_duplicate_history
             "kulstar".into(),
             "pc".into(),
             vec![RawPage {
+                buyout_policy: None,
                 sort_by: "price_asc".into(),
                 body: serde_json::json!({"payload":{"auctions":auctions}}).to_string(),
             }],
@@ -161,6 +162,7 @@ fn malformed_present_id_is_preserved_and_unknown_ids_do_not_infer_absence() -> R
             "kulstar".into(),
             "pc".into(),
             vec![RawPage {
+                buyout_policy: None,
                 sort_by: "price_asc".into(),
                 body: serde_json::json!({"payload":{"auctions":auctions}}).to_string(),
             }],
@@ -185,6 +187,115 @@ fn malformed_present_id_is_preserved_and_unknown_ids_do_not_infer_absence() -> R
         serde_json::from_slice(&fs::read(store.seen_dir().join("kulstar.json"))?)?;
     assert!(seen.get(a["id"].as_str().unwrap()).is_some());
     assert!(seen.get("second").is_some());
+    Ok(())
+}
+
+#[test]
+fn starting_only_prices_must_exceed_the_mean_without_causing_false_sales() -> Result<()> {
+    let root = Temp::new();
+    let store = Store::new(root.0.clone());
+    let weapon =
+        wfmt_scraper::wfm::parse_weapons(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?
+            .remove(0);
+    let mut pipeline = Pipeline {
+        normalizer: Normalizer::new("2026-10-22T00:00:00Z".parse()?),
+        registry: Registry::open(store.registry_path())?,
+        tracker: Tracker::open(store.seen_dir()),
+    };
+    let mut sink = ParquetSink::new(root.0.join("parquet"));
+    let t = Utc::now();
+    let raw = |at, auctions| {
+        RawResponse::new(
+            at,
+            "kulstar".into(),
+            "pc".into(),
+            vec![RawPage {
+                sort_by: "price_asc".into(),
+                buyout_policy: None,
+                body: serde_json::json!({"payload": {"auctions": auctions}}).to_string(),
+            }],
+            vec![],
+        )
+    };
+    let mut original = fixture();
+    original["buyout_price"] = 500.into();
+    pipeline.process(&weapon, &raw(t, vec![original.clone()]), &mut sink)?;
+    sink.flush()?;
+    original["buyout_price"] = serde_json::Value::Null;
+    original["top_bid"] = serde_json::Value::Null;
+    original["starting_price"] = 1.into();
+    let mut bid = original.clone();
+    bid["id"] = "actual-bid".into();
+    bid["top_bid"] = 250.into();
+    let mut buyout = original.clone();
+    buyout["id"] = "auction-buyout".into();
+    buyout["buyout_price"] = 750.into();
+    buyout["is_direct_sell"] = false.into();
+    let mut zero = original.clone();
+    zero["id"] = "zero-price".into();
+    zero["buyout_price"] = 0.into();
+    zero["top_bid"] = 0.into();
+    zero["starting_price"] = 0.into();
+    let mut below = original.clone();
+    below["id"] = "below-average".into();
+    below["starting_price"] = 499.into();
+    let mut equal = original.clone();
+    equal["id"] = "equal-average".into();
+    equal["starting_price"] = 500.into();
+    let mut above = original.clone();
+    above["id"] = "above-average".into();
+    above["starting_price"] = 501.into();
+    let duplicate_bid = bid.clone();
+    let mut next = raw(
+        t + TimeDelta::days(5),
+        vec![
+            original.clone(),
+            bid,
+            buyout,
+            zero,
+            below,
+            equal,
+            above.clone(),
+        ],
+    );
+    next.pages.push(RawPage {
+        sort_by: "price_desc".into(),
+        buyout_policy: None,
+        body: serde_json::json!({"payload": {"auctions": [duplicate_bid]}}).to_string(),
+    });
+    let summary = pipeline.process(&weapon, &next, &mut sink)?;
+    assert_eq!(summary.auctions, 3);
+    assert_eq!(
+        summary.gone, 0,
+        "a listing losing its price is still present"
+    );
+    assert_eq!(sink.auctions.len(), 3);
+    assert!(
+        sink.auctions
+            .iter()
+            .any(|a| a.auction_id == "actual-bid" && a.top_bid == Some(250))
+    );
+    assert!(
+        sink.auctions
+            .iter()
+            .any(|a| a.auction_id == "auction-buyout" && a.buyout_price == Some(750))
+    );
+    sink.flush()?;
+    let seen: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.seen_dir().join("kulstar.json"))?)?;
+    assert!(seen.get(original["id"].as_str().unwrap()).is_some());
+    assert!(seen.get("zero-price").is_none());
+    assert!(seen.get("below-average").is_none());
+    assert!(seen.get("equal-average").is_none());
+    assert!(seen.get("above-average").is_some());
+    // A starting price cannot set its own benchmark when no buyouts or bids were fetched.
+    let summary = pipeline.process(
+        &weapon,
+        &raw(t + TimeDelta::days(6), vec![above]),
+        &mut sink,
+    )?;
+    assert_eq!(summary.auctions, 0);
+    assert!(sink.auctions.is_empty());
     Ok(())
 }
 
