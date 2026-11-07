@@ -19,7 +19,8 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 
 use crate::api::{
     AttrInfo, AttrView, CurseFilter, HistoryPoint, Listing, Overview, PricePoint, Query,
-    RivenAuction, SearchResult, Sort, StatEffect, StatEffects, WeaponInfo,
+    RivenAuction, RivenDetail, SearchResult, SimilarRiven, Sort, StatEffect, StatEffects,
+    WeaponInfo,
 };
 use crate::effects;
 
@@ -397,6 +398,64 @@ struct GoneEvent {
     direct_sell: bool,
 }
 
+/// Stat overlap dominates roll closeness; prices and raw percentages never affect rank.
+#[derive(Debug)]
+struct Similarity {
+    shared: usize,
+    missing: Vec<u16>,
+    added: Vec<u16>,
+    same_negative: bool,
+    roll_distance: Option<f64>,
+}
+
+fn similarity(a: &Auction, b: &Auction) -> Option<Similarity> {
+    let stats = |a: &Auction, positive| {
+        a.attrs
+            .iter()
+            .filter(|x| x.positive == positive)
+            .map(|x| x.attr)
+            .collect::<HashSet<_>>()
+    };
+    let positives = stats(a, true);
+    let other_positives = stats(b, true);
+    let shared = positives.intersection(&other_positives).count();
+    if shared == 0 {
+        return None;
+    }
+    let mut missing: Vec<_> = positives.difference(&other_positives).copied().collect();
+    let mut added: Vec<_> = other_positives.difference(&positives).copied().collect();
+    missing.sort_unstable();
+    added.sort_unstable();
+    let same_negative = stats(a, false) == stats(b, false);
+    let roll_distance = if a.fit_ok && b.fit_ok {
+        a.attrs
+            .iter()
+            .filter_map(|x| {
+                b.attrs
+                    .iter()
+                    .find(|y| y.attr == x.attr && y.positive == x.positive)
+                    .map(|y| {
+                        x.quality
+                            .zip(y.quality)
+                            .filter(|(x, y)| x.is_finite() && y.is_finite())
+                            .map(|(x, y)| (x - y).abs())
+                    })
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|values| !values.is_empty())
+            .map(|values| values.iter().sum::<f64>() / values.len() as f64)
+    } else {
+        None
+    };
+    Some(Similarity {
+        shared,
+        missing,
+        added,
+        same_negative,
+        roll_distance,
+    })
+}
+
 fn price_of(buyout: Option<i64>, top_bid: Option<i64>, starting: Option<i64>) -> Option<i64> {
     buyout.or(top_bid).or(starting)
 }
@@ -487,6 +546,322 @@ mod storage_tests {
             direct_sell: true,
         });
         index
+    }
+
+    fn comparison_auction(
+        inner: &mut Inner,
+        weapon: u16,
+        id: &str,
+        quality: Option<f64>,
+        negative: Option<u16>,
+        time: i64,
+    ) -> u32 {
+        let index = add_auction(inner, weapon, id, 100, time);
+        let critical = inner.intern_attr("critical_chance");
+        let damage = inner.intern_attr("critical_damage");
+        inner.auctions[index as usize].attrs = [(critical, true), (damage, true)]
+            .into_iter()
+            .chain(negative.map(|n| (n, false)))
+            .map(|(attr, positive)| Attr {
+                attr,
+                positive,
+                value: 100.0,
+                value_rank8: Some(100.0),
+                quality,
+            })
+            .collect();
+        index
+    }
+
+    #[test]
+    fn comparisons_rank_stats_then_normalized_rolls_and_ignore_price_and_rank() {
+        let mut inner = Inner::default();
+        let weapon = inner.intern_weapon("w", "W", "rifle");
+        let zoom = inner.intern_attr("zoom");
+        let recoil = inner.intern_attr("recoil");
+        let source = comparison_auction(&mut inner, weapon, "source", Some(0.5), Some(zoom), 1000);
+        comparison_auction(
+            &mut inner,
+            weapon,
+            "different-negative",
+            Some(0.5),
+            Some(recoil),
+            5000,
+        );
+        comparison_auction(&mut inner, weapon, "far", Some(0.9), Some(zoom), 4000);
+        let near = comparison_auction(&mut inner, weapon, "near", Some(0.51), Some(zoom), 2000);
+        inner.auctions[near as usize].rank = Some(0);
+        inner.auctions[near as usize].attrs[0].value = 10.0;
+        inner.auctions[near as usize].buyout_price = Some(999999);
+        comparison_auction(&mut inner, weapon, "unknown", None, Some(zoom), 6000);
+        comparison_auction(&mut inner, weapon, "no-negative", Some(0.5), None, 7000);
+        let incompatible = comparison_auction(
+            &mut inner,
+            weapon,
+            "other-positives",
+            Some(0.5),
+            Some(zoom),
+            1000,
+        );
+        inner.auctions[incompatible as usize].attrs.remove(0);
+        let detail = inner
+            .riven_detail("source", None, false, false, false)
+            .unwrap();
+        let ids: Vec<_> = detail
+            .similar
+            .iter()
+            .map(|m| m.listing.auction_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "near",
+                "far",
+                "unknown",
+                "different-negative",
+                "no-negative"
+            ]
+        );
+        assert!(detail.similar[0].roll_distance.unwrap() < 0.011);
+        assert_eq!(detail.similar[2].roll_distance, None);
+        inner.auctions[source as usize].fit_ok = false;
+        assert!(
+            inner
+                .riven_detail("source", None, false, false, false)
+                .unwrap()
+                .similar
+                .iter()
+                .all(|m| m.roll_distance.is_none())
+        );
+    }
+
+    #[test]
+    fn partial_matches_rank_overlap_before_curse_quality_and_recency() {
+        let mut inner = Inner::default();
+        let weapon = inner.intern_weapon("w", "W", "rifle");
+        let zoom = inner.intern_attr("zoom");
+        let recoil = inner.intern_attr("recoil");
+        let toxin = inner.intern_attr("toxin_damage");
+        let heat = inner.intern_attr("heat_damage");
+        let extra = |attr, quality| Attr {
+            attr,
+            positive: true,
+            value: 100.0,
+            value_rank8: Some(100.0),
+            quality,
+        };
+        let source = comparison_auction(&mut inner, weapon, "source", Some(0.5), Some(zoom), 1000);
+        inner.auctions[source as usize]
+            .attrs
+            .push(extra(toxin, Some(0.5)));
+        let exact = comparison_auction(&mut inner, weapon, "exact", Some(0.9), Some(zoom), 1000);
+        inner.auctions[exact as usize]
+            .attrs
+            .push(extra(toxin, Some(0.9)));
+        let curse = comparison_auction(
+            &mut inner,
+            weapon,
+            "different-curse",
+            Some(0.5),
+            Some(recoil),
+            1000,
+        );
+        inner.auctions[curse as usize]
+            .attrs
+            .push(extra(toxin, Some(0.5)));
+        comparison_auction(&mut inner, weapon, "subset", None, Some(recoil), 1000);
+        let swap = comparison_auction(&mut inner, weapon, "swap", Some(0.5), Some(zoom), 5000);
+        inner.auctions[swap as usize]
+            .attrs
+            .push(extra(heat, Some(0.5)));
+        let loose = comparison_auction(&mut inner, weapon, "loose", Some(0.5), Some(zoom), 6000);
+        inner.auctions[loose as usize].attrs[0].attr = heat;
+        let unrelated =
+            comparison_auction(&mut inner, weapon, "unrelated", Some(0.5), Some(zoom), 6000);
+        // Negative critical chance is not a matching positive critical chance.
+        inner.auctions[unrelated as usize].attrs[0].positive = false;
+        inner.auctions[unrelated as usize].attrs[1].attr = heat;
+        let normal = inner
+            .riven_detail("source", None, false, false, false)
+            .unwrap();
+        let ids = |result: &RivenDetail| {
+            result
+                .similar
+                .iter()
+                .map(|m| m.listing.auction_id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&normal), ["exact", "different-curse", "subset", "swap"]);
+        let subset = &normal.similar[2];
+        assert_eq!(subset.shared_positives, 2);
+        assert_eq!(subset.missing_positives, ["toxin_damage"]);
+        assert!(subset.added_positives.is_empty());
+        assert_eq!(subset.roll_distance, None);
+        assert_eq!(normal.similar[3].added_positives, ["heat_damage"]);
+        assert_eq!(normal.similar[3].missing_positives, ["toxin_damage"]);
+        let broad = inner
+            .riven_detail("source", None, false, false, true)
+            .unwrap();
+        assert_eq!(
+            ids(&broad),
+            ["exact", "different-curse", "subset", "swap", "loose"]
+        );
+        assert_eq!(broad.similar.last().unwrap().shared_positives, 1);
+        // The reverse comparison also admits supersets, even with unavailable quality.
+        let reverse = inner
+            .riven_detail("subset", None, false, false, false)
+            .unwrap();
+        let superset = reverse
+            .similar
+            .iter()
+            .find(|m| m.listing.auction_id == "source")
+            .unwrap();
+        assert!(superset.missing_positives.is_empty());
+        assert_eq!(superset.added_positives, ["toxin_damage"]);
+        assert_eq!(superset.shared_positives, 2);
+    }
+
+    #[test]
+    fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() {
+        let mut inner = Inner::default();
+        let weapon = inner.intern_weapon("w", "W", "rifle");
+        let other_weapon = inner.intern_weapon("other", "Other", "rifle");
+        comparison_auction(&mut inner, weapon, "source", Some(0.5), None, 1000);
+        let old = comparison_auction(&mut inner, weapon, "old", Some(0.5), None, 1000);
+        let new = comparison_auction(&mut inner, weapon, "new", Some(0.6), None, 2000);
+        let riven = inner.auctions[old as usize].riven;
+        let old_new_riven = inner.auctions[new as usize].riven;
+        inner.riven_auctions[old_new_riven as usize].clear();
+        inner.auctions[new as usize].riven = riven;
+        inner.riven_auctions[riven as usize].push(new);
+        inner.auctions[new as usize].gone = Some((3000, "missing".into()));
+        comparison_auction(
+            &mut inner,
+            other_weapon,
+            "wrong-weapon",
+            Some(0.5),
+            None,
+            1000,
+        );
+        let legacy = comparison_auction(&mut inner, weapon, "legacy", Some(0.5), None, 1000);
+        inner.auctions[legacy as usize].legacy_stats = Some(true);
+        let unfit = comparison_auction(&mut inner, weapon, "unfit", Some(0.5), None, 1000);
+        inner.auctions[unfit as usize].fit_ok = false;
+        let result = inner
+            .riven_detail("source", None, false, false, false)
+            .unwrap();
+        assert_eq!(result.similar_total, 1);
+        assert_eq!(result.comparisons_hidden, 2);
+        assert_eq!(result.similar[0].listing.auction_id, "new");
+        assert_eq!(result.similar[0].listing.gone_at, Some(3000));
+        assert_eq!(result.similar[0].listing.copies, 2);
+        assert_eq!(
+            inner
+                .riven_detail("source", None, true, true, false)
+                .unwrap()
+                .similar_total,
+            3
+        );
+        assert!(
+            inner
+                .riven_detail("missing", None, false, false, false)
+                .is_none()
+        );
+        assert!(
+            inner
+                .riven_detail("source", Some("old"), false, false, false)
+                .is_none()
+        );
+        assert!(
+            inner
+                .riven_detail("source", Some("missing"), false, false, false)
+                .is_none()
+        );
+        assert_eq!(
+            inner
+                .riven_detail("old", None, false, false, false)
+                .unwrap()
+                .listing
+                .auction_id,
+            "new"
+        );
+        assert_eq!(
+            inner
+                .riven_detail("old", Some("old"), false, false, false)
+                .unwrap()
+                .listing
+                .auction_id,
+            "old"
+        );
+        assert!(
+            inner
+                .riven_detail("old", None, true, true, false)
+                .unwrap()
+                .similar
+                .iter()
+                .all(|m| m.listing.riven_id != "old")
+        );
+    }
+
+    #[test]
+    fn riven_history_orders_observations_and_clears_stale_removal_status() {
+        let mut inner = Inner::default();
+        let weapon = inner.intern_weapon("w", "W", "rifle");
+        let index = add_auction(&mut inner, weapon, "riven", 200, 3000);
+        inner.observations.push(Observation {
+            t: 1000,
+            auction: index,
+            price: Some(100),
+            direct_sell: true,
+        });
+        inner.auctions[index as usize].gone = Some((2000, "missing".into()));
+        let history = inner.riven_history("riven");
+        assert_eq!(
+            history[0].points.iter().map(|p| p.t).collect::<Vec<_>>(),
+            [1000, 3000]
+        );
+        assert_eq!(history[0].gone_at, None);
+        assert_eq!(history[0].gone_reason, None);
+    }
+
+    #[test]
+    fn comparisons_are_bounded_with_deterministic_recency_ties() {
+        let mut inner = Inner::default();
+        let weapon = inner.intern_weapon("w", "W", "rifle");
+        comparison_auction(&mut inner, weapon, "source", Some(0.5), None, 1000);
+        assert!(
+            inner
+                .riven_detail("source", None, false, false, false)
+                .unwrap()
+                .similar
+                .is_empty()
+        );
+        for i in 0..25 {
+            comparison_auction(
+                &mut inner,
+                weapon,
+                &format!("match-{i:02}"),
+                Some(0.5),
+                None,
+                2000 + i,
+            );
+        }
+        let result = inner
+            .riven_detail("source", None, false, false, false)
+            .unwrap();
+        assert_eq!(result.similar_total, 25);
+        assert_eq!(result.similar.len(), 10);
+        let broad = inner
+            .riven_detail("source", None, false, false, true)
+            .unwrap();
+        assert_eq!(broad.similar.len(), 10);
+        assert_eq!(broad.similar_total, 25);
+        assert_eq!(result.similar[0].listing.auction_id, "match-24");
+        inner.auctions.last_mut().unwrap().last_seen = 2023;
+        let result = inner
+            .riven_detail("source", None, false, false, false)
+            .unwrap();
+        assert_eq!(result.similar[0].listing.auction_id, "match-23");
     }
 
     /// A weapon with normal prices at 100p plus a joke-priced riven, and a joke riven that's gone.
@@ -1634,6 +2009,118 @@ impl Inner {
         result
     }
 
+    pub fn riven_detail(
+        &self,
+        id: &str,
+        auction_id: Option<&str>,
+        include_legacy: bool,
+        include_unfit: bool,
+        include_loose: bool,
+    ) -> Option<RivenDetail> {
+        let riven = *self.riven_index.get(id)?;
+        let copies = &self.riven_auctions[riven as usize];
+        let selected = if let Some(id) = auction_id {
+            let index = *self.auction_index.get(id)?;
+            let auction = &self.auctions[index as usize];
+            if auction.riven != riven {
+                return None;
+            }
+            auction
+        } else {
+            copies
+                .iter()
+                .map(|&i| &self.auctions[i as usize])
+                .max_by(|a, b| a.last_seen.cmp(&b.last_seen).then(a.id.cmp(&b.id)))?
+        };
+        // Pick a representative before scoring, so old relists cannot win twice or
+        // make a riven appear closer than its latest eligible observation.
+        let mut hidden = HashSet::new();
+        let mut representatives: HashMap<u32, &Auction> = HashMap::new();
+        for a in &self.auctions {
+            if a.weapon != selected.weapon || a.riven == riven {
+                continue;
+            }
+            if (!include_legacy && a.legacy_stats != Some(false)) || (!include_unfit && !a.fit_ok) {
+                if similarity(selected, a).is_some_and(|score| include_loose || score.shared >= 2) {
+                    hidden.insert(a.riven);
+                }
+                continue;
+            }
+            representatives
+                .entry(a.riven)
+                .and_modify(|current| {
+                    if (a.last_seen, &a.id) > (current.last_seen, &current.id) {
+                        *current = a;
+                    }
+                })
+                .or_insert(a);
+        }
+        let mut matches: Vec<_> = representatives
+            .values()
+            .filter_map(|a| {
+                let score = similarity(selected, a)?;
+                (include_loose || score.shared >= 2).then_some((*a, score))
+            })
+            .collect();
+        matches.sort_by(|(a, score_a), (b, score_b)| {
+            score_b
+                .shared
+                .cmp(&score_a.shared)
+                .then_with(|| score_a.added.len().cmp(&score_b.added.len()))
+                .then_with(|| score_b.same_negative.cmp(&score_a.same_negative))
+                .then_with(|| {
+                    a.attrs
+                        .len()
+                        .abs_diff(selected.attrs.len())
+                        .cmp(&b.attrs.len().abs_diff(selected.attrs.len()))
+                })
+                .then_with(|| {
+                    score_a
+                        .roll_distance
+                        .unwrap_or(f64::INFINITY)
+                        .total_cmp(&score_b.roll_distance.unwrap_or(f64::INFINITY))
+                })
+                .then_with(|| b.last_seen.cmp(&a.last_seen))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let similar_total = matches.len();
+        // Count distinct candidates hidden by quality/era settings, excluding any
+        // riven that also has an eligible representative in this result set.
+        for (a, _) in &matches {
+            hidden.remove(&a.riven);
+        }
+        let similar = matches
+            .into_iter()
+            .take(10)
+            .map(|(a, score)| SimilarRiven {
+                listing: self.listing(a),
+                same_stats: score.missing.is_empty()
+                    && score.added.is_empty()
+                    && score.same_negative,
+                shared_positives: score.shared,
+                missing_positives: score
+                    .missing
+                    .iter()
+                    .map(|&i| self.attrs[i as usize].clone())
+                    .collect(),
+                added_positives: score
+                    .added
+                    .iter()
+                    .map(|&i| self.attrs[i as usize].clone())
+                    .collect(),
+                same_negative: score.same_negative,
+                roll_distance: score.roll_distance,
+            })
+            .collect();
+        Some(RivenDetail {
+            listing: self.listing(selected),
+            similar,
+            similar_total,
+            comparisons_hidden: hidden.len(),
+            server_time: now_ms(),
+        })
+    }
+
     /// Every auction this riven appeared in, oldest first, with its price history.
     pub fn riven_history(&self, riven_id: &str) -> Vec<RivenAuction> {
         let Some(&riven) = self.riven_index.get(riven_id) else {
@@ -1661,13 +2148,29 @@ impl Inner {
                     created: a.created,
                     first_seen: a.first_seen,
                     last_seen: a.last_seen,
-                    gone_at: a.gone.as_ref().map(|(t, _)| *t),
-                    gone_reason: a.gone.as_ref().map(|(_, r)| r.clone()),
-                    points: points.remove(&i).unwrap_or_default(),
+                    gone_at: a
+                        .gone
+                        .as_ref()
+                        .filter(|(t, _)| *t >= a.last_seen)
+                        .map(|(t, _)| *t),
+                    gone_reason: a
+                        .gone
+                        .as_ref()
+                        .filter(|(t, _)| *t >= a.last_seen)
+                        .map(|(_, r)| r.clone()),
+                    points: {
+                        let mut observations = points.remove(&i).unwrap_or_default();
+                        observations.sort_by_key(|p| p.t);
+                        observations
+                    },
                 }
             })
             .collect();
-        out.sort_by_key(|a| a.first_seen);
+        out.sort_by(|a, b| {
+            a.first_seen
+                .cmp(&b.first_seen)
+                .then(a.auction_id.cmp(&b.auction_id))
+        });
         out
     }
 }

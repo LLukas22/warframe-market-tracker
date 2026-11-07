@@ -4,7 +4,7 @@ use crate::api::{
     self, AttrInfo, CurseFilter, Listing, LiveStats, Overview, Query, SearchResult, Sort,
     attribute_name, format_value,
 };
-use crate::chart::{PriceChart, Sparkline, StatEffectsPanel};
+use crate::chart::{PriceChart, StatEffectsPanel};
 use crate::weapons::{WeaponGrid, WeaponHeader, WeaponImage, WeaponPicker};
 
 const CSS: Asset = asset!("/assets/main.css");
@@ -69,8 +69,22 @@ pub async fn sleep_ms(ms: u32) {
 /// How often the header checks for new scraped data.
 const LIVE_POLL_MS: u32 = 5000;
 
+#[derive(Clone, Debug, PartialEq, Routable)]
+pub(crate) enum Route {
+    #[layout(Shell)]
+    #[route("/")]
+    MarketRoute {},
+    #[route("/riven/:id?:auction")]
+    RivenPage { id: String, auction: String },
+}
+
 #[component]
 pub fn App() -> Element {
+    rsx! { Router::<Route> {} }
+}
+
+#[component]
+fn Shell() -> Element {
     let mut scraper_open = use_signal(|| false);
     let query = use_signal(Query::default);
     use_context_provider(|| query);
@@ -78,6 +92,7 @@ pub fn App() -> Element {
     let mut overview = use_resource(api::overview);
     // A failed refresh must not take down a page that already has data.
     let mut loaded = use_signal(|| None::<Overview>);
+    use_context_provider(|| loaded);
     use_effect(move || {
         if let Some(Ok(value)) = &*overview.read() {
             loaded.set(Some(value.clone()));
@@ -109,9 +124,19 @@ pub fn App() -> Element {
             live.restart();
         }
     });
+    let navigator = use_navigator();
+    let router = router();
+    let mut previous_query = use_signal(|| query());
     // Anything done in the header search box leads back to the market.
     use_effect(move || {
-        query.read();
+        let next = query();
+        if next == *previous_query.peek() {
+            return;
+        }
+        previous_query.set(next);
+        if !matches!(router.current::<Route>(), Route::MarketRoute {}) {
+            navigator.push(Route::MarketRoute {});
+        }
         if *scraper_open.peek() {
             scraper_open.set(false);
         }
@@ -136,7 +161,7 @@ pub fn App() -> Element {
         header {
             div { class: "brand",
                 h1 {
-                    button { onclick: move |_| scraper_open.set(false), "Riven Tracker" }
+                    button { onclick: move |_| { scraper_open.set(false); navigator.push(Route::MarketRoute {}); }, "Riven Tracker" }
                 }
             }
             if let Some(o) = &data {
@@ -157,14 +182,190 @@ pub fn App() -> Element {
         }
         if scraper_open() {
             crate::scraper::ScraperPanel {}
-        } else if let Some(o) = data {
-            MarketPage { overview: o, query, data_version }
+        } else if data.is_some() {
+            Outlet::<Route> {}
         } else if let Some(error) = load_error {
             div { class: "fatal", "Failed to load data: {error}" }
         } else {
             div { class: "fatal muted", "Loading…" }
         }
     }
+}
+
+#[component]
+fn MarketRoute() -> Element {
+    let loaded = use_context::<Signal<Option<Overview>>>();
+    let query = use_context::<Signal<Query>>();
+    let data_version = use_context::<Signal<u64>>();
+    rsx! {
+        if let Some(overview) = loaded() {
+            MarketPage { overview, query, data_version }
+        }
+    }
+}
+
+#[component]
+fn RivenPage(id: String, auction: String) -> Element {
+    // Key the resource owner so navigating between two rivens resets all page state.
+    rsx! { RivenPageContent { key: "{id}/{auction}", id, auction } }
+}
+
+#[component]
+fn RivenPageContent(id: String, auction: String) -> Element {
+    let version = use_context::<Signal<u64>>();
+    let mut include_legacy = use_signal(|| false);
+    let mut include_unfit = use_signal(|| false);
+    let mut include_loose = use_signal(|| false);
+    let mut detail = use_resource(move || {
+        version.read();
+        let legacy = include_legacy();
+        let unfit = include_unfit();
+        let loose = include_loose();
+        let id = id.clone();
+        let auction = (!auction.is_empty()).then(|| auction.clone());
+        async move { api::riven_detail(id, auction, legacy, unfit, loose).await }
+    });
+    rsx! {
+        main { class: "riven-page",
+            Link { to: Route::MarketRoute {}, class: "back-link", "← Back to search" }
+            match &*detail.read() {
+                None => rsx! { p { role: "status", "Loading riven…" } },
+                Some(Err(error)) => rsx! {
+                    p { class: "error", "Could not load this riven: {error}" }
+                    button { onclick: move |_| detail.restart(), "Retry" }
+                },
+                Some(Ok(None)) => rsx! {
+                    h2 { "Riven not found" }
+                    p { "This riven or selected auction is not in the stored dataset." }
+                },
+                Some(Ok(Some(data))) => {
+                    let selected = &data.listing;
+                    rsx! {
+                        document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
+                        h2 { "Riven details" }
+                        ListingRow {
+                            listing: selected.clone(), now: data.server_time,
+                            show_weapon: false, has_image: false, open_initially: true,
+                        }
+                        crate::journey::RivenJourney {
+                            id: selected.riven_id.clone(), selected_auction: selected.auction_id.clone(),
+                        }
+                        section { class: "similar-rivens",
+                            h2 { "Similar rivens seen before" }
+                            p { class: "muted",
+                                "Same weapon, closest stat matches first. Prices are observed listings, not confirmed sales."
+                            }
+                            details { class: "similar-options",
+                                summary { "Comparison settings" }
+                                label { class: "check",
+                                    input { r#type: "checkbox", checked: include_legacy(),
+                                        onchange: move |e| include_legacy.set(e.checked()) }
+                                    " Include pre-rework / unknown-era stats"
+                                }
+                                label { class: "check",
+                                    input { r#type: "checkbox", checked: include_unfit(),
+                                        onchange: move |e| include_unfit.set(e.checked()) }
+                                    " Include unverified stats"
+                                }
+                                label { class: "check",
+                                    input { r#type: "checkbox", checked: include_loose(),
+                                        onchange: move |e| include_loose.set(e.checked()) }
+                                    " Include loose matches with one shared positive"
+                                }
+                                if data.comparisons_hidden > 0 {
+                                    p { class: "muted small", "{data.comparisons_hidden} potential matches hidden by the era / verification settings." }
+                                }
+                            }
+                            if detail.pending() { p { role: "status", "Updating comparisons…" } }
+                            p { class: "muted small", "{data.similar.len()} closest matches · {data.similar_total} found" }
+                            if data.similar.is_empty() {
+                                p { "No matching rivens in the stored history with these settings yet." }
+                            }
+                            for matched in data.similar.iter().take(10) {
+                                article { key: "{matched.listing.riven_id}", class: "similar-match",
+                                    div { class: "match-reason",
+                                        span { class: "match-label", "{match_label(matched)}" }
+                                        if !matched.same_stats {
+                                            span { class: "stat-difference", "{match_differences(selected, matched)}" }
+                                        }
+                                        if let Some(distance) = matched.roll_distance {
+                                            span { class: "muted match-quality", title: "Average normalized roll difference on shared stats", "Roll difference {distance * 100.0:.1} pp" }
+                                        }
+                                    }
+                                    ListingRow {
+                                        listing: matched.listing.clone(), now: data.server_time,
+                                        show_weapon: false, has_image: false, open_initially: false,
+                                    }
+                                }
+                            }
+                            if !include_loose() && data.similar_total < 10 {
+                                button { class: "link-button", onclick: move |_| include_loose.set(true),
+                                    "Broaden to one shared positive stat"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn match_label(m: &api::SimilarRiven) -> String {
+    if m.shared_positives == 1 {
+        format!(
+            "Loose match · 1 of {} positives",
+            1 + m.missing_positives.len()
+        )
+    } else if m.same_stats {
+        "Same stats".into()
+    } else if m.missing_positives.is_empty() {
+        format!("All {} positives match", m.shared_positives)
+    } else {
+        format!(
+            "{} of {} positives match",
+            m.shared_positives,
+            m.shared_positives + m.missing_positives.len()
+        )
+    }
+}
+
+fn match_differences(selected: &Listing, m: &api::SimilarRiven) -> String {
+    let names = |slugs: &[String]| {
+        slugs
+            .iter()
+            .map(|s| attribute_name(s))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = Vec::new();
+    if !m.missing_positives.is_empty() {
+        parts.push(format!("Missing {}", names(&m.missing_positives)));
+    }
+    if !m.added_positives.is_empty() {
+        parts.push(format!("Adds {}", names(&m.added_positives)));
+    }
+    if !m.same_negative {
+        let curse = |l: &Listing| {
+            let negatives: Vec<_> = l
+                .attributes
+                .iter()
+                .filter(|a| !a.positive)
+                .map(|a| a.slug.clone())
+                .collect();
+            if negatives.is_empty() {
+                "none".into()
+            } else {
+                names(&negatives)
+            }
+        };
+        parts.push(format!(
+            "Negative: {} → {}",
+            curse(selected),
+            curse(&m.listing)
+        ));
+    }
+    parts.join(" · ")
 }
 
 /// How many filters differ from the defaults. Sorting and chart buckets don't filter anything.
@@ -220,7 +421,7 @@ fn MarketPage(overview: Overview, query: Signal<Query>, data_version: Signal<u64
                         if r.total + r.gone_total == 0 {
                             "no riven with this id"
                         } else {
-                            "every auction of this riven, other filters ignored"
+                            "select a riven for its history and similar listings"
                         }
                     }
                     button {
@@ -240,7 +441,7 @@ fn MarketPage(overview: Overview, query: Signal<Query>, data_version: Signal<u64
                 bucket_hours: query.read().bucket_hours,
                 show_weapon: selected.is_none(),
                 weapons: overview.weapons.clone(),
-                expand: riven_search.is_some(),
+                id_search: riven_search.is_some(),
                 weapon: selected.as_ref().map(|w| w.slug.clone()),
             }
         },
@@ -252,7 +453,7 @@ fn MarketPage(overview: Overview, query: Signal<Query>, data_version: Signal<u64
         document::Title {
             {selected.as_ref().map(|w| format!("{} rivens · Riven Tracker", w.name)).unwrap_or_else(|| "Riven Tracker".into())}
         }
-        main {
+        main { class: "market-page",
             aside { class: if filters_open() { "filters-open" } else { "" },
                 button {
                     class: "filters-toggle",
@@ -514,8 +715,8 @@ fn Results(
     bucket_hours: u32,
     show_weapon: bool,
     weapons: Vec<crate::api::WeaponInfo>,
-    /// Open every row (used for riven id searches).
-    expand: bool,
+    /// ID searches choose a riven, then open the shared detail page.
+    id_search: bool,
     /// The weapon being looked at, if any.
     weapon: Option<String>,
 ) -> Element {
@@ -533,16 +734,32 @@ fn Results(
             .iter()
             .any(|w| w.slug == l.weapon_slug && w.has_image)
     };
+    if id_search {
+        let mut seen = std::collections::HashSet::new();
+        let matches: Vec<_> = result
+            .listings
+            .iter()
+            .chain(&result.gone)
+            .filter(|l| seen.insert(l.riven_id.clone()))
+            .collect();
+        return rsx! {
+            h2 { "Matching rivens" }
+            for listing in matches {
+                ListingRow { key: "{listing.riven_id}", listing: listing.clone(), now,
+                    show_weapon: true, has_image: has_image(listing), open_initially: false }
+            }
+        };
+    }
     rsx! {
         div { class: "section-head",
             h2 { "Price over time" }
             span { class: "muted small",
                 "all listings matching the filters, per {bucket_label(bucket_hours)}"
-                if !expand { " · invalid prices excluded" }
+                " · invalid prices excluded"
             }
         }
         PriceChart { points: result.history.clone(), bucket_hours }
-        if let Some(slug) = weapon.filter(|_| !expand) {
+        if let Some(slug) = weapon {
             StatEffectsPanel { key: "{slug}", weapon: slug.clone() }
         }
         div { class: "section-head",
@@ -576,7 +793,7 @@ fn Results(
                     now,
                     show_weapon,
                     has_image: has_image(l),
-                    open_initially: expand,
+                    open_initially: false,
                 }
             }
         }
@@ -600,7 +817,7 @@ fn Results(
                     listing: l,
                     now,
                     show_weapon,
-                    open_initially: expand,
+                    open_initially: false,
                 }
             }
         }
@@ -630,8 +847,13 @@ fn ListingRow(
     has_image: bool,
     open_initially: bool,
 ) -> Element {
-    let mut open = use_signal(|| open_initially);
+    let navigator = use_navigator();
     let l = &listing;
+    let target = Route::RivenPage {
+        id: l.riven_id.clone(),
+        auction: l.auction_id.clone(),
+    };
+    let row_target = target.clone();
     let price = l.price.map(format_plat).unwrap_or_else(|| "—".into());
     let kind = if l.direct_sell {
         "buyout"
@@ -652,8 +874,8 @@ fn ListingRow(
     let age = format_age(now, l.created);
 
     rsx! {
-        div { class: if open() { "listing open" } else { "listing" },
-            div { class: "listing-main", onclick: move |_| open.toggle(),
+        div { class: if open_initially { "listing open" } else { "listing" },
+            div { class: "listing-main", onclick: move |_| { if !open_initially { navigator.push(row_target.clone()); } },
                 if show_weapon {
                     WeaponImage {
                         slug: l.weapon_slug.clone(),
@@ -667,7 +889,9 @@ fn ListingRow(
                     span { class: "muted small", "{kind}" }
                 }
                 div { class: "name",
-                    div { class: "riven-name", "{l.weapon_name} {l.riven_name}" }
+                    div { class: "riven-name",
+                        Link { to: target, onclick: move |e: MouseEvent| e.stop_propagation(), "{l.weapon_name} {l.riven_name}" }
+                    }
                     div { class: "muted small",
                         "{rank} · MR{mr} · {rolls} rolls · {l.polarity}"
                     }
@@ -730,7 +954,7 @@ fn ListingRow(
                     div { class: "muted small", "listed {age} ago" }
                 }
             }
-            if open() {
+            if open_initially {
                 ListingDetail { listing: listing.clone(), url }
             }
         }
@@ -739,79 +963,9 @@ fn ListingRow(
 
 #[component]
 fn ListingDetail(listing: Listing, url: String) -> Element {
-    let id = listing.riven_id.clone();
-    let history = use_resource(move || {
-        let id = id.clone();
-        async move { api::riven_history(id).await }
-    });
-    let history_view = match &*history.read() {
-        Some(Ok(auctions)) => {
-            let rows = auctions.iter().map(|a| {
-                let spark: Vec<(i64, i64)> = a
-                    .points
-                    .iter()
-                    .filter_map(|p| p.price.map(|v| (p.t, v)))
-                    .collect();
-                let first = a.points.first().and_then(|p| p.price);
-                let last = a.points.last().and_then(|p| p.price);
-                let status = match (a.gone_at, &a.gone_reason) {
-                    (Some(t), reason) => format!(
-                        "gone {} UTC{}",
-                        format_datetime(t),
-                        reason
-                            .as_ref()
-                            .map(|r| format!(" ({r})"))
-                            .unwrap_or_default()
-                    ),
-                    (None, _) => format!("last seen {} UTC", format_datetime(a.last_seen)),
-                };
-                let price = match (first, last) {
-                    (Some(f), Some(l)) if f != l => format!("{f}p → {l}p"),
-                    (_, Some(l)) => format!("{l}p"),
-                    _ => "—".into(),
-                };
-                let current = a.auction_id == listing.auction_id;
-                rsx! {
-                    tr { key: "{a.auction_id}", class: if current { "current" } else { "" },
-                        td { "{a.owner_name}" }
-                        td { "{format_date(a.created)}" }
-                        td { "{price}" }
-                        td { Sparkline { points: spark } }
-                        td { class: "muted", "{status}" }
-                    }
-                }
-            });
-            rsx! {
-                div { class: "detail-history",
-                    h4 {
-                        if auctions.len() > 1 {
-                            "This riven was listed {auctions.len()} times"
-                        } else {
-                            "Listing history"
-                        }
-                    }
-                    table { class: "history-table",
-                        thead {
-                            tr {
-                                th { "Seller" }
-                                th { "Listed" }
-                                th { "Price" }
-                                th { "" }
-                                th { "Status" }
-                            }
-                        }
-                        tbody { {rows} }
-                    }
-                }
-            }
-        }
-        Some(Err(e)) => rsx! { div { class: "error", "{e}" } },
-        None => rsx! {},
-    };
-
     rsx! {
-        div { class: "detail",
-            {history_view}
+        details { class: "detail extra-details",
+            summary { "More details · normalized stats & riven ID" }
             table {
                 thead {
                     tr {
@@ -842,7 +996,6 @@ fn ListingDetail(listing: Listing, url: String) -> Element {
             div { class: "detail-id",
                 span { class: "muted small", "Riven id" }
                 RivenId { id: listing.riven_id.clone(), short: false }
-                FindRivenButton { id: listing.riven_id.clone() }
             }
             div { class: "muted small",
                 "first seen {format_datetime(listing.first_seen)} UTC · seller reputation {listing.owner_reputation.unwrap_or(0)} · "
@@ -886,21 +1039,24 @@ fn RivenId(id: String, short: bool) -> Element {
     }
 }
 
-/// Switches the search to this riven only.
-#[component]
-fn FindRivenButton(id: String) -> Element {
-    let mut query = use_context::<Signal<Query>>();
-    let active = query.read().riven_id.as_deref() == Some(id.as_str());
-    rsx! {
-        if !active {
-            button {
-                class: "link-button",
-                onclick: move |_| {
-                    let id = id.clone();
-                    query.with_mut(|q| q.riven_id = Some(id));
-                },
-                "show only this riven"
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn detail_links_round_trip_and_allow_no_auction() {
+        let route = Route::RivenPage {
+            id: "1234abcd".into(),
+            auction: "auction-1".into(),
+        };
+        assert_eq!(route.to_string().parse::<Route>().unwrap(), route);
+        assert_eq!(
+            "/riven/1234abcd".parse::<Route>().unwrap(),
+            Route::RivenPage {
+                id: "1234abcd".into(),
+                auction: String::new()
             }
-        }
+        );
+        assert_eq!("/".parse::<Route>().unwrap(), Route::MarketRoute {});
     }
 }

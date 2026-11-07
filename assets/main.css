@@ -156,7 +156,7 @@ select.compact { padding: 5px 8px; font-size: 13px; }
 
 /* ---------- layout ---------- */
 
-main {
+.market-page {
   display: grid;
   grid-template-columns: 280px 1fr;
   gap: 24px;
@@ -476,7 +476,7 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 
 @media (max-width: 1100px) {
   header { grid-template-columns: auto minmax(0, 1fr) auto; }
-  main { grid-template-columns: minmax(0, 1fr); }
+  .market-page { grid-template-columns: minmax(0, 1fr); }
   aside { position: static; max-height: none; padding: 0; overflow: visible; }
   .filters-toggle {
     display: flex;
@@ -498,7 +498,7 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 }
 
 @media (max-width: 760px) {
-  main { gap: 14px; padding: 12px 12px 40px; }
+  .market-page { gap: 14px; padding: 12px 12px 40px; }
   .section-head { flex-wrap: wrap; gap: 2px 12px; }
   .link-button { text-align: left; }
 
@@ -599,3 +599,59 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
   /* Without this, iOS doesn't send taps on plain elements up to the app's event listener. */
   .effect-row { cursor: pointer; }
 }
+
+/* Dedicated riven details and historical comparisons. */
+.riven-page { display: block; width: 100%; max-width: 1280px; margin: 0 auto; padding: 24px 24px 60px; }
+.back-link { display: inline-block; margin-bottom: 20px; }
+.riven-page > h2 { margin-bottom: 14px; }
+.similar-rivens { margin-top: 32px; }
+.similar-rivens h3 { margin: 24px 0 10px; }
+.similar-options { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 16px 0; }
+.similar-options label { display: flex; align-items: center; gap: 6px; }
+.similar-match { margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.match-reason > span { min-width: 0; overflow-wrap: anywhere; }
+.match-reason { display: flex; flex-wrap: wrap; gap: 6px 20px; padding: 12px 16px; background: var(--panel-2); }
+.match-reason > .small { flex-basis: 100%; }
+.stat-difference { color: var(--warn); }
+.riven-name a { color: inherit; }
+@media (max-width: 700px) {
+  .riven-page { padding: 16px 12px; }
+  .match-reason { padding: 10px 12px; }
+}
+
+/* Riven history: a quiet summary, price chart, and aligned seller intervals. */
+.extra-details { display: block; }
+.extra-details summary, .similar-options summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
+.extra-details[open] > * + * { margin-top: 14px; }
+.similar-options { display: block; }
+.similar-options label { margin-top: 12px; }
+.journey { margin-top: 24px; }
+.journey-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 20px 0; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.journey-summary > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.journey-summary span, .journey-summary small { color: var(--muted); font-size: 12px; }
+.journey-summary strong { font-size: 20px; font-weight: 600; }
+.journey .section-head { margin: 18px 0 10px; }
+.journey-chart svg { height: auto; min-height: 200px; }
+.journey-readout { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; min-height: 26px; padding: 10px 0 0; font-size: 13px; }
+.journey-hit { cursor: crosshair; }
+.journey-hit:focus { stroke: var(--text); outline: none; }
+.sighting-axis, .sighting-dates { display: flex; justify-content: space-between; gap: 8px 16px; color: var(--muted); font-size: 12px; }
+.sighting-axis { padding: 0 14px; }
+.sighting-list { list-style: none; padding: 0; margin: 8px 0 12px; }
+.sighting { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.sighting.selected { background: var(--panel); border-radius: 8px; }
+.sighting-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
+.sighting-heading a { margin-left: auto; font-size: 12px; }
+.sighting-track { position: relative; height: 6px; margin: 12px 3px; background: var(--panel-3); border-radius: 4px; }
+.sighting-track span { position: absolute; top: 0; height: 6px; min-width: 6px; max-width: 100%; border-radius: 4px; transform: translateX(-3px); }
+.sighting-dates { flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .journey-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 10px; }
+  .journey-summary > div:last-child { grid-column: 1 / -1; }
+  .journey-summary strong { font-size: 17px; }
+  .sighting-heading a { margin-left: 0; }
+}
+
+.match-label { font-weight: 600; }
+.match-quality { margin-left: auto; font-size: 12px; }
+@media (max-width: 600px) { .match-quality { margin-left: 0; } }

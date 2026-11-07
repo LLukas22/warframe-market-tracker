@@ -216,6 +216,49 @@ pub async fn search(query: Query) -> Result<SearchResult, ServerFnError> {
     crate::data::run(move |store| store.search(&query)).await
 }
 
+/// A distinct historical riven, represented by its latest eligible listing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SimilarRiven {
+    pub listing: Listing,
+    pub same_stats: bool,
+    pub shared_positives: usize,
+    pub missing_positives: Vec<String>,
+    pub added_positives: Vec<String>,
+    pub same_negative: bool,
+    /// Mean absolute quality difference on shared signed stats, 0..1.
+    /// None unless both listings are fitted and every compared stat has quality.
+    pub roll_distance: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RivenDetail {
+    pub listing: Listing,
+    pub similar: Vec<SimilarRiven>,
+    pub similar_total: usize,
+    pub comparisons_hidden: usize,
+    pub server_time: i64,
+}
+
+#[post("/api/riven-detail")]
+pub async fn riven_detail(
+    id: String,
+    auction_id: Option<String>,
+    include_legacy: bool,
+    include_unfit: bool,
+    include_loose: bool,
+) -> Result<Option<RivenDetail>, ServerFnError> {
+    crate::data::run(move |store| {
+        store.riven_detail(
+            &id,
+            auction_id.as_deref(),
+            include_legacy,
+            include_unfit,
+            include_loose,
+        )
+    })
+    .await
+}
+
 /// How one stat moves the price of a weapon's rivens, compared with rivens without it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatEffect {

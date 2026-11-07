@@ -8,6 +8,7 @@ mod data;
 mod effects;
 #[cfg(feature = "server")]
 mod images;
+mod journey;
 mod scraper;
 #[cfg(feature = "server")]
 mod transfer;

@@ -13,7 +13,7 @@ const TOP: f64 = 12.0;
 const BOTTOM: f64 = 28.0;
 
 /// Rounds `max` up to a "nice" axis maximum and returns (max, step).
-fn nice_axis(max: f64) -> (f64, f64) {
+pub(crate) fn nice_axis(max: f64) -> (f64, f64) {
     let max = max.max(1.0);
     let raw = max / 4.0;
     let mag = 10f64.powf(raw.log10().floor());
@@ -191,35 +191,6 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
                 span { class: "legend-item", span { class: "swatch min" } "cheapest" }
                 span { class: "legend-item", span { class: "swatch gone" } "disappeared (≈ sold), size = count" }
             }
-        }
-    }
-}
-
-/// Tiny inline price sparkline for one auction.
-#[component]
-pub fn Sparkline(points: Vec<(i64, i64)>) -> Element {
-    if points.len() < 2 {
-        return rsx! {};
-    }
-    let (w, h) = (160.0, 32.0);
-    let t0 = points.first().unwrap().0;
-    let t1 = points.last().unwrap().0.max(t0 + 1);
-    let lo = points.iter().map(|p| p.1).min().unwrap();
-    let hi = points.iter().map(|p| p.1).max().unwrap().max(lo + 1);
-    let path = points
-        .iter()
-        .map(|(t, v)| {
-            format!(
-                "{:.1},{:.1}",
-                (t - t0) as f64 / (t1 - t0) as f64 * w,
-                2.0 + (1.0 - (v - lo) as f64 / (hi - lo) as f64) * (h - 4.0)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    rsx! {
-        svg { class: "sparkline", view_box: "0 0 {w} {h}", width: "{w}", height: "{h}",
-            polyline { points: "{path}" }
         }
     }
 }
