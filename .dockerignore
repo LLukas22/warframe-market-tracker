@@ -3,3 +3,7 @@ data
 .git
 .github
 .env
+ocr/models
+ocr/dist
+ocr/web/pkg
+ocr/tests/samples/images

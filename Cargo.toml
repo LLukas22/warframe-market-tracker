@@ -6,7 +6,7 @@ description = "Web app for browsing warframe.market riven auctions, which it scr
 license = "MIT"
 
 [workspace]
-members = ["scraper", "types"]
+members = ["ocr", "scraper", "types"]
 
 [dependencies]
 anyhow = "1"
@@ -39,3 +39,13 @@ wasm-bindgen = "=0.2.129"
 
 [dev-dependencies]
 flate2 = "1"
+
+# The OCR module's browser build (ocr/scripts/build-web.sh). Inference is slow without full
+# optimization, and the module is downloaded separately, so size and speed both matter.
+[profile.ocr-wasm]
+inherits = "release"
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

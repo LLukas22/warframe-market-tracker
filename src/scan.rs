@@ -1,0 +1,298 @@
+//! Scanning a riven screenshot from the search bar.
+//!
+//! Click the image button or paste a screenshot. The OCR runs in the browser (`ocr/`), in a
+//! Web Worker that is only created the first time someone hovers or clicks the scan button or
+//! pastes an image, so it never slows down loading the site. A scan
+//! then opens the riven's page: the stored riven if it has been listed before, else a page for
+//! the scanned riven.
+
+use dioxus::prelude::*;
+use dioxus::router::Navigator;
+use serde::Deserialize;
+
+use crate::api::{self, RivenScan};
+use crate::ui::Route;
+
+/// What the last scan read, so the page it opens can show what to double-check.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScanNote {
+    /// The matched riven, or the scanned riven page's parameter.
+    pub target: String,
+    pub warnings: Vec<String>,
+}
+
+pub static LAST_SCAN: GlobalSignal<Option<ScanNote>> = Signal::global(|| None);
+
+/// Shared by every script below. Defining these imports and downloads nothing; the first
+/// `scanner()` call does.
+const COMMON: &str = r#"
+const scanner = () => (window.__wfmtScanner ??= import("/ocr/scanner.js")
+  .then((m) => m.createRivenScanner({
+    models: "/ocr/models",
+    weapons: "/ocr/riven_weapons.json",
+    attributes: "/ocr/riven_attributes.json",
+  }))
+  .catch((error) => { window.__wfmtScanner = undefined; throw error; }));
+const scanFile = async (file) => {
+  try {
+    dioxus.send({ state: "loading" });
+    const s = await scanner();
+    await s.preload();
+    dioxus.send({ state: "scanning" });
+    const { riven } = await s.scan(file);
+    dioxus.send({ riven });
+  } catch (error) {
+    dioxus.send({ error: String(error?.message ?? error) });
+  }
+};
+"#;
+
+/// Starts loading while the pointer is on the button, so it's ready once a file is picked.
+const PRELOAD: &str = r#"
+scanner().then((s) => s.preload()).catch(() => {});
+"#;
+
+/// Asks for an image and scans it. The file dialog opens first, while the click still counts
+/// as user activation.
+const PICK: &str = r#"
+const input = Object.assign(document.createElement("input"), { type: "file", accept: "image/*" });
+input.style.display = "none";
+document.body.append(input);
+const file = await new Promise((resolve) => {
+  input.addEventListener("change", () => resolve(input.files[0] ?? null), { once: true });
+  input.addEventListener("cancel", () => resolve(null), { once: true });
+  input.click();
+});
+input.remove();
+if (file) await scanFile(file);
+else dioxus.send({ cancelled: true });
+await new Promise(() => {});
+"#;
+
+/// Scans images pasted into the search box, or anywhere outside a text field. Text pastes are
+/// left alone. Replaces the listener of an earlier search box, so there's only ever one.
+const PASTE: &str = r#"
+if (window.__wfmtPaste) document.removeEventListener("paste", window.__wfmtPaste);
+let busy = false;
+window.__wfmtPaste = (event) => {
+  const target = event.target;
+  const field = target instanceof HTMLElement
+    && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+  if (field && target.id !== "weapon-search") return;
+  const file = [...(event.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
+  if (!file) return;
+  event.preventDefault();
+  if (busy) return;
+  busy = true;
+  scanFile(file).finally(() => { busy = false; });
+};
+document.addEventListener("paste", window.__wfmtPaste);
+await new Promise(() => {});
+"#;
+
+#[derive(Deserialize)]
+struct ScanEvent {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    riven: Option<RivenScan>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    cancelled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum State {
+    Idle,
+    Busy(&'static str),
+    Failed(String, Vec<String>),
+}
+
+/// Follows a scanning script's events. A file pick ends after one scan; the paste listener
+/// keeps going.
+async fn follow(
+    mut script: document::Eval,
+    mut state: Signal<State>,
+    navigator: Navigator,
+    once: bool,
+) {
+    loop {
+        match script.recv::<ScanEvent>().await {
+            Ok(ScanEvent {
+                cancelled: true, ..
+            }) => state.set(State::Idle),
+            Ok(ScanEvent {
+                error: Some(error), ..
+            }) => {
+                let message = if error.contains("/ocr/") || error.contains("import") {
+                    "Screenshot scanning isn't set up on this server.".to_owned()
+                } else {
+                    format!("Scanning failed: {error}")
+                };
+                state.set(State::Failed(message, Vec::new()));
+            }
+            Ok(ScanEvent {
+                riven: Some(scan), ..
+            }) => open(scan, state, navigator).await,
+            Ok(ScanEvent { state: Some(s), .. }) => {
+                state.set(State::Busy(match s.as_str() {
+                    "loading" => "Loading the scanner…",
+                    _ => "Reading the riven…",
+                }));
+                continue;
+            }
+            Ok(_) => continue,
+            Err(error) => {
+                if once {
+                    state.set(State::Failed(
+                        format!("Scanning failed: {error}"),
+                        Vec::new(),
+                    ));
+                }
+                return;
+            }
+        }
+        if once {
+            return;
+        }
+    }
+}
+
+/// Opens the page for a scan: the stored riven if it has been listed before, else the scan.
+async fn open(scan: RivenScan, mut state: Signal<State>, navigator: Navigator) {
+    if scan.weapon.is_none() || scan.attributes.is_empty() {
+        return state.set(State::Failed(
+            "Couldn't find a riven in that image. Use a screenshot of one riven card.".into(),
+            scan.warnings,
+        ));
+    }
+    state.set(State::Busy("Looking it up…"));
+    let target = match api::scan_match(scan.clone()).await {
+        Ok(Some(id)) => Route::RivenPage {
+            id,
+            auction: String::new(),
+        },
+        // Not listed before, or the lookup failed: show the scan on its own.
+        _ => Route::ScannedRivenPage {
+            scan: scan.to_param(),
+        },
+    };
+    *LAST_SCAN.write() = Some(ScanNote {
+        target: match &target {
+            Route::RivenPage { id, .. } => id.clone(),
+            Route::ScannedRivenPage { scan } => scan.clone(),
+            _ => String::new(),
+        },
+        warnings: scan.warnings,
+    });
+    state.set(State::Idle);
+    navigator.push(target);
+}
+
+/// The image button in the search bar, which also scans pasted screenshots.
+#[component]
+pub fn ScanButton() -> Element {
+    let mut state = use_signal(|| State::Idle);
+    let navigator = use_navigator();
+    let busy = matches!(state(), State::Busy(_));
+
+    // Effects only run in the browser. Installing the listener downloads nothing.
+    use_effect(move || {
+        spawn(async move {
+            follow(
+                document::eval(&format!("{COMMON}{PASTE}")),
+                state,
+                navigator,
+                false,
+            )
+            .await;
+        });
+    });
+    use_drop(|| {
+        document::eval(
+            r#"
+            if (window.__wfmtPaste) {
+              document.removeEventListener("paste", window.__wfmtPaste);
+              delete window.__wfmtPaste;
+            }
+            "#,
+        );
+    });
+
+    let preload = || {
+        document::eval(&format!("{COMMON}{PRELOAD}"));
+    };
+    let start = move |_| {
+        if busy {
+            return;
+        }
+        spawn(async move {
+            follow(
+                document::eval(&format!("{COMMON}{PICK}")),
+                state,
+                navigator,
+                true,
+            )
+            .await;
+        });
+    };
+
+    rsx! {
+        button {
+            class: if busy { "picker-scan busy" } else { "picker-scan" },
+            r#type: "button",
+            title: "Scan a riven screenshot (or paste one)",
+            aria_label: "Scan a riven screenshot",
+            onpointerenter: move |_| preload(),
+            onfocus: move |_| preload(),
+            onclick: start,
+            // An image icon.
+            svg { view_box: "0 0 24 24", width: "18", height: "18", fill: "none", stroke: "currentColor",
+                stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", "aria-hidden": "true",
+                rect { x: "3", y: "3", width: "18", height: "18", rx: "2" }
+                circle { cx: "8.5", cy: "8.5", r: "1.5" }
+                path { d: "M21 15l-5-5L5 21" }
+            }
+        }
+        match state() {
+            State::Idle => rsx! {},
+            State::Busy(message) => rsx! {
+                div { class: "scan-status", role: "status", span { class: "spinner" } "{message}" }
+            },
+            State::Failed(message, warnings) => rsx! {
+                div { class: "scan-status error", role: "alert",
+                    div { class: "scan-status-head",
+                        span { "{message}" }
+                        button { class: "picker-clear", title: "Dismiss", onclick: move |_| state.set(State::Idle), "×" }
+                    }
+                    if !warnings.is_empty() {
+                        ul { class: "muted small", for w in warnings { li { "{w}" } } }
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// What to double-check, shown on the page a scan opened.
+#[component]
+pub fn ScanNotice(target: String, matched: bool) -> Element {
+    let note = LAST_SCAN.read().clone().filter(|n| n.target == target);
+    if note.is_none() && matched {
+        return rsx! {};
+    }
+    let warnings = note.map(|n| n.warnings).unwrap_or_default();
+    rsx! {
+        div { class: "scan-note",
+            if matched {
+                "Matched your screenshot to this riven, which has been listed on warframe.market before."
+            } else {
+                "Read from a screenshot, and not listed on warframe.market before. Check the stats against your riven."
+            }
+            if !warnings.is_empty() {
+                ul { for w in warnings { li { "{w}" } } }
+            }
+        }
+    }
+}

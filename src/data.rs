@@ -19,10 +19,12 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 
 use crate::api::{
     AttrInfo, AttrView, CurseFilter, HistoryPoint, Listing, Overview, PricePoint, Query,
-    RivenAuction, RivenDetail, SearchResult, SimilarRiven, Sort, StatEffect, StatEffects,
-    WeaponInfo,
+    RivenAuction, RivenDetail, RivenScan, SearchResult, SimilarRiven, Sort, StatEffect,
+    StatEffects, WeaponInfo,
 };
 use crate::effects;
+use wfmt_scraper::identity::{IdAttr, IdInput, Registry};
+use wfmt_scraper::riven::{self, AttrInput, RivenInput, WeaponClass};
 
 const RESCAN_EVERY: Duration = Duration::from_secs(5);
 const MAX_LISTINGS: usize = 200;
@@ -233,6 +235,8 @@ impl Store {
                     let index = inner.intern_weapon(&w.slug, &w.i18n.en.name, class);
                     let weapon = &mut inner.weapons[index as usize];
                     weapon.name = w.i18n.en.name;
+                    weapon.is_bow =
+                        w.riven_type != "melee" && w.game_ref.to_ascii_lowercase().contains("bow");
                     weapon.group = w.group;
                     weapon.thumb = w.i18n.en.thumb;
                 }
@@ -256,6 +260,8 @@ struct CatalogWeapon {
     group: String,
     #[serde(default)]
     riven_type: String,
+    #[serde(default)]
+    game_ref: String,
     i18n: CatalogI18n,
 }
 
@@ -339,6 +345,8 @@ struct Weapon {
     class: String,
     /// warframe.market group: primary, secondary, melee, archgun, zaw, kitgun, sentinel.
     group: String,
+    /// Bows show fire rate doubled, which the stat model needs to know.
+    is_bow: bool,
     thumb: Option<String>,
     last_scrape: i64,
     /// Prices above this are invalid, see [`price_limit`].
@@ -1363,6 +1371,7 @@ impl Inner {
             name: name.to_owned(),
             class: class.to_owned(),
             group: String::new(),
+            is_bow: false,
             thumb: None,
             last_scrape: 0,
             price_limit: None,
@@ -2109,12 +2118,32 @@ impl Inner {
                 .map(|&i| &self.auctions[i as usize])
                 .max_by(|a, b| a.last_seen.cmp(&b.last_seen).then(a.id.cmp(&b.id)))?
         };
+        let (similar, similar_total, comparisons_hidden) =
+            self.similar_to(selected, include_legacy, include_unfit, include_loose);
+        Some(RivenDetail {
+            listing: self.listing(selected),
+            similar,
+            similar_total,
+            comparisons_hidden,
+            server_time: now_ms(),
+        })
+    }
+
+    /// Other rivens of the same weapon, closest first: the first 10, how many there are, and
+    /// how many the era / verification settings hid.
+    fn similar_to(
+        &self,
+        selected: &Auction,
+        include_legacy: bool,
+        include_unfit: bool,
+        include_loose: bool,
+    ) -> (Vec<SimilarRiven>, usize, usize) {
         // Pick a representative before scoring, so old relists cannot win twice or
         // make a riven appear closer than its latest eligible observation.
         let mut hidden = HashSet::new();
         let mut representatives: HashMap<u32, &Auction> = HashMap::new();
         for a in &self.auctions {
-            if a.weapon != selected.weapon || a.riven == riven {
+            if a.weapon != selected.weapon || a.riven == selected.riven {
                 continue;
             }
             if (!include_legacy && a.legacy_stats != Some(false)) || (!include_unfit && !a.fit_ok) {
@@ -2189,11 +2218,191 @@ impl Inner {
                 roll_distance: score.roll_distance,
             })
             .collect();
+        (similar, similar_total, hidden.len())
+    }
+
+    /// A scan as an auction that isn't stored, with its stats fitted like a listing's. `None`
+    /// for an unknown weapon. Attributes the data has never seen are left out of the auction
+    /// (they can't be compared), but stay in the fit.
+    fn scanned_auction(&self, scan: &RivenScan) -> Option<(Auction, Option<riven::Fit>)> {
+        let weapon = *self.weapon_index.get(scan.weapon.as_deref()?)?;
+        let w = &self.weapons[weapon as usize];
+        let class = match w.class.as_str() {
+            "rifle" => WeaponClass::Rifle,
+            "shotgun" => WeaponClass::Shotgun,
+            "pistol" => WeaponClass::Pistol,
+            "archgun" => WeaponClass::Archgun,
+            "melee" => WeaponClass::Melee,
+            _ => return None,
+        };
+        let inputs: Vec<AttrInput> = scan
+            .attributes
+            .iter()
+            .map(|a| AttrInput {
+                slug: &a.slug,
+                value: a.value,
+                positive: a.positive,
+            })
+            .collect();
+        // Screenshots don't show the rank reliably; the fit tries every rank anyway.
+        let fit = riven::fit(&RivenInput {
+            class,
+            is_bow: w.is_bow,
+            listed_rank: i64::from(riven::MAX_RANK),
+            attributes: &inputs,
+            legacy_disposition: None,
+            prefer_legacy: false,
+        })
+        .ok();
+        let attrs: Vec<Attr> = scan
+            .attributes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| {
+                let fitted = fit.as_ref().map(|f| &f.attributes[i]);
+                Some(Attr {
+                    attr: *self.attr_index.get(&a.slug)?,
+                    positive: a.positive,
+                    value: a.value,
+                    value_rank8: fitted.map(|f| f.value_rank8),
+                    quality: fitted.map(|f| f.quality),
+                })
+            })
+            .collect();
+        let positives: Vec<f64> = attrs
+            .iter()
+            .filter(|a| a.positive)
+            .filter_map(|a| a.quality)
+            .collect();
+        let now = now_ms();
+        let auction = Auction {
+            id: String::new(),
+            weapon,
+            riven: u32::MAX,
+            gone: None,
+            riven_name: scan.name.clone().unwrap_or_default().to_lowercase(),
+            polarity: String::new(),
+            mastery_level: scan.mastery_rank,
+            // A card shows no count until the riven is rerolled.
+            re_rolls: Some(scan.rerolls.unwrap_or(0)),
+            rank: fit.as_ref().map(|f| i32::from(f.rank)),
+            legacy_stats: fit.as_ref().map(|f| f.legacy),
+            fit_ok: fit.is_some(),
+            mean_quality: (!positives.is_empty())
+                .then(|| positives.iter().sum::<f64>() / positives.len() as f64),
+            owner_name: String::new(),
+            owner_reputation: None,
+            created: now,
+            first_seen: now,
+            last_seen: now,
+            attrs,
+            buyout_price: None,
+            starting_price: None,
+            top_bid: None,
+            direct_sell: false,
+        };
+        Some((auction, fit))
+    }
+
+    /// The id of the stored riven a scan shows, if it has been listed before. Matches the way
+    /// listings are identified, except that polarity isn't read from screenshots.
+    pub fn scan_match(&self, scan: &RivenScan) -> Option<String> {
+        let (auction, fit) = self.scanned_auction(scan)?;
+        let fit = fit?;
+        let attrs: Vec<IdAttr> = scan
+            .attributes
+            .iter()
+            .zip(&fit.attributes)
+            .map(|(a, f)| IdAttr {
+                slug: &a.slug,
+                positive: a.positive,
+                value: a.value,
+                roll: Some((f.roll, f.roll_tolerance)),
+            })
+            .collect();
+        let input = IdInput {
+            weapon: &self.weapons[auction.weapon as usize].slug,
+            polarity: "",
+            mastery_level: auction.mastery_level,
+            re_rolls: auction.re_rolls,
+            listed_rank: i64::from(fit.rank),
+            owner: "",
+            attributes: &attrs,
+        };
+        let journal = data_dir().join("rivens.jsonl");
+        let id = match Registry::find_in_journal(&journal, &input) {
+            Ok(id) => id?,
+            Err(e) => {
+                eprintln!("failed to read {}: {e:#}", journal.display());
+                return None;
+            }
+        };
+        self.riven_index.contains_key(&id).then_some(id)
+    }
+
+    /// The riven page for a scanned riven that isn't in the data.
+    pub fn scanned_detail(
+        &self,
+        scan: &RivenScan,
+        include_legacy: bool,
+        include_unfit: bool,
+        include_loose: bool,
+    ) -> Option<RivenDetail> {
+        let (auction, fit) = self.scanned_auction(scan)?;
+        let (similar, similar_total, comparisons_hidden) =
+            self.similar_to(&auction, include_legacy, include_unfit, include_loose);
+        let w = &self.weapons[auction.weapon as usize];
+        let listing = Listing {
+            auction_id: String::new(),
+            riven_id: String::new(),
+            price_outlier: false,
+            price_limit: w.price_limit,
+            copies: 0,
+            sellers: 0,
+            gone_at: None,
+            gone_reason: None,
+            last_seen: auction.last_seen,
+            unconfirmed: false,
+            weapon_slug: w.slug.clone(),
+            weapon_name: w.name.clone(),
+            riven_name: auction.riven_name.clone(),
+            price: None,
+            buyout_price: None,
+            starting_price: None,
+            top_bid: None,
+            direct_sell: false,
+            rank: auction.rank,
+            re_rolls: auction.re_rolls,
+            mastery_level: auction.mastery_level,
+            polarity: String::new(),
+            legacy_stats: auction.legacy_stats,
+            fit_ok: auction.fit_ok,
+            mean_quality: auction.mean_quality,
+            owner_name: String::new(),
+            owner_reputation: None,
+            created: auction.created,
+            first_seen: auction.first_seen,
+            attributes: scan
+                .attributes
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let fitted = fit.as_ref().map(|f| &f.attributes[i]);
+                    AttrView {
+                        slug: a.slug.clone(),
+                        positive: a.positive,
+                        value: a.value,
+                        value_rank8: fitted.map(|f| f.value_rank8),
+                        quality: fitted.map(|f| f.quality),
+                    }
+                })
+                .collect(),
+        };
         Some(RivenDetail {
-            listing: self.listing(selected),
+            listing,
             similar,
             similar_total,
-            comparisons_hidden: hidden.len(),
+            comparisons_hidden,
             server_time: now_ms(),
         })
     }

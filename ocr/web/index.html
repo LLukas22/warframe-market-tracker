@@ -1,0 +1,177 @@
+<!doctype html>
+<!-- Test page for the riven scanner. Adapted from pure-onnx-ocr's examples/web/index.html
+     (Apache-2.0, https://github.com/siska-tech/pure-onnx-ocr). See ocr/README.md. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Riven scanner test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; max-width: 1200px; background: #15121c; color: #e6e1ef; }
+    a, button, select { color: inherit; }
+    button, select { background: #2a2435; border: 1px solid #4a405c; border-radius: 4px; padding: 4px 8px; cursor: pointer; }
+    #status { margin: 8px 0; color: #a99fbc; }
+    .error { color: #ff6b81 !important; }
+    #drop { border: 2px dashed #4a405c; border-radius: 8px; padding: 12px; margin: 8px 0; }
+    #drop.over { border-color: #b48cff; }
+    #samples button { margin: 2px; }
+    #layout { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+    canvas { max-width: 420px; border: 1px solid #4a405c; }
+    table { border-collapse: collapse; }
+    td, th { padding: 2px 8px; text-align: left; border-bottom: 1px solid #2a2435; font-variant-numeric: tabular-nums; }
+    .ok { color: #7ee2a8; } .bad { color: #ff6b81; }
+    pre { font-size: 12px; color: #a99fbc; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Riven scanner test</h1>
+  <p>Runs PaddleOCR PP-OCRv6 and the riven parser in your browser (WebAssembly in a Web Worker). Nothing is uploaded.</p>
+  <label>Model:
+    <select id="tier">
+      <option value="tiny">PP-OCRv6 tiny</option>
+      <option value="small">PP-OCRv6 small</option>
+    </select>
+  </label>
+  <div id="drop">Drop, paste (Ctrl+V) or <input type="file" id="file" accept="image/*"> a riven screenshot.</div>
+  <div id="samples"></div>
+  <div id="status">Loading...</div>
+  <div id="layout">
+    <canvas id="canvas"></canvas>
+    <div>
+      <table id="result"></table>
+      <ul id="warnings"></ul>
+      <details><summary>OCR lines</summary><pre id="lines"></pre></details>
+    </div>
+  </div>
+  <script type="module">
+    import { createRivenScanner } from "./scanner.js";
+
+    const $ = (id) => document.getElementById(id);
+    const status = (text, isError = false) => {
+      $("status").textContent = text;
+      $("status").className = isError ? "error" : "";
+    };
+    // Served from ocr/ (see ocr/README.md), so these are siblings of web/.
+    const MODELS = "../models";
+    const SAMPLES = "../tests/samples";
+    const WEAPONS = "../tests/fixtures/riven_weapons.json";
+    const ATTRIBUTES = "../tests/fixtures/riven_attributes.json";
+
+    const expected = new Map();
+
+    // Nothing is downloaded until the first preload() or scan().
+    const makeScanner = (tier) =>
+      createRivenScanner({
+        tier,
+        models: MODELS,
+        weapons: WEAPONS,
+        attributes: ATTRIBUTES,
+        onState: (state, detail) => {
+          if (state === "loading") status(`Loading PP-OCRv6 ${tier}...`);
+          if (state === "ready") status(`PP-OCRv6 ${tier} loaded in ${detail.ms.toFixed(0)} ms.`);
+        },
+      });
+    let scanner = makeScanner($("tier").value);
+
+    function draw(bitmap, lines) {
+      const canvas = $("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(bitmap, 0, 0);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#e5007d";
+      for (const l of lines) ctx.strokeRect(l.x, l.y, l.width, l.height);
+    }
+
+    function show(riven, want) {
+      const rows = [];
+      // `wanted` and `shown` are only compared when the image has expected values.
+      const cell = (label, got, wanted, shown = wanted) => {
+        const same = JSON.stringify(got) === JSON.stringify(wanted);
+        const check = want === undefined ? "" : same ? "ok" : "bad";
+        const expect = check === "bad" ? ` (expected ${shown ?? "none"})` : "";
+        const text = Array.isArray(got) ? `${got[2] ? "+" : "-"} ${got[1]} ${got[0]}` : got ?? "?";
+        rows.push(`<tr><th>${label}</th><td class="${check}">${text}${expect}</td></tr>`);
+      };
+      cell("Weapon", riven.weapon, want?.weapon);
+      cell("Name", riven.name, want?.name);
+      cell("Mastery rank", riven.mastery_rank, want?.mastery_rank);
+      cell("Rerolls", riven.rerolls, want?.rerolls);
+      const count = Math.max(riven.attributes.length, want?.attributes?.length ?? 0);
+      for (let i = 0; i < count; i++) {
+        const a = riven.attributes[i];
+        const wanted = want?.attributes?.[i];
+        cell(`Stat ${i + 1}`, a ? [a.slug, a.value, a.positive] : null, wanted, wanted && `${wanted[1]} ${wanted[0]}`);
+      }
+      rows.push(`<tr><th>Name fits stats</th><td>${riven.name_matches_attributes ?? "?"}</td></tr>`);
+      $("result").innerHTML = rows.join("");
+      $("warnings").replaceChildren(...riven.warnings.map((w) => Object.assign(document.createElement("li"), { textContent: w, className: "error" })));
+    }
+
+    async function scan(buffer, want) {
+      try {
+        const bitmap = await createImageBitmap(new Blob([buffer]));
+        await scanner.preload();
+        status("Scanning...");
+        const output = await scanner.scan(buffer);
+        draw(bitmap, output.lines);
+        show(output.riven, want);
+        $("lines").textContent = output.lines.map((l) => `${l.confidence.toFixed(2)}  ${l.text}`).join("\n");
+        status(`Scanned in ${output.ms.toFixed(0)} ms with PP-OCRv6 ${scanner.tier}.`);
+        // For automated checks.
+        window.scanOutput = { ...output, expected: want };
+        return output;
+      } catch (error) {
+        status(error.message, true);
+        window.scanError = error.message;
+      }
+    }
+
+    const scanUrl = async (url, want) => scan(await (await fetch(url)).arrayBuffer(), want);
+
+    $("file").addEventListener("change", async (e) => e.target.files[0] && scan(await e.target.files[0].arrayBuffer()));
+    $("tier").addEventListener("change", () => {
+      scanner.dispose();
+      scanner = makeScanner($("tier").value);
+      status(`PP-OCRv6 ${scanner.tier} loads on the next scan.`);
+    });
+    document.addEventListener("paste", async (e) => {
+      const file = [...e.clipboardData.files].find((f) => f.type.startsWith("image/"));
+      if (file) scan(await file.arrayBuffer());
+    });
+    const drop = $("drop");
+    // Like opening the upload dialog in the app: start loading while the user picks a file.
+    drop.addEventListener("pointerenter", () => scanner.preload().catch((e) => status(e.message, true)), { once: true });
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      drop.classList.remove("over");
+      const file = e.dataTransfer.files[0];
+      if (file) scan(await file.arrayBuffer());
+    });
+
+    // Sample screenshots, if ocr/scripts/fetch-samples.sh has been run.
+    try {
+      const list = await (await fetch(`${SAMPLES}/expected.json`)).json();
+      for (const sample of list.samples) {
+        const want = sample.not_a_riven ? { weapon: null, name: null, mastery_rank: null, rerolls: null, attributes: [] } : sample;
+        expected.set(sample.file, want);
+        const button = Object.assign(document.createElement("button"), { textContent: sample.file });
+        button.onclick = () => scanUrl(`${SAMPLES}/images/${sample.file}`, want);
+        $("samples").append(button);
+      }
+    } catch {
+      $("samples").textContent = "No samples (run ocr/scripts/fetch-samples.sh).";
+    }
+
+    // ?sample=mods/r1.png[&tier=tiny] or ?image=URL scans on load.
+    const params = new URLSearchParams(location.search);
+    if (params.get("tier")) $("tier").value = params.get("tier");
+    if (params.get("sample")) scanUrl(`${SAMPLES}/images/${params.get("sample")}`, expected.get(params.get("sample")));
+    else if (params.get("image")) scanUrl(params.get("image"));
+    else status("Pick a sample or drop a screenshot.");
+  </script>
+</body>
+</html>

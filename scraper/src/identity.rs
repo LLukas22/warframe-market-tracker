@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -221,6 +221,73 @@ impl Registry {
         }
     }
 
+    /// Finds a known riven without registering anything, for rivens read from a screenshot.
+    /// Screenshots don't show polarity reliably, so any polarity matches; everything else
+    /// follows [`identify`](Self::identify). Only fitted stats can match.
+    ///
+    /// Streams the journal at `path` and only parses this weapon's lines.
+    pub fn find_in_journal(path: &Path, input: &IdInput) -> Result<Option<String>> {
+        let mut order: Vec<usize> = (0..input.attributes.len()).collect();
+        order.sort_by_key(|&i| (input.attributes[i].slug, !input.attributes[i].positive));
+        let attrs: Vec<&IdAttr> = order.iter().map(|&i| &input.attributes[i]).collect();
+        let Some(fitted) = attrs.iter().map(|a| a.roll).collect::<Option<Vec<_>>>() else {
+            return Ok(None);
+        };
+        let stats = attrs
+            .iter()
+            .map(|a| format!("{}{}", if a.positive { '+' } else { '-' }, a.slug))
+            .collect::<Vec<_>>()
+            .join(",");
+        // `weapon|polarity|rest`: everything but the polarity has to be equal.
+        let rest = format!(
+            "mr{}|rr{}|{stats}",
+            input.mastery_level.unwrap_or(-1),
+            input.re_rolls.unwrap_or(-1),
+        );
+        let prefix = format!("{{\"key\":\"{}|", input.weapon);
+
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        // Later lines for the same id replace earlier ones.
+        let mut candidates: HashMap<String, Entry> = HashMap::new();
+        for line in BufReader::new(file).lines() {
+            let line = line?;
+            if !line.starts_with(&prefix) {
+                continue;
+            }
+            let Ok(entry) = serde_json::from_str::<Entry>(&line) else {
+                continue;
+            };
+            let mut parts = entry.key.splitn(3, '|');
+            let (Some(_weapon), Some(_polarity), Some(key_rest)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if key_rest == rest && entry.rolls.len() == fitted.len() {
+                candidates.insert(entry.id.clone(), entry);
+            }
+        }
+        Ok(candidates
+            .into_values()
+            .filter_map(|e| {
+                let mut worst = 0.0f64;
+                for (k, (roll, tolerance)) in fitted.iter().enumerate() {
+                    let diff = (roll - e.rolls[k]).abs();
+                    if diff > tolerance + e.tolerances[k] + 1e-6 {
+                        return None;
+                    }
+                    worst = worst.max(diff);
+                }
+                Some((e.id, worst))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
+            .map(|(id, _)| id))
+    }
+
     fn mint(
         &mut self,
         key: &str,
@@ -331,6 +398,47 @@ mod tests {
         let id1 = Registry::in_memory().identify(&input(&a, 1));
         let id2 = Registry::in_memory().identify(&input(&a, 1));
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn journal_lookup_ignores_polarity_and_never_registers() {
+        let dir = std::env::temp_dir().join(format!("wfmt-lookup-{}", std::process::id()));
+        let path = dir.join("rivens.jsonl");
+        let _ = fs::remove_file(&path);
+        let a = [
+            fitted("critical_chance", true, 1.04, 0.0004),
+            fitted("multishot", true, 0.95, 0.0005),
+        ];
+        let mut reg = Registry::open(path.clone()).unwrap();
+        let id = reg.identify(&input(&a, 1));
+        reg.flush().unwrap();
+
+        // Read from a screenshot: no polarity, rolls known less precisely, other order.
+        let scanned = [
+            fitted("multishot", true, 0.953, 0.004),
+            fitted("critical_chance", true, 1.042, 0.004),
+        ];
+        let mut lookup = input(&scanned, 1);
+        lookup.polarity = "";
+        assert_eq!(Registry::find_in_journal(&path, &lookup).unwrap(), Some(id));
+        let other = [
+            fitted("multishot", true, 1.05, 0.004),
+            fitted("critical_chance", true, 1.042, 0.004),
+        ];
+        assert_eq!(
+            Registry::find_in_journal(&path, &input(&other, 1)).unwrap(),
+            None
+        );
+        assert_eq!(
+            Registry::find_in_journal(&path, &input(&scanned, 2)).unwrap(),
+            None
+        );
+        assert_eq!(Registry::open(path.clone()).unwrap().len(), 1);
+        assert_eq!(
+            Registry::find_in_journal(&dir.join("missing.jsonl"), &lookup).unwrap(),
+            None
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

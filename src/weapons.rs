@@ -140,10 +140,11 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>, query: Signal<Query>) -> Element {
                     }
                 }
                 input {
+                    id: "weapon-search",
                     r#type: "text",
                     placeholder: match &selected {
                         Some(w) => w.name.clone(),
-                        None => "Search weapons or paste a riven id…".to_owned(),
+                        None => "Search weapons, paste a riven id or screenshot…".to_owned(),
                     },
                     class: if selected.is_some() { "has-selection" } else { "" },
                     value: "{text}",
@@ -195,6 +196,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>, query: Signal<Query>) -> Element {
                         "×"
                     }
                 }
+                crate::scan::ScanButton {}
             }
             if open() && id_like {
                 div { class: "picker-menu",

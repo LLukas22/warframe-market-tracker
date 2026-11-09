@@ -1,3 +1,7 @@
 /target
 /data
 /.env
+/ocr/models
+/ocr/tests/samples/images
+/ocr/web/pkg
+/ocr/dist

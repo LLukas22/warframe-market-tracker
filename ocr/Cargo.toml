@@ -1,0 +1,38 @@
+[package]
+name = "wfmt-ocr"
+version = "0.1.0"
+edition = "2024"
+description = "Reads riven mods from in-game screenshots: PaddleOCR (pure-onnx-ocr) plus a riven card parser. Builds for the browser."
+license = "MIT"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+# Runs PaddleOCR on images. Without it the crate only parses OCR lines.
+engine = ["dep:pure-onnx-ocr", "dep:image"]
+# wasm-bindgen exports for the browser, see scripts/build-web.sh.
+wasm = ["engine", "dep:wasm-bindgen"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Its default `multithread` feature needs threads, which plain wasm32 doesn't have.
+pure-onnx-ocr = { version = "0.3.2", default-features = false, optional = true }
+# Same version pure-onnx-ocr uses; for cropping. Its decoders come with pure-onnx-ocr.
+image = { version = "0.25", default-features = false, optional = true }
+# Must match the root crate's pin and the installed wasm-bindgen CLI.
+wasm-bindgen = { version = "=0.2.129", optional = true }
+
+[dev-dependencies]
+# Only for checking scans with the stat model (`riven::fit`) in the example and sample test.
+wfmt-scraper = { path = "../scraper" }
+
+[[example]]
+name = "scan"
+required-features = ["engine"]
+
+[[test]]
+name = "samples"
+required-features = ["engine"]

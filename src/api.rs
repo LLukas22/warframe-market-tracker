@@ -259,6 +259,121 @@ pub async fn riven_detail(
     .await
 }
 
+/// One stat read from a screenshot, as warframe.market lists it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScanAttr {
+    pub slug: String,
+    pub value: f64,
+    pub positive: bool,
+}
+
+/// A riven read from a screenshot by the OCR module (`ocr/`). Deserializes its JSON directly.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RivenScan {
+    #[serde(default)]
+    pub weapon: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub mastery_rank: Option<i64>,
+    /// `None` when the card shows no count, which means it was never rerolled.
+    #[serde(default)]
+    pub rerolls: Option<i64>,
+    #[serde(default)]
+    pub attributes: Vec<ScanAttr>,
+    /// Shown with the scan; not part of the page URL.
+    #[serde(default, skip_serializing)]
+    pub warnings: Vec<String>,
+}
+
+impl RivenScan {
+    /// Compact form for the page URL: `weapon~name~mr~rerolls~pslug:value,nslug:value`. The
+    /// router decodes the whole query before splitting it, so this avoids `&`, `=` and `%`.
+    pub fn to_param(&self) -> String {
+        let attrs: Vec<String> = self
+            .attributes
+            .iter()
+            .map(|a| {
+                format!(
+                    "{}{}:{}",
+                    if a.positive { 'p' } else { 'n' },
+                    a.slug,
+                    a.value
+                )
+            })
+            .collect();
+        let clean = |s: &Option<String>| {
+            s.as_deref()
+                .unwrap_or("")
+                .chars()
+                .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
+                .collect::<String>()
+        };
+        let number = |n: Option<i64>| n.map(|n| n.to_string()).unwrap_or_default();
+        format!(
+            "{}~{}~{}~{}~{}",
+            clean(&self.weapon),
+            clean(&self.name),
+            number(self.mastery_rank),
+            number(self.rerolls),
+            attrs.join(",")
+        )
+    }
+
+    pub fn from_param(param: &str) -> Option<Self> {
+        let mut parts = param.split('~');
+        let mut text = || parts.next().map(str::to_owned);
+        let (weapon, name, mastery, rerolls, attrs) = (text()?, text()?, text()?, text()?, text()?);
+        let non_empty = |s: String| (!s.is_empty()).then_some(s);
+        let attributes = attrs
+            .split(',')
+            .filter(|a| !a.is_empty())
+            .map(|a| {
+                let (sign, rest) = a.split_at_checked(1)?;
+                let (slug, value) = rest.rsplit_once(':')?;
+                Some(ScanAttr {
+                    slug: slug.to_owned(),
+                    value: value.parse().ok()?,
+                    positive: match sign {
+                        "p" => true,
+                        "n" => false,
+                        _ => return None,
+                    },
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            weapon: non_empty(weapon),
+            name: non_empty(name),
+            mastery_rank: mastery.parse().ok(),
+            rerolls: rerolls.parse().ok(),
+            attributes,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+/// The riven a scan was matched to, if it has been listed before.
+#[post("/api/scan/match")]
+pub async fn scan_match(scan: RivenScan) -> Result<Option<String>, ServerFnError> {
+    crate::data::run(move |store| store.scan_match(&scan)).await
+}
+
+/// The riven page for a scanned riven that isn't in the data: the scan graded by the stat
+/// model, plus similar rivens. `None` for an unknown weapon.
+#[post("/api/scan/detail")]
+pub async fn scanned_detail(
+    scan: RivenScan,
+    include_legacy: bool,
+    include_unfit: bool,
+    include_loose: bool,
+) -> Result<Option<RivenDetail>, ServerFnError> {
+    crate::data::run(move |store| {
+        store.scanned_detail(&scan, include_legacy, include_unfit, include_loose)
+    })
+    .await
+}
+
 /// How one stat moves the price of a weapon's rivens, compared with rivens without it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatEffect {

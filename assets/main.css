@@ -108,6 +108,62 @@ select.compact { padding: 5px 8px; font-size: 13px; }
 .picker-box input.has-selection::placeholder { color: var(--text); font-weight: 600; }
 .picker-clear { border: none; background: transparent; color: var(--muted); font-size: 18px; padding: 0 6px; }
 .picker-clear:hover { color: var(--text); }
+.picker-scan {
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.picker-scan:hover, .picker-scan:focus-visible { color: var(--accent); background: var(--accent-soft); }
+.picker-scan.busy { color: var(--accent); cursor: progress; }
+
+/* Under the search box, like the weapon menu. */
+.scan-status {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgb(0 0 0 / .5);
+  padding: 10px 12px;
+  font-size: 14px;
+}
+.scan-status.error { display: block; border-color: color-mix(in srgb, var(--negative) 50%, var(--border)); }
+.scan-status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.scan-status ul { margin: 6px 0 0; padding-left: 18px; }
+.spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--panel-3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.scan-note {
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+.scan-note.warn {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.scan-note ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted); }
 
 .picker-menu {
   position: absolute;
@@ -586,7 +642,7 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
   .brand button, .auction-count { min-height: 36px; }
   .tab { padding: 8px 12px; font-size: 13px; }
   .chip button { min-width: 32px; min-height: 28px; font-size: 16px; }
-  .picker-clear { min-width: 40px; min-height: 40px; }
+  .picker-clear, .picker-scan { min-width: 40px; min-height: 40px; }
   .riven-id .copy { padding: 4px 10px; }
   .link-button { padding: 8px 0; font-size: 13px; }
   .scraper-action, .show-all, button.reset { min-height: 40px; }

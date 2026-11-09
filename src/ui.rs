@@ -76,6 +76,9 @@ pub(crate) enum Route {
     MarketRoute {},
     #[route("/riven/:id?:auction")]
     RivenPage { id: String, auction: String },
+    /// A riven read from a screenshot that isn't in the data (see `RivenScan::to_param`).
+    #[route("/scanned?:scan")]
+    ScannedRivenPage { scan: String },
 }
 
 #[component]
@@ -212,10 +215,11 @@ fn RivenPage(id: String, auction: String) -> Element {
 
 #[component]
 fn RivenPageContent(id: String, auction: String) -> Element {
+    let id_for_notice = id.clone();
     let version = use_context::<Signal<u64>>();
-    let mut include_legacy = use_signal(|| false);
-    let mut include_unfit = use_signal(|| false);
-    let mut include_loose = use_signal(|| false);
+    let include_legacy = use_signal(|| false);
+    let include_unfit = use_signal(|| false);
+    let include_loose = use_signal(|| false);
     let mut detail = use_resource(move || {
         version.read();
         let legacy = include_legacy();
@@ -228,6 +232,7 @@ fn RivenPageContent(id: String, auction: String) -> Element {
     rsx! {
         main { class: "riven-page",
             Link { to: Route::MarketRoute {}, class: "back-link", "← Back to search" }
+            crate::scan::ScanNotice { target: id_for_notice, matched: true }
             match &*detail.read() {
                 None => rsx! { p { role: "status", "Loading riven…" } },
                 Some(Err(error)) => rsx! {
@@ -250,61 +255,214 @@ fn RivenPageContent(id: String, auction: String) -> Element {
                         crate::journey::RivenJourney {
                             id: selected.riven_id.clone(), selected_auction: selected.auction_id.clone(),
                         }
-                        section { class: "similar-rivens",
-                            h2 { "Similar rivens seen before" }
-                            p { class: "muted",
-                                "Same weapon, closest stat matches first. Prices are observed listings, not confirmed sales."
+                        SimilarRivens {
+                            selected: selected.clone(), similar: data.similar.clone(),
+                            similar_total: data.similar_total, comparisons_hidden: data.comparisons_hidden,
+                            now: data.server_time, updating: detail.pending(),
+                            include_legacy, include_unfit, include_loose,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ScannedRivenPage(scan: String) -> Element {
+    rsx! { ScannedRivenContent { key: "{scan}", scan } }
+}
+
+#[component]
+fn ScannedRivenContent(scan: String) -> Element {
+    let parsed = api::RivenScan::from_param(&scan);
+    let version = use_context::<Signal<u64>>();
+    let include_legacy = use_signal(|| false);
+    let include_unfit = use_signal(|| false);
+    let include_loose = use_signal(|| false);
+    let mut detail = use_resource(move || {
+        version.read();
+        let parsed = parsed.clone();
+        let (legacy, unfit, loose) = (include_legacy(), include_unfit(), include_loose());
+        async move {
+            match parsed {
+                Some(scan) => api::scanned_detail(scan, legacy, unfit, loose).await,
+                None => Ok(None),
+            }
+        }
+    });
+    rsx! {
+        main { class: "riven-page",
+            Link { to: Route::MarketRoute {}, class: "back-link", "← Back to search" }
+            match &*detail.read() {
+                None => rsx! { p { role: "status", "Loading riven…" } },
+                Some(Err(error)) => rsx! {
+                    p { class: "error", "Could not load this riven: {error}" }
+                    button { onclick: move |_| detail.restart(), "Retry" }
+                },
+                Some(Ok(None)) => rsx! {
+                    h2 { "Riven not found" }
+                    p { "This scan doesn't name a known weapon. Try scanning the screenshot again." }
+                },
+                Some(Ok(Some(data))) => {
+                    let selected = &data.listing;
+                    rsx! {
+                        document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
+                        h2 { "Scanned riven" }
+                        crate::scan::ScanNotice { target: scan.clone(), matched: false }
+                        if !selected.fit_ok {
+                            p { class: "scan-note warn",
+                                "These values don't fit any rank of this riven, so a number was probably misread. Similar rivens are still shown, without roll comparisons."
                             }
-                            details { class: "similar-options",
-                                summary { "Comparison settings" }
-                                label { class: "check",
-                                    input { r#type: "checkbox", checked: include_legacy(),
-                                        onchange: move |e| include_legacy.set(e.checked()) }
-                                    " Include pre-rework / unknown-era stats"
-                                }
-                                label { class: "check",
-                                    input { r#type: "checkbox", checked: include_unfit(),
-                                        onchange: move |e| include_unfit.set(e.checked()) }
-                                    " Include unverified stats"
-                                }
-                                label { class: "check",
-                                    input { r#type: "checkbox", checked: include_loose(),
-                                        onchange: move |e| include_loose.set(e.checked()) }
-                                    " Include loose matches with one shared positive"
-                                }
-                                if data.comparisons_hidden > 0 {
-                                    p { class: "muted small", "{data.comparisons_hidden} potential matches hidden by the era / verification settings." }
-                                }
-                            }
-                            if detail.pending() { p { role: "status", "Updating comparisons…" } }
-                            p { class: "muted small", "{data.similar.len()} closest matches · {data.similar_total} found" }
-                            if data.similar.is_empty() {
-                                p { "No matching rivens in the stored history with these settings yet." }
-                            }
-                            for matched in data.similar.iter().take(10) {
-                                article { key: "{matched.listing.riven_id}", class: "similar-match",
-                                    div { class: "match-reason",
-                                        span { class: "match-label", "{match_label(matched)}" }
-                                        if !matched.same_stats {
-                                            span { class: "stat-difference", "{match_differences(selected, matched)}" }
-                                        }
-                                        if let Some(distance) = matched.roll_distance {
-                                            span { class: "muted match-quality", title: "Average normalized roll difference on shared stats", "Roll difference {distance * 100.0:.1} pp" }
-                                        }
-                                    }
-                                    ListingRow {
-                                        listing: matched.listing.clone(), now: data.server_time,
-                                        show_weapon: false, has_image: false, open_initially: false,
-                                    }
-                                }
-                            }
-                            if !include_loose() && data.similar_total < 10 {
-                                button { class: "link-button", onclick: move |_| include_loose.set(true),
-                                    "Broaden to one shared positive stat"
+                        }
+                        ScannedRivenCard { listing: selected.clone() }
+                        SimilarRivens {
+                            selected: selected.clone(), similar: data.similar.clone(),
+                            similar_total: data.similar_total, comparisons_hidden: data.comparisons_hidden,
+                            now: data.server_time, updating: detail.pending(),
+                            include_legacy, include_unfit, include_loose,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A scanned riven, laid out like an opened listing but without price, seller or id.
+#[component]
+fn ScannedRivenCard(listing: Listing) -> Element {
+    let loaded = use_context::<Signal<Option<Overview>>>();
+    let l = &listing;
+    let has_image = loaded()
+        .and_then(|o| {
+            o.weapons
+                .iter()
+                .find(|w| w.slug == l.weapon_slug)
+                .map(|w| w.has_image)
+        })
+        .unwrap_or(false);
+    let rank = l
+        .rank
+        .map(|r| format!("R{r} by its values"))
+        .unwrap_or_else(|| "R?".into());
+    let mr = l
+        .mastery_level
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "?".into());
+    let rolls = l.re_rolls.unwrap_or(0);
+    let quality = l.mean_quality.map(|q| format!("{:.0}%", q * 100.0));
+    rsx! {
+        div { class: "listing open scanned",
+            div { class: "listing-main",
+                WeaponImage { slug: l.weapon_slug.clone(), has_image, name: l.weapon_name.clone(), size: "sm" }
+                div { class: "name",
+                    div { class: "riven-name", "{l.weapon_name} {l.riven_name}" }
+                    div { class: "muted small", "{rank} · MR{mr} · {rolls} rolls" }
+                    div {
+                        span { class: "tag info", "from a screenshot" }
+                        if l.legacy_stats == Some(true) {
+                            span { class: "tag warn", "pre-rework" }
+                        }
+                        if !l.fit_ok {
+                            span { class: "tag bad", "unverified" }
+                        }
+                    }
+                }
+                div { class: "attrs",
+                    for a in l.attributes.iter() {
+                        div {
+                            key: "{a.slug}",
+                            class: if a.positive { "attr positive" } else { "attr negative" },
+                            span { class: "attr-value", "{format_value(&a.slug, a.value)}" }
+                            span { class: "attr-name", "{attribute_name(&a.slug)}" }
+                            if let Some(q) = a.quality {
+                                span { class: "quality", title: "roll {q * 100.0:.0}%",
+                                    span { class: "quality-bar", style: "width: {q * 100.0:.0}%" }
                                 }
                             }
                         }
                     }
+                }
+                div { class: "meta",
+                    if let Some(q) = quality {
+                        div { class: "roll", title: "average roll of the positive stats", "{q} roll" }
+                    }
+                }
+            }
+            ListingDetail { listing: listing.clone(), url: String::new() }
+        }
+    }
+}
+
+/// Other rivens of the same weapon, closest first, with the comparison settings.
+#[component]
+fn SimilarRivens(
+    selected: Listing,
+    similar: Vec<api::SimilarRiven>,
+    similar_total: usize,
+    comparisons_hidden: usize,
+    now: i64,
+    updating: bool,
+    include_legacy: Signal<bool>,
+    include_unfit: Signal<bool>,
+    include_loose: Signal<bool>,
+) -> Element {
+    let mut include_legacy = include_legacy;
+    let mut include_unfit = include_unfit;
+    let mut include_loose = include_loose;
+    rsx! {
+        section { class: "similar-rivens",
+            h2 { "Similar rivens seen before" }
+            p { class: "muted",
+                "Same weapon, closest stat matches first. Prices are observed listings, not confirmed sales."
+            }
+            details { class: "similar-options",
+                summary { "Comparison settings" }
+                label { class: "check",
+                    input { r#type: "checkbox", checked: include_legacy(),
+                        onchange: move |e| include_legacy.set(e.checked()) }
+                    " Include pre-rework / unknown-era stats"
+                }
+                label { class: "check",
+                    input { r#type: "checkbox", checked: include_unfit(),
+                        onchange: move |e| include_unfit.set(e.checked()) }
+                    " Include unverified stats"
+                }
+                label { class: "check",
+                    input { r#type: "checkbox", checked: include_loose(),
+                        onchange: move |e| include_loose.set(e.checked()) }
+                    " Include loose matches with one shared positive"
+                }
+                if comparisons_hidden > 0 {
+                    p { class: "muted small", "{comparisons_hidden} potential matches hidden by the era / verification settings." }
+                }
+            }
+            if updating { p { role: "status", "Updating comparisons…" } }
+            p { class: "muted small", "{similar.len()} closest matches · {similar_total} found" }
+            if similar.is_empty() {
+                p { "No matching rivens in the stored history with these settings yet." }
+            }
+            for matched in similar.iter().take(10) {
+                article { key: "{matched.listing.riven_id}", class: "similar-match",
+                    div { class: "match-reason",
+                        span { class: "match-label", "{match_label(matched)}" }
+                        if !matched.same_stats {
+                            span { class: "stat-difference", "{match_differences(&selected, matched)}" }
+                        }
+                        if let Some(distance) = matched.roll_distance {
+                            span { class: "muted match-quality", title: "Average normalized roll difference on shared stats", "Roll difference {distance * 100.0:.1} pp" }
+                        }
+                    }
+                    ListingRow {
+                        listing: matched.listing.clone(), now: now,
+                        show_weapon: false, has_image: false, open_initially: false,
+                    }
+                }
+            }
+            if !include_loose() && similar_total < 10 {
+                button { class: "link-button", onclick: move |_| include_loose.set(true),
+                    "Broaden to one shared positive stat"
                 }
             }
         }
@@ -965,7 +1123,9 @@ fn ListingRow(
 fn ListingDetail(listing: Listing, url: String) -> Element {
     rsx! {
         details { class: "detail extra-details",
-            summary { "More details · normalized stats & riven ID" }
+            summary {
+                if listing.auction_id.is_empty() { "More details · normalized stats" } else { "More details · normalized stats & riven ID" }
+            }
             table {
                 thead {
                     tr {
@@ -993,13 +1153,16 @@ fn ListingDetail(listing: Listing, url: String) -> Element {
                     }
                 }
             }
-            div { class: "detail-id",
-                span { class: "muted small", "Riven id" }
-                RivenId { id: listing.riven_id.clone(), short: false }
-            }
-            div { class: "muted small",
-                "first seen {format_datetime(listing.first_seen)} UTC · seller reputation {listing.owner_reputation.unwrap_or(0)} · "
-                a { href: "{url}", target: "_blank", rel: "noopener", "open on warframe.market ↗" }
+            // Scanned rivens have no id or auction.
+            if !listing.auction_id.is_empty() {
+                div { class: "detail-id",
+                    span { class: "muted small", "Riven id" }
+                    RivenId { id: listing.riven_id.clone(), short: false }
+                }
+                div { class: "muted small",
+                    "first seen {format_datetime(listing.first_seen)} UTC · seller reputation {listing.owner_reputation.unwrap_or(0)} · "
+                    a { href: "{url}", target: "_blank", rel: "noopener", "open on warframe.market ↗" }
+                }
             }
         }
     }
@@ -1058,5 +1221,54 @@ mod route_tests {
             }
         );
         assert_eq!("/".parse::<Route>().unwrap(), Route::MarketRoute {});
+    }
+
+    #[test]
+    fn scanned_riven_links_round_trip() {
+        let scan = api::RivenScan {
+            weapon: Some("arca_plasmor".into()),
+            name: Some("Manti-acritox".into()),
+            mastery_rank: Some(16),
+            rerolls: None,
+            attributes: vec![
+                api::ScanAttr {
+                    slug: "damage_vs_corpus".into(),
+                    value: 1.31,
+                    positive: true,
+                },
+                api::ScanAttr {
+                    slug: "fire_rate_/_attack_speed".into(),
+                    value: 13.5,
+                    positive: true,
+                },
+                api::ScanAttr {
+                    slug: "recoil".into(),
+                    value: 6.5,
+                    positive: false,
+                },
+                api::ScanAttr {
+                    slug: "ammo_maximum".into(),
+                    value: -47.2,
+                    positive: false,
+                },
+            ],
+            warnings: vec!["not in the url".into()],
+        };
+        let route = Route::ScannedRivenPage {
+            scan: scan.to_param(),
+        };
+        let parsed = route.to_string().parse::<Route>().unwrap();
+        assert_eq!(parsed, route);
+        let Route::ScannedRivenPage { scan: param } = parsed else {
+            unreachable!()
+        };
+        assert_eq!(
+            api::RivenScan::from_param(&param),
+            Some(api::RivenScan {
+                warnings: Vec::new(),
+                ..scan
+            })
+        );
+        assert_eq!(api::RivenScan::from_param("garbage"), None);
     }
 }

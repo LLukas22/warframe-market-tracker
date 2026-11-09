@@ -1,0 +1,26 @@
+{
+  "about": "Hand-read from the screenshots in github.com/Endermy/wm-riven-ocr (test/samples, Chinese game client). The images are not included here because that repository has no license; scripts/fetch-samples.sh downloads them. rerolls null means the card shows no reroll count.",
+  "repository": "Endermy/wm-riven-ocr",
+  "commit": "85632610f6835c1dc37693583a5a1591f978c730",
+  "samples": [
+    { "file": "card1.png", "weapon": "thalys", "name": "Visi-toxipha", "mastery_rank": 13, "rerolls": null,
+      "attributes": [["toxin_damage", 11.4, true], ["base_damage_/_melee_damage", 21.4, true], ["heat_damage", 10.2, true], ["status_chance", -8.7, false]] },
+    { "file": "card2.png", "weapon": "xoris", "name": "Hexaum", "mastery_rank": 16, "rerolls": null,
+      "attributes": [["channeling_damage", 2.9, true], ["status_chance", 10.8, true]] },
+    { "file": "mods/r1.png", "weapon": "tombfinger", "name": "Hexa-ignitox", "mastery_rank": 14, "rerolls": 41,
+      "attributes": [["toxin_damage", 75.2, true], ["status_chance", 79.8, true], ["heat_damage", 78.9, true]] },
+    { "file": "mods/r2.png", "weapon": "tysis", "name": "Magnadex", "mastery_rank": 16, "rerolls": null,
+      "attributes": [["status_chance", 14.0, true], ["impact_damage", 21.1, true], ["critical_chance", -10.8, false]] },
+    { "file": "mods/r3.png", "weapon": "harpak", "name": "Insitron", "mastery_rank": 10, "rerolls": null,
+      "attributes": [["puncture_damage", 19.6, true], ["damage_vs_corpus", 1.07, true], ["recoil", 6.5, false]] },
+    { "file": "mods/r4.png", "weapon": "arca_plasmor", "name": "Manti-acritox", "mastery_rank": 16, "rerolls": 6,
+      "attributes": [["damage_vs_corpus", 1.31, true], ["critical_damage", 57.6, true], ["toxin_damage", 55.2, true], ["ammo_maximum", -47.2, false]] },
+    { "file": "mods/r5.png", "weapon": "soma", "name": "Toxitron", "mastery_rank": 12, "rerolls": null,
+      "attributes": [["damage_vs_corpus", 1.07, true], ["toxin_damage", 14.6, true], ["status_chance", -5.5, false]] },
+    { "file": "mods/r6.png", "weapon": "tombfinger", "name": "Hexa-ignitox", "mastery_rank": 14, "rerolls": 41,
+      "attributes": [["toxin_damage", 75.2, true], ["status_chance", 79.8, true], ["heat_damage", 78.9, true]] },
+    { "file": "mods/r7.png", "weapon": "vectis", "name": "Manti-critadra", "mastery_rank": 8, "rerolls": 24,
+      "attributes": [["damage_vs_corpus", 1.12, true], ["critical_chance", 34.5, true], ["fire_rate_/_attack_speed", 13.5, true], ["zoom", -11.7, false]] },
+    { "file": "mods/m1.png", "not_a_riven": true }
+  ]
+}

@@ -9,6 +9,9 @@ mod effects;
 #[cfg(feature = "server")]
 mod images;
 mod journey;
+#[cfg(feature = "server")]
+mod ocr_assets;
+mod scan;
 mod scraper;
 #[cfg(feature = "server")]
 mod transfer;
@@ -31,6 +34,7 @@ fn main() {
         worker::start().await?;
         Ok(dioxus::server::router(ui::App)
             .route("/img/weapon/{slug}", get(images::weapon))
+            .route("/ocr/{*path}", get(ocr_assets::serve))
             .route("/api/data/export", post(transfer::export))
             .route("/api/data/import", post(transfer::import)))
     });

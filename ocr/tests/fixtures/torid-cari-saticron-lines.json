@@ -1,0 +1,90 @@
+[
+  {
+    "text": "Alwaysget",
+    "confidence": 0.99,
+    "x": 39,
+    "y": 0,
+    "width": 402,
+    "height": 80
+  },
+  {
+    "text": "农",
+    "confidence": 0.45,
+    "x": 214,
+    "y": 104,
+    "width": 33,
+    "height": 32
+  },
+  {
+    "text": "18",
+    "confidence": 0.99,
+    "x": 337,
+    "y": 116,
+    "width": 28,
+    "height": 20
+  },
+  {
+    "text": "Torid Cari-saticDn",
+    "confidence": 0.97,
+    "x": 85,
+    "y": 315,
+    "width": 273,
+    "height": 34
+  },
+  {
+    "text": "+156.7% Critical Chance",
+    "confidence": 0.98,
+    "x": 75,
+    "y": 351,
+    "width": 291,
+    "height": 27
+  },
+  {
+    "text": "+108.8%Viral",
+    "confidence": 1,
+    "x": 122,
+    "y": 377,
+    "width": 194,
+    "height": 28
+  },
+  {
+    "text": "+95.6% Multishot",
+    "confidence": 0.99,
+    "x": 114,
+    "y": 404,
+    "width": 210,
+    "height": 27
+  },
+  {
+    "text": "-42.5% Magazine",
+    "confidence": 0.94,
+    "x": 122,
+    "y": 430,
+    "width": 202,
+    "height": 30
+  },
+  {
+    "text": "Capacity",
+    "confidence": 1,
+    "x": 162,
+    "y": 457,
+    "width": 109,
+    "height": 31
+  },
+  {
+    "text": "0385",
+    "confidence": 0.86,
+    "x": 276,
+    "y": 501,
+    "width": 72,
+    "height": 26
+  },
+  {
+    "text": "MR8",
+    "confidence": 1,
+    "x": 81,
+    "y": 502,
+    "width": 62,
+    "height": 26
+  }
+]
