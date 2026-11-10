@@ -401,6 +401,29 @@ fn ScraperCard(
 ) -> Element {
     let status = snapshot.status.as_ref();
     let now = snapshot.server_time;
+    if snapshot.disabled {
+        let last = status.and_then(|s| s.last_sweep.as_ref());
+        return rsx! {
+            section { class: "scraper-card",
+                div { class: "scraper-now",
+                    span { class: "scraper-dot" }
+                    strong { "Scraping is turned off" }
+                }
+                dl {
+                    div {
+                        dt { "Last scrape" }
+                        dd {
+                            title: last.map_or(String::new(), |l| format!("{} UTC", format_datetime(l.finished_at))),
+                            {last.map_or("—".into(), |l| last_scrape(l, now))}
+                        }
+                    }
+                }
+                p { class: "muted small",
+                    "This server only hosts its data. Set WFMT_ENABLE_SCRAPER=true to scrape in the background."
+                }
+            }
+        };
+    }
     let online = connected && snapshot.running && status.is_none_or(|s| s.phase != Phase::Stopped);
     let phase = status.map_or(Phase::Idle, |s| s.phase);
     let sweep = status.and_then(|s| s.sweep.as_ref());
@@ -545,6 +568,7 @@ mod tests {
             server_time: 1_800_000_000_000,
             running: true,
             admin: true,
+            disabled: false,
             hub: HubStatus::default(),
             status: Some(ScraperStatus {
                 pid: 42,
@@ -688,6 +712,17 @@ mod tests {
         let idle = render_with(idle, false, true, None);
         assert!(idle.contains("Scrape now"));
         assert!(button_disabled(&idle));
+    }
+
+    #[test]
+    fn disabled_scraper_says_so_and_offers_no_controls() {
+        let mut snapshot = sample();
+        snapshot.disabled = true;
+        snapshot.running = false;
+        let html = render(snapshot, true, None);
+        assert!(html.contains("Scraping is turned off"));
+        assert!(html.contains("only hosts its data"));
+        assert!(!html.contains("<button"));
     }
 
     #[test]

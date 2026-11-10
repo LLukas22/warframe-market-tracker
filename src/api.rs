@@ -524,7 +524,7 @@ pub async fn scraper_status() -> Result<ScraperSnapshot, ServerFnError> {
         status: wfmt_scraper::engine::read_status(&dir),
         running,
         admin: crate::admin::enabled(),
-        disabled: crate::worker::disabled().unwrap_or(false),
+        disabled: !crate::worker::enabled().unwrap_or(false),
         hub: crate::hub::status(),
         server_time: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -539,7 +539,7 @@ pub struct ScraperSnapshot {
     pub running: bool,
     /// The server has an admin token, so scrapes can be controlled and data moved.
     pub admin: bool,
-    /// `WFMT_DISABLE_SCRAPER` is set: this server only hosts its data.
+    /// `WFMT_ENABLE_SCRAPER` isn't set: this server only hosts its data.
     pub disabled: bool,
     pub hub: HubStatus,
     pub server_time: i64,
@@ -572,9 +572,9 @@ pub async fn scraper_control(cancel: bool, token: String) -> Result<(), ServerFn
             code: denied.status().as_u16(),
             details: None,
         })?;
-    if crate::worker::disabled().unwrap_or(false) {
+    if !crate::worker::enabled().unwrap_or(false) {
         return Err(ServerFnError::new(
-            "Scraping is turned off on this server (WFMT_DISABLE_SCRAPER).",
+            "Scraping is turned off on this server. Set WFMT_ENABLE_SCRAPER=true to turn it on.",
         ));
     }
     let dir = crate::data::data_dir();
