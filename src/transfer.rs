@@ -239,6 +239,11 @@ fn apply_ready(root: &Path) -> Result<()> {
         return Ok(());
     }
     let _lock = DatasetLock::write(root)?;
+    // Describes the replaced data. The scraper compacts the new data again when it starts.
+    match fs::remove_file(root.join(wfmt_scraper::maintenance::COMPACTION_STATE)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
     let backup = root.join(fs::read_to_string(ready.join(BACKUP_NAME))?.trim());
     for entry in ENTRIES {
         let new = ready.join(entry);

@@ -83,7 +83,7 @@ fn sync_ancestors(path: &Path, root: &Path) -> Result<()> {
     }
 }
 
-pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn durable_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap();
     fs::create_dir_all(parent)?;
     let tmp = path.with_extension("tmp");

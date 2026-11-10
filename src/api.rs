@@ -524,6 +524,8 @@ pub async fn scraper_status() -> Result<ScraperSnapshot, ServerFnError> {
         status: wfmt_scraper::engine::read_status(&dir),
         running,
         admin: crate::admin::enabled(),
+        disabled: crate::worker::disabled().unwrap_or(false),
+        hub: crate::hub::status(),
         server_time: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -537,7 +539,28 @@ pub struct ScraperSnapshot {
     pub running: bool,
     /// The server has an admin token, so scrapes can be controlled and data moved.
     pub admin: bool,
+    /// `WFMT_DISABLE_SCRAPER` is set: this server only hosts its data.
+    pub disabled: bool,
+    pub hub: HubStatus,
     pub server_time: i64,
+}
+
+/// Uploads of finished days to a Hugging Face dataset.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HubStatus {
+    /// `owner/name`, when uploads are set up.
+    pub dataset: Option<String>,
+    pub running: bool,
+    /// A check was requested and starts after the current one.
+    pub queued: bool,
+    pub last_upload_at: Option<i64>,
+    /// The newest day on the Hub.
+    pub last_day: Option<String>,
+    pub commit_url: Option<String>,
+    pub last_check_at: Option<i64>,
+    /// What the last check did.
+    pub outcome: Option<String>,
+    pub error: Option<String>,
 }
 
 #[post("/api/scraper/control")]
@@ -549,6 +572,11 @@ pub async fn scraper_control(cancel: bool, token: String) -> Result<(), ServerFn
             code: denied.status().as_u16(),
             details: None,
         })?;
+    if crate::worker::disabled().unwrap_or(false) {
+        return Err(ServerFnError::new(
+            "Scraping is turned off on this server (WFMT_DISABLE_SCRAPER).",
+        ));
+    }
     let dir = crate::data::data_dir();
     if wfmt_scraper::engine::try_lock(&dir)
         .map_err(|e| ServerFnError::new(e.to_string()))?
@@ -563,4 +591,17 @@ pub async fn scraper_control(cancel: bool, token: String) -> Result<(), ServerFn
     };
     wfmt_scraper::engine::send_command(&dir, &command)
         .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
+/// Uploads every finished day that isn't on the Hub yet, without waiting for the hourly check.
+#[post("/api/hub/upload")]
+pub async fn hub_upload(token: String) -> Result<(), ServerFnError> {
+    crate::admin::check(&token)
+        .await
+        .map_err(|denied| ServerFnError::ServerError {
+            message: denied.message().into(),
+            code: denied.status().as_u16(),
+            details: None,
+        })?;
+    crate::hub::request_upload().map_err(ServerFnError::new)
 }

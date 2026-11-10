@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use wfmt_types::{FetchLog, Phase, ScraperStatus, SweepSummary};
 
-use crate::api::{self, ScraperSnapshot};
+use crate::api::{self, HubStatus, ScraperSnapshot};
 use crate::ui::{format_datetime, sleep_ms};
 
 const POLL_MS: u32 = 2000;
@@ -51,10 +51,7 @@ pub fn ScraperPanel() -> Element {
         spawn(async move {
             if let Err(error) = api::scraper_control(cancel, token.peek().clone()).await {
                 pending.set(None);
-                control_error.set(Some(match error {
-                    ServerFnError::ServerError { message, .. } => message,
-                    other => other.to_string(),
-                }));
+                control_error.set(Some(error_message(error)));
             }
             resource.restart();
         });
@@ -101,6 +98,9 @@ pub fn ScraperPanel() -> Element {
                 p { class: "muted small",
                     "Set an admin token on the server to start or cancel scrapes and to export or upload data."
                 }
+            }
+            if let Some(value) = snapshot().filter(|s| admin || s.hub.dataset.is_some() || s.hub.error.is_some()) {
+                HubCard { hub: value.hub, now: value.server_time, admin, token: token() }
             }
             if let Some(entries) = snapshot().and_then(|s| s.status).map(|s| s.recent).filter(|r| !r.is_empty()) {
                 RecentFetches { entries, now: snapshot().map_or(0, |s| s.server_time) }
@@ -232,6 +232,111 @@ fn DataTransfer(token: String) -> Element {
                         "Export pauses the scraper for a moment. Uploading an export replaces all data here, and the current data is kept in a backup folder."
                     }
                 },
+            }
+        }
+    }
+}
+
+fn error_message(error: ServerFnError) -> String {
+    match error {
+        ServerFnError::ServerError { message, .. } => message,
+        other => other.to_string(),
+    }
+}
+
+/// Uploads to the Hugging Face dataset: when the last one happened, and a button to check now.
+#[component]
+fn HubCard(hub: HubStatus, now: i64, admin: bool, token: String) -> Element {
+    let mut requesting = use_signal(|| false);
+    let mut request_error = use_signal(|| None::<String>);
+    let Some(dataset) = hub.dataset.clone() else {
+        return rsx! {
+            section { class: "scraper-card",
+                div { class: "scraper-now",
+                    span { class: "scraper-dot" }
+                    strong { "Hugging Face" }
+                }
+                if let Some(error) = &hub.error {
+                    p { class: "error small", "{error}" }
+                } else {
+                    p { class: "muted small",
+                        "Set WFMT_HF_TOKEN and WFMT_HF_DATASET on the server to upload each finished day to a Hugging Face dataset."
+                    }
+                }
+            }
+        };
+    };
+    let busy = hub.running || hub.queued || requesting();
+    let no_token = token.is_empty();
+    let label = if hub.running {
+        "Uploading…"
+    } else if busy {
+        "Queued…"
+    } else {
+        "Upload now"
+    };
+    let upload = move |_| {
+        let token = token.clone();
+        requesting.set(true);
+        request_error.set(None);
+        spawn(async move {
+            match api::hub_upload(token).await {
+                // Stay busy until the status poll shows the queued check.
+                Ok(()) => sleep_ms(POLL_MS * 2).await,
+                Err(error) => request_error.set(Some(error_message(error))),
+            }
+            requesting.set(false);
+        });
+    };
+
+    rsx! {
+        section { class: "scraper-card",
+            div { class: "scraper-now",
+                span { class: if hub.running { "scraper-dot busy" } else if hub.error.is_none() { "scraper-dot online" } else { "scraper-dot" } }
+                strong {
+                    "Hugging Face · "
+                    a { href: "https://huggingface.co/datasets/{dataset}", target: "_blank", rel: "noopener", "{dataset}" }
+                }
+                if admin {
+                    button {
+                        class: "scraper-action",
+                        disabled: no_token || busy,
+                        title: if no_token { NEEDS_TOKEN },
+                        onclick: upload,
+                        "{label}"
+                    }
+                }
+            }
+            dl {
+                div {
+                    dt { "Last upload" }
+                    dd {
+                        title: hub.last_upload_at.map_or(String::new(), |t| format!("{} UTC", format_datetime(t))),
+                        match (hub.last_upload_at, &hub.commit_url) {
+                            (Some(at), Some(url)) => rsx! { a { href: "{url}", target: "_blank", rel: "noopener", "{duration(now - at)} ago" } },
+                            (Some(at), None) => rsx! { "{duration(now - at)} ago" },
+                            (None, _) => rsx! { "Never" },
+                        }
+                    }
+                }
+                div {
+                    dt { "Newest day on the Hub" }
+                    dd { {hub.last_day.clone().unwrap_or_else(|| "—".into())} }
+                }
+                div {
+                    dt { "Last check" }
+                    dd {
+                        title: hub.last_check_at.map_or(String::new(), |t| format!("{} UTC", format_datetime(t))),
+                        {hub.last_check_at.map_or("—".into(), |t| format!("{} ago", duration(now - t)))}
+                    }
+                }
+            }
+            if let Some(error) = request_error().or(hub.error.clone()) {
+                p { class: "error small", role: "alert", "{error}" }
+            } else {
+                p { class: "muted small", role: "status",
+                    {hub.outcome.clone().unwrap_or_else(|| "Each finished UTC day is uploaded within an hour of the scraper compacting it.".into())}
+                }
             }
         }
     }
@@ -440,6 +545,7 @@ mod tests {
             server_time: 1_800_000_000_000,
             running: true,
             admin: true,
+            hub: HubStatus::default(),
             status: Some(ScraperStatus {
                 pid: 42,
                 started_at: 1_799_999_000_000,

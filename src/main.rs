@@ -7,6 +7,8 @@ mod data;
 #[cfg(feature = "server")]
 mod effects;
 #[cfg(feature = "server")]
+mod hub;
+#[cfg(feature = "server")]
 mod images;
 mod journey;
 #[cfg(feature = "server")]
@@ -32,6 +34,7 @@ fn main() {
     dioxus::serve(|| async move {
         transfer::recover(data::data_dir()).await?;
         worker::start().await?;
+        hub::start();
         Ok(dioxus::server::router(ui::App)
             .route("/img/weapon/{slug}", get(images::weapon))
             .route("/ocr/{*path}", get(ocr_assets::serve))

@@ -12,7 +12,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::{DatasetLock, Transaction, unique_id};
+use crate::dataset::{DatasetLock, Transaction, durable_write, unique_id};
 
 #[derive(Args, Clone, Debug)]
 pub struct MaintenanceArgs {
@@ -42,6 +42,26 @@ pub struct Report {
 pub struct RetentionState {
     pub deleted_files: u64,
     pub last_cleanup_at: Option<DateTime<Utc>>,
+}
+
+/// Written after every compaction pass. Days before `compacted_before` won't change again unless
+/// the data is reprocessed or replaced, so they are ready to be published.
+pub const COMPACTION_STATE: &str = "storage/compaction.json";
+
+#[derive(Serialize, Deserialize)]
+struct CompactionState {
+    compacted_before: NaiveDate,
+}
+
+/// Every day before this has been compacted, or `None` before the first maintenance pass.
+pub fn compacted_before(root: &Path) -> Result<Option<NaiveDate>> {
+    match fs::read(root.join(COMPACTION_STATE)) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice::<CompactionState>(&bytes)?.compacted_before,
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn retention_state(root: &Path) -> Result<RetentionState> {
@@ -120,6 +140,12 @@ pub fn maintain(root: &Path, now: DateTime<Utc>, args: &MaintenanceArgs) -> Resu
             }
         }
     }
+    durable_write(
+        &root.join(COMPACTION_STATE),
+        &serde_json::to_vec(&CompactionState {
+            compacted_before: now.date_naive(),
+        })?,
+    )?;
     if args.raw_retention_days > 0 {
         let cutoff = now
             .date_naive()
@@ -436,6 +462,7 @@ mod tests {
         let temp = TempRoot::new()?;
         let root = &temp.0;
         let now = "2026-11-03T12:00:00Z".parse()?;
+        assert_eq!(compacted_before(root)?, None);
         for date in ["2026-11-01", "2026-11-03", "2026-11-04"] {
             for table in ["auctions", "attributes", "gone"] {
                 for index in 0..3 {
@@ -475,6 +502,7 @@ mod tests {
         let auctions = parquet_files(&root.join("parquet/auctions/date=2026-11-01"))?;
         let attributes = parquet_files(&root.join("parquet/attributes/date=2026-11-01"))?;
         assert_eq!(auctions[0].file_name(), attributes[0].file_name());
+        assert_eq!(compacted_before(root)?, Some("2026-11-03".parse()?));
         assert_eq!(maintain(root, now, &options())?.compacted_inputs, 0);
         Ok(())
     }

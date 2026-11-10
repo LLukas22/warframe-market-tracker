@@ -21,6 +21,7 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/dx/warframe-market-tracker/release/web /app
 COPY --from=ocr /src/ocr/dist /app/ocr
-ENV IP=0.0.0.0 PORT=8080 WFMT_DATA_DIR=/data
+# The Hugging Face upload keeps a chunk cache here; the container user may have no home folder.
+ENV IP=0.0.0.0 PORT=8080 WFMT_DATA_DIR=/data HF_HOME=/tmp/huggingface
 EXPOSE 8080
 ENTRYPOINT ["/app/server"]

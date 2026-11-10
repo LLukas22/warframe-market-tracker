@@ -6,6 +6,8 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       WFMT_ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      WFMT_HF_DATASET: ${HF_DATASET:-}
+      WFMT_HF_TOKEN: ${HF_TOKEN:-}
     ports:
       - "${PORT:-8080}:8080"
     volumes:
