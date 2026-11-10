@@ -16,7 +16,7 @@ const DOWNLOAD_GAP: Duration = Duration::from_millis(250);
 
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
-        .user_agent(concat!("wfmt-web/", env!("CARGO_PKG_VERSION")))
+        .user_agent(wfmt_types::USER_AGENT)
         .timeout(Duration::from_secs(20))
         .build()
         .expect("http client")

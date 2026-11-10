@@ -25,11 +25,7 @@ pub struct Client {
 impl Client {
     pub fn new(platform: String, min_interval: Duration) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .user_agent(concat!(
-                "warframe-market-tracker/",
-                env!("CARGO_PKG_VERSION"),
-                " (riven price research)"
-            ))
+            .user_agent(wfmt_types::USER_AGENT)
             .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self {

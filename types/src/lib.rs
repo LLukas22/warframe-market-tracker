@@ -6,6 +6,25 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Where the project lives, and how warframe.market can find out who's behind our requests.
+#[macro_export]
+macro_rules! repository {
+    () => {
+        "https://github.com/LLukas22/warframe-market-tracker"
+    };
+}
+pub const REPOSITORY: &str = repository!();
+
+/// Sent with every request to warframe.market, whose rules ask each client to identify itself
+/// with a name, version and a link: <https://docs.warframe.market/docs/rules/overview/>.
+pub const USER_AGENT: &str = concat!(
+    "warframe-market-tracker/",
+    env!("CARGO_PKG_VERSION"),
+    " (+",
+    repository!(),
+    ")"
+);
+
 pub const STATUS_FILE: &str = "scraper/status.json";
 pub const COMMAND_DIR: &str = "scraper/commands";
 pub const LOCK_FILE: &str = "scraper/lock";
@@ -121,4 +140,18 @@ pub struct ScraperStatus {
     pub requests: u64,
     pub settings: Settings,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn user_agent_names_the_project_version_and_repository() {
+        assert_eq!(
+            super::USER_AGENT,
+            format!(
+                "warframe-market-tracker/{} (+https://github.com/LLukas22/warframe-market-tracker)",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
 }

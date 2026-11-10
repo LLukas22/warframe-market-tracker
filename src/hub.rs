@@ -196,7 +196,7 @@ pub fn start() {
 async fn run(root: PathBuf, config: Config) {
     let client = match HFClient::builder()
         .token(&config.token)
-        .user_agent("warframe-market-tracker")
+        .user_agent(wfmt_types::USER_AGENT)
         .build()
     {
         Ok(client) => client,
@@ -396,7 +396,7 @@ fn placeholder_settings(readme: &str) -> Option<Vec<String>> {
 
 /// The dataset card, keeping the settings of the placeholder it replaces.
 fn dataset_card(dataset: &str, settings: &[String]) -> String {
-    let repository = env!("CARGO_PKG_REPOSITORY");
+    let repository = wfmt_types::REPOSITORY;
     let mut header: Vec<String> = settings.to_vec();
     if !settings.iter().any(|line| line.starts_with("pretty_name:")) {
         header.push("pretty_name: Warframe riven auctions".into());
