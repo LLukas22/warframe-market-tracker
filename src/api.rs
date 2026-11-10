@@ -545,17 +545,21 @@ pub struct ScraperSnapshot {
     pub server_time: i64,
 }
 
-/// Uploads of finished days to a Hugging Face dataset.
+/// Uploads of finished days to a Hugging Face dataset, or downloads of them when `pull` is set.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HubStatus {
-    /// `owner/name`, when uploads are set up.
+    /// `owner/name`, when uploads or downloads are set up.
     pub dataset: Option<String>,
+    /// The server downloads its data from the dataset instead of uploading to it.
+    pub pull: bool,
     pub running: bool,
     /// A check was requested and starts after the current one.
     pub queued: bool,
+    /// The last upload, or when pulling, the last download that changed anything.
     pub last_upload_at: Option<i64>,
     /// The newest day on the Hub.
     pub last_day: Option<String>,
+    /// The commit last uploaded, or downloaded from.
     pub commit_url: Option<String>,
     pub last_check_at: Option<i64>,
     /// What the last check did.
@@ -593,7 +597,8 @@ pub async fn scraper_control(cancel: bool, token: String) -> Result<(), ServerFn
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
-/// Uploads every finished day that isn't on the Hub yet, without waiting for the hourly check.
+/// Uploads every finished day that isn't on the Hub yet, or when pulling, downloads the new
+/// days, without waiting for the hourly check.
 #[post("/api/hub/upload")]
 pub async fn hub_upload(token: String) -> Result<(), ServerFnError> {
     crate::admin::check(&token)

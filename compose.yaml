@@ -9,6 +9,7 @@ services:
       WFMT_ENABLE_SCRAPER: ${ENABLE_SCRAPER:-false}
       WFMT_HF_DATASET: ${HF_DATASET:-}
       WFMT_HF_TOKEN: ${HF_TOKEN:-}
+      WFMT_HF_PULL_DATASET: ${HF_PULL_DATASET:-}
     ports:
       - "${PORT:-8080}:8080"
     volumes:

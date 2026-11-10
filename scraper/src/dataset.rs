@@ -101,7 +101,7 @@ struct Journal {
 }
 
 /// Caller must retain the exclusive dataset lock until commit has returned.
-pub(crate) struct Transaction {
+pub struct Transaction {
     root: PathBuf,
     stage: PathBuf,
     journal: Journal,

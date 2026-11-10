@@ -8,14 +8,104 @@ on:
 concurrency:
   group: docker-image
 
+permissions:
+  contents: read
+
+env:
+  # Must match Cargo.lock, like the pins in the Dockerfile.
+  DX_VERSION: 0.7.10
+  WASM_BINDGEN_VERSION: 0.2.129
+  CARGO_TERM_COLOR: always
+
+# The app and the screenshot scanner compile on the runner rather than in Docker, so the Cargo
+# cache survives between pushes. The image job only packages their output.
 jobs:
+  app:
+    # The server binary runs on Debian trixie (glibc 2.41), so it can't link against a newer glibc.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install dx
+        run: |
+          mkdir -p ~/.local/bin && echo ~/.local/bin >> "$GITHUB_PATH"
+          curl -fsSL "https://github.com/DioxusLabs/dioxus/releases/download/v$DX_VERSION/dx-$(uname -m)-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C ~/.local/bin dx
+
+      - run: dx bundle --web --release
+
+      # Artifacts drop the executable bit, a tarball keeps it.
+      - run: tar -cf app.tar -C target/dx/warframe-market-tracker/release/web .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app
+          path: app.tar
+          retention-days: 1
+
+  ocr:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # The scanner rarely changes, so most pushes reuse the last build outright.
+      - id: dist
+        uses: actions/cache@v6
+        with:
+          path: ocr/dist
+          key: ocr-dist-${{ hashFiles('ocr/**', 'Cargo.toml', 'Cargo.lock') }}
+
+      - if: steps.dist.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - if: steps.dist.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - if: steps.dist.outputs.cache-hit != 'true'
+        name: Install wasm-bindgen
+        run: |
+          mkdir -p ~/.local/bin && echo ~/.local/bin >> "$GITHUB_PATH"
+          name="wasm-bindgen-$WASM_BINDGEN_VERSION-$(uname -m)-unknown-linux-musl"
+          curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/$name.tar.gz" \
+            | tar -xz --strip-components=1 -C ~/.local/bin "$name/wasm-bindgen"
+
+      - if: steps.dist.outputs.cache-hit != 'true'
+        run: ocr/scripts/build-dist.sh
+
+      - run: tar -cf ocr.tar -C ocr/dist .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ocr
+          path: ocr.tar
+          retention-days: 1
+
   publish:
+    needs: [app, ocr]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      # The build context for the Dockerfile's `prebuilt` stage.
+      - run: |
+          mkdir -p image/app/ocr
+          tar -xf artifacts/app/app.tar -C image/app
+          tar -xf artifacts/ocr/ocr.tar -C image/app/ocr
 
       - uses: docker/login-action@v4
         with:
@@ -35,9 +125,9 @@ jobs:
 
       - uses: docker/build-push-action@v7
         with:
-          context: .
+          context: image
+          file: Dockerfile
+          build-args: ARTIFACTS=prebuilt
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

@@ -244,7 +244,8 @@ fn error_message(error: ServerFnError) -> String {
     }
 }
 
-/// Uploads to the Hugging Face dataset: when the last one happened, and a button to check now.
+/// Uploads to the Hugging Face dataset, or downloads from it: when the last one happened, and a
+/// button to check now.
 #[component]
 fn HubCard(hub: HubStatus, now: i64, admin: bool, token: String) -> Element {
     let mut requesting = use_signal(|| false);
@@ -260,7 +261,7 @@ fn HubCard(hub: HubStatus, now: i64, admin: bool, token: String) -> Element {
                     p { class: "error small", "{error}" }
                 } else {
                     p { class: "muted small",
-                        "Set WFMT_HF_TOKEN and WFMT_HF_DATASET on the server to upload each finished day to a Hugging Face dataset."
+                        "Set WFMT_HF_TOKEN and WFMT_HF_DATASET on the server to upload each finished day to a Hugging Face dataset, or WFMT_HF_PULL_DATASET to download the data from one instead of scraping it."
                     }
                 }
             }
@@ -268,12 +269,25 @@ fn HubCard(hub: HubStatus, now: i64, admin: bool, token: String) -> Element {
     };
     let busy = hub.running || hub.queued || requesting();
     let no_token = token.is_empty();
-    let label = if hub.running {
-        "Uploading…"
-    } else if busy {
-        "Queued…"
+    let label = match (hub.running, busy, hub.pull) {
+        (true, _, false) => "Uploading…",
+        (true, _, true) => "Updating…",
+        (false, true, _) => "Queued…",
+        (false, false, false) => "Upload now",
+        (false, false, true) => "Update now",
+    };
+    let (last_label, day_label, idle_text) = if hub.pull {
+        (
+            "Last update",
+            "Newest day",
+            "New days are downloaded from the dataset within an hour of being uploaded.",
+        )
     } else {
-        "Upload now"
+        (
+            "Last upload",
+            "Newest day on the Hub",
+            "Each finished UTC day is uploaded within an hour of the scraper compacting it.",
+        )
     };
     let upload = move |_| {
         let token = token.clone();
@@ -309,7 +323,7 @@ fn HubCard(hub: HubStatus, now: i64, admin: bool, token: String) -> Element {
             }
             dl {
                 div {
-                    dt { "Last upload" }
+                    dt { "{last_label}" }
                     dd {
                         title: hub.last_upload_at.map_or(String::new(), |t| format!("{} UTC", format_datetime(t))),
                         match (hub.last_upload_at, &hub.commit_url) {
@@ -320,7 +334,7 @@ fn HubCard(hub: HubStatus, now: i64, admin: bool, token: String) -> Element {
                     }
                 }
                 div {
-                    dt { "Newest day on the Hub" }
+                    dt { "{day_label}" }
                     dd { {hub.last_day.clone().unwrap_or_else(|| "—".into())} }
                 }
                 div {
@@ -335,7 +349,7 @@ fn HubCard(hub: HubStatus, now: i64, admin: bool, token: String) -> Element {
                 p { class: "error small", role: "alert", "{error}" }
             } else {
                 p { class: "muted small", role: "status",
-                    {hub.outcome.clone().unwrap_or_else(|| "Each finished UTC day is uploaded within an hour of the scraper compacting it.".into())}
+                    {hub.outcome.clone().unwrap_or_else(|| idle_text.into())}
                 }
             }
         }
@@ -418,8 +432,14 @@ fn ScraperCard(
                         }
                     }
                 }
-                p { class: "muted small",
-                    "This server only hosts its data. Set WFMT_ENABLE_SCRAPER=true to scrape in the background."
+                if snapshot.hub.pull {
+                    p { class: "muted small",
+                        "This server downloads its data from Hugging Face instead of scraping it."
+                    }
+                } else {
+                    p { class: "muted small",
+                        "This server only hosts its data. Set WFMT_ENABLE_SCRAPER=true to scrape in the background."
+                    }
                 }
             }
         };
@@ -723,6 +743,12 @@ mod tests {
         assert!(html.contains("Scraping is turned off"));
         assert!(html.contains("only hosts its data"));
         assert!(!html.contains("<button"));
+
+        let mut pulling = sample();
+        pulling.disabled = true;
+        pulling.hub.pull = true;
+        let html = render(pulling, true, None);
+        assert!(html.contains("downloads its data from Hugging Face"));
     }
 
     #[test]

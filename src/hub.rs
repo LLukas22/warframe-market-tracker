@@ -1,11 +1,13 @@
 //! Publishes the data to a Hugging Face dataset repository, set with `WFMT_HF_TOKEN` and
-//! `WFMT_HF_DATASET`. Without both, nothing is uploaded.
+//! `WFMT_HF_DATASET`. Without both, nothing is uploaded. `WFMT_HF_PULL_DATASET` does the
+//! opposite, see [`pull`]: the server downloads its data from a dataset instead of scraping it.
 //!
 //! Each finished UTC day is uploaded once maintenance has compacted it, as an exact copy of its
 //! `date=` folders: new or changed files are added and files the day no longer has are deleted,
 //! in the same commit. `hub/upload.json` remembers the files of every uploaded day, so the hourly
 //! check only contacts the Hub when a day is new or has changed. Today is never uploaded, it's
-//! still being written. Days that only exist on the Hub stay there.
+//! still being written. Days that only exist on the Hub stay there. The weapon list goes along
+//! as `riven_weapons.json`, so servers that pull the data have names, groups and images.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -26,6 +28,8 @@ use wfmt_scraper::maintenance;
 
 use crate::api::HubStatus;
 
+mod pull;
+
 const TABLES: [&str; 3] = ["auctions", "attributes", "gone"];
 const STATE: &str = "hub/upload.json";
 /// Hard links to the files being uploaded, so compaction can't delete them midway.
@@ -36,14 +40,24 @@ const FIRST_CHECK: Duration = Duration::from_secs(60);
 /// The Hub recommends staying well under 100 files per commit.
 const FILES_PER_COMMIT: usize = 60;
 const README: &str = "README.md";
+/// The weapon list in the repository, and where the scraper keeps it.
+const CATALOG: &str = "riven_weapons.json";
+const LOCAL_CATALOG: &str = "cache/riven_weapons.json";
 /// Larger READMEs were written by someone and are never replaced.
 const PLACEHOLDER_MAX: u64 = 4096;
 
 #[derive(Clone)]
 struct Config {
-    token: String,
+    /// Needed for uploads, and for pulling a private dataset.
+    token: Option<String>,
     /// `owner/name`.
     dataset: String,
+}
+
+enum Mode {
+    Off,
+    Upload(Config),
+    Pull(Config),
 }
 
 fn env(name: &str) -> Option<String> {
@@ -53,28 +67,57 @@ fn env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// `None` while uploads are off, an error if only half of the settings are there.
-fn config() -> Result<Option<Config>, String> {
-    match (env("WFMT_HF_TOKEN"), env("WFMT_HF_DATASET")) {
-        (None, None) => Ok(None),
-        (Some(token), Some(dataset)) => Ok(Some(Config {
+/// What the settings ask for, or what's wrong with them.
+fn mode() -> Result<Mode, String> {
+    resolve(
+        env("WFMT_HF_TOKEN"),
+        env("WFMT_HF_DATASET"),
+        env("WFMT_HF_PULL_DATASET"),
+        crate::worker::enabled().unwrap_or(false),
+    )
+}
+
+/// A scraping server has its own data, so it ignores `WFMT_HF_PULL_DATASET`.
+fn resolve(
+    token: Option<String>,
+    upload: Option<String>,
+    pull: Option<String>,
+    scraping: bool,
+) -> Result<Mode, String> {
+    if let Some(pull) = pull.as_deref().filter(|_| !scraping) {
+        if upload.is_some() {
+            return Err("WFMT_HF_DATASET and WFMT_HF_PULL_DATASET are both set. A server only \
+                        uploads what it scrapes, so set WFMT_ENABLE_SCRAPER=true or clear one \
+                        of them."
+                .into());
+        }
+        return Ok(Mode::Pull(Config {
             token,
-            dataset: dataset_id(&dataset)?,
+            dataset: dataset_id("WFMT_HF_PULL_DATASET", pull)?,
+        }));
+    }
+    match (token, upload) {
+        (None, None) => Ok(Mode::Off),
+        (Some(token), Some(dataset)) => Ok(Mode::Upload(Config {
+            token: Some(token),
+            dataset: dataset_id("WFMT_HF_DATASET", &dataset)?,
         })),
         (None, Some(_)) => Err("WFMT_HF_DATASET is set, but WFMT_HF_TOKEN isn't.".into()),
+        // The token is there for pulling a private dataset.
+        (Some(_), None) if pull.is_some() => Ok(Mode::Off),
         (Some(_), None) => Err("WFMT_HF_TOKEN is set, but WFMT_HF_DATASET isn't.".into()),
     }
 }
 
 /// Accepts `owner/name` as well as the dataset's URL.
-fn dataset_id(value: &str) -> Result<String, String> {
+fn dataset_id(name: &str, value: &str) -> Result<String, String> {
     let id = value.trim_end_matches('/');
     let id = id.strip_prefix("https://huggingface.co/").unwrap_or(id);
     let id = id.strip_prefix("datasets/").unwrap_or(id);
     match id.split('/').collect::<Vec<_>>()[..] {
         [owner, name] if !owner.is_empty() && !name.is_empty() => Ok(id.to_owned()),
         _ => Err(format!(
-            "WFMT_HF_DATASET should look like owner/name, not {value:?}."
+            "{name} should look like owner/name, not {value:?}."
         )),
     }
 }
@@ -90,6 +133,9 @@ struct State {
     /// The dataset has a README, ours or someone else's. Checked again when forced.
     #[serde(default)]
     card_checked: bool,
+    /// [`fingerprint`] of the weapon list last uploaded.
+    #[serde(default)]
+    catalog: Option<u64>,
 }
 
 fn load_state(root: &Path, dataset: &str) -> Result<State> {
@@ -152,10 +198,16 @@ fn now_ms() -> i64 {
 }
 
 pub fn status() -> HubStatus {
-    let config = config();
+    let mode = mode();
+    let (dataset, pull) = match &mode {
+        Ok(Mode::Upload(config)) => (Some(config.dataset.clone()), false),
+        Ok(Mode::Pull(config)) => (Some(config.dataset.clone()), true),
+        Ok(Mode::Off) | Err(_) => (None, false),
+    };
     let live = live();
     HubStatus {
-        dataset: config.as_ref().ok().cloned().flatten().map(|c| c.dataset),
+        dataset,
+        pull,
         running: live.running,
         queued: FORCE.load(Ordering::SeqCst),
         last_upload_at: live.last_upload_at,
@@ -163,29 +215,36 @@ pub fn status() -> HubStatus {
         commit_url: live.commit_url.clone(),
         last_check_at: live.last_check_at,
         outcome: live.outcome.clone(),
-        error: config.err().or_else(|| live.error.clone()),
+        error: mode.err().or_else(|| live.error.clone()),
     }
 }
 
 /// Checks every finished day against the Hub right away, after the current check if one runs.
+/// When pulling, checks the dataset for new days instead.
 pub fn request_upload() -> Result<(), String> {
-    if config()?.is_none() || !STARTED.load(Ordering::SeqCst) {
-        return Err("Uploads to Hugging Face aren't set up on this server.".into());
+    if matches!(mode()?, Mode::Off) || !STARTED.load(Ordering::SeqCst) {
+        return Err("Hugging Face isn't set up on this server.".into());
     }
     FORCE.store(true, Ordering::SeqCst);
     WAKE.notify_one();
     Ok(())
 }
 
-/// Starts the hourly check, if uploads are set up.
+/// Starts the hourly upload or download check, if either is set up.
 pub fn start() {
-    let Ok(Some(config)) = config() else {
-        return;
+    let (config, pulling) = match mode() {
+        Ok(Mode::Upload(config)) => (config, false),
+        Ok(Mode::Pull(config)) => (config, true),
+        Ok(Mode::Off) | Err(_) => return,
     };
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
     let root = crate::data::data_dir();
+    if pulling {
+        pull::start(root, config);
+        return;
+    }
     match load_state(&root, &config.dataset) {
         Ok(state) => publish(&state),
         Err(error) => live().error = Some(format!("{error:#}")),
@@ -193,21 +252,26 @@ pub fn start() {
     tokio::spawn(run(root, config));
 }
 
-async fn run(root: PathBuf, config: Config) {
-    let client = match HFClient::builder()
-        .token(&config.token)
-        .user_agent(wfmt_types::USER_AGENT)
+fn repository(config: &Config) -> Result<HFRepository<RepoTypeDataset>, String> {
+    let mut builder = HFClient::builder().user_agent(wfmt_types::USER_AGENT);
+    if let Some(token) = &config.token {
+        builder = builder.token(token);
+    }
+    let client = builder
         .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            live().error = Some(format!("Can't set up the Hugging Face client: {error}"));
-            return;
-        }
-    };
+        .map_err(|error| format!("Can't set up the Hugging Face client: {error}"))?;
     let (owner, name) = config.dataset.split_once('/').unwrap();
-    let repo = client.dataset(owner, name);
-    let mut wait = FIRST_CHECK;
+    Ok(client.dataset(owner, name))
+}
+
+/// Runs `check` now and then, and whenever [`request_upload`] asks, keeping [`LIVE`] up to date.
+/// `check` gets whether it was asked for.
+async fn every_hour<F, Fut>(first: Duration, mut check: F)
+where
+    F: FnMut(bool) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let mut wait = first;
     loop {
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
@@ -216,8 +280,7 @@ async fn run(root: PathBuf, config: Config) {
         wait = CHECK_INTERVAL;
         let forced = FORCE.swap(false, Ordering::SeqCst);
         live().running = true;
-        let result = sync(&root, &repo, &config.dataset, forced).await;
-        let _ = fs::remove_dir_all(root.join(SNAPSHOT));
+        let result = check(forced).await;
         let mut live = live();
         live.running = false;
         live.last_check_at = Some(now_ms());
@@ -227,11 +290,30 @@ async fn run(root: PathBuf, config: Config) {
                 live.error = None;
             }
             Err(error) => {
-                eprintln!("hugging face upload failed: {error:#}");
+                eprintln!("hugging face sync failed: {error:#}");
                 live.error = Some(format!("{error:#}"));
             }
         }
     }
+}
+
+async fn run(root: PathBuf, config: Config) {
+    let repo = match repository(&config) {
+        Ok(repo) => repo,
+        Err(error) => {
+            live().error = Some(error);
+            return;
+        }
+    };
+    every_hour(FIRST_CHECK, |forced| {
+        let (root, repo, dataset) = (root.clone(), repo.clone(), config.dataset.clone());
+        async move {
+            let result = sync(&root, &repo, &dataset, forced).await;
+            let _ = fs::remove_dir_all(root.join(SNAPSHOT));
+            result
+        }
+    })
+    .await;
 }
 
 struct Day {
@@ -246,6 +328,15 @@ struct Prepared {
     pending: Vec<Day>,
     /// No maintenance pass has finished yet, so nothing is known to be final.
     uncompacted: bool,
+    /// [`fingerprint`] of the weapon list, copied into the snapshot, if the scraper has one.
+    catalog: Option<u64>,
+}
+
+/// 64-bit FNV-1a: tells whether the weapon list changed since it was uploaded.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The dates with data in any table.
@@ -308,7 +399,18 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
             state,
             pending: Vec::new(),
             uncompacted: true,
+            catalog: None,
         });
+    };
+    // Replaced in one rename, so a plain read sees either the old list or the new one.
+    let catalog = match fs::read(root.join(LOCAL_CATALOG)) {
+        Ok(bytes) => {
+            fs::create_dir_all(&snapshot)?;
+            fs::write(snapshot.join(CATALOG), &bytes)?;
+            Some(fingerprint(&bytes))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
     };
     let _lock = DatasetLock::read(root)?;
     let mut pending = Vec::new();
@@ -333,12 +435,20 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
         state,
         pending,
         uncompacted: false,
+        catalog,
     })
 }
 
-/// Every file in the repository with its size.
-async fn remote_files(repo: &HFRepository<RepoTypeDataset>) -> Result<BTreeMap<String, u64>> {
-    let stream = repo.list_tree().recursive(true).send()?;
+/// Every file in the repository with its size, at `revision` or the newest commit.
+async fn remote_files(
+    repo: &HFRepository<RepoTypeDataset>,
+    revision: Option<&str>,
+) -> Result<BTreeMap<String, u64>> {
+    let stream = repo
+        .list_tree()
+        .recursive(true)
+        .maybe_revision(revision.map(str::to_owned))
+        .send()?;
     let mut stream = std::pin::pin!(stream);
     let mut files = BTreeMap::new();
     while let Some(entry) = stream.next().await {
@@ -430,6 +540,9 @@ hours and follows the site's newest listings in between. Each finished UTC day i
   `auction_id`.
 - `gone`: listings that disappeared (sold or removed), at `detected_at`.
 
+`riven_weapons.json` is warframe.market's weapon list, with names, groups and images. It isn't a
+table, it's there for trackers that use this dataset instead of scraping.
+
 ## Usage
 
 ```python
@@ -482,6 +595,15 @@ fn readme(card: &str) -> CommitOperation {
     }
 }
 
+/// "a", "a and b", "a, b and c".
+fn listing(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 fn days_text(count: usize) -> String {
     if count == 1 {
         "1 day".into()
@@ -504,15 +626,17 @@ async fn sync(
         mut state,
         pending,
         uncompacted,
+        catalog,
     } = prepared;
     if uncompacted {
         return Ok("Waiting for the scraper's first maintenance pass.".into());
     }
     let check_card = forced || !state.card_checked;
-    if pending.is_empty() && !check_card {
+    let catalog_changed = catalog.is_some() && catalog != state.catalog;
+    if pending.is_empty() && !check_card && !catalog_changed {
         return Ok("Up to date.".into());
     }
-    let remote = remote_files(repo).await.with_context(|| {
+    let remote = remote_files(repo, None).await.with_context(|| {
         format!(
             "Can't list the dataset {dataset}. It has to exist already, and the token needs \
              write access to it"
@@ -529,6 +653,12 @@ async fn sync(
         }
     }
     let card_added = card.is_some();
+    let upload_catalog = catalog.is_some() && (catalog_changed || !remote.contains_key(CATALOG));
+    // The card and the weapon list go along with the first day, or on their own.
+    let mut extras: Vec<CommitOperation> = card.iter().map(|card| readme(card)).collect();
+    if upload_catalog {
+        extras.push(CommitOperation::add_file(CATALOG, snapshot.join(CATALOG)));
+    }
 
     // Days that need changes, grouped into commits of a reasonable size.
     let mut batches: Vec<(Vec<Day>, Vec<CommitOperation>)> = Vec::new();
@@ -552,15 +682,22 @@ async fn sync(
         save_state(root, &state)?;
         publish(&state);
     }
-    if batches.is_empty()
-        && let Some(card) = &card
-    {
+    if batches.is_empty() && !extras.is_empty() {
+        let message = match (card_added, upload_catalog) {
+            (true, true) => "Add the dataset card and the weapon list",
+            (true, false) => "Add the dataset card",
+            _ => "Update the weapon list",
+        };
         repo.create_commit()
-            .operations(vec![readme(card)])
-            .commit_message("Add the dataset card")
+            .operations(std::mem::take(&mut extras))
+            .commit_message(message)
             .send()
             .await
-            .context("Adding the dataset card failed")?;
+            .with_context(|| format!("{message} failed"))?;
+        if upload_catalog {
+            state.catalog = catalog;
+            save_state(root, &state)?;
+        }
     }
 
     let mut uploaded = 0;
@@ -571,9 +708,8 @@ async fn sync(
         } else {
             format!("Add {first} to {last}")
         };
-        if let Some(card) = card.take() {
-            operations.push(readme(&card));
-        }
+        let with_extras = !extras.is_empty();
+        operations.append(&mut extras);
         let info = repo
             .create_commit()
             .operations(operations)
@@ -587,6 +723,9 @@ async fn sync(
         }
         state.last_upload_at = Some(now_ms());
         state.commit_url = info.commit_url;
+        if with_extras && upload_catalog {
+            state.catalog = catalog;
+        }
         save_state(root, &state)?;
         publish(&state);
     }
@@ -594,12 +733,22 @@ async fn sync(
         state.card_checked = true;
         save_state(root, &state)?;
     }
-    let outcome = match (uploaded, card_added, forced) {
-        (0, true, _) => "Added the dataset card.".into(),
-        (0, false, true) => "Everything was already on the Hub.".into(),
-        (0, false, false) => "Up to date.".into(),
-        (n, true, _) => format!("Uploaded {} and the dataset card.", days_text(n)),
-        (n, false, _) => format!("Uploaded {}.", days_text(n)),
+    let mut done = Vec::new();
+    if uploaded > 0 {
+        done.push(days_text(uploaded));
+    }
+    if card_added {
+        done.push("the dataset card".into());
+    }
+    if upload_catalog {
+        done.push("the weapon list".into());
+    }
+    let outcome = if !done.is_empty() {
+        format!("Uploaded {}.", listing(&done))
+    } else if forced {
+        "Everything was already on the Hub.".into()
+    } else {
+        "Up to date.".into()
     };
     Ok(match card_problem {
         Some(problem) => format!("{outcome} {problem}."),
@@ -636,13 +785,35 @@ mod tests {
 
     #[test]
     fn dataset_accepts_ids_and_urls() {
-        assert_eq!(dataset_id("me/rivens").unwrap(), "me/rivens");
+        let id = |value| dataset_id("WFMT_HF_DATASET", value);
+        assert_eq!(id("me/rivens").unwrap(), "me/rivens");
         assert_eq!(
-            dataset_id("https://huggingface.co/datasets/me/rivens/").unwrap(),
+            id("https://huggingface.co/datasets/me/rivens/").unwrap(),
             "me/rivens"
         );
-        assert!(dataset_id("rivens").is_err());
-        assert!(dataset_id("me/rivens/extra").is_err());
+        assert!(id("rivens").is_err());
+        assert!(id("me/rivens/extra").unwrap_err().starts_with("WFMT_HF_DATASET "));
+    }
+
+    #[test]
+    fn scraping_turns_the_pull_off() {
+        let some = |v: &str| Some(v.to_owned());
+        let name = |mode: Result<Mode, String>| match mode {
+            Ok(Mode::Off) => "off".to_owned(),
+            Ok(Mode::Upload(c)) => format!("upload {}", c.dataset),
+            Ok(Mode::Pull(c)) => format!("pull {}", c.dataset),
+            Err(_) => "error".to_owned(),
+        };
+        let pull = some("LLukas22/wf-riven-data");
+        assert_eq!(name(resolve(None, None, pull.clone(), false)), "pull LLukas22/wf-riven-data");
+        assert_eq!(name(resolve(None, None, pull.clone(), true)), "off");
+        assert_eq!(name(resolve(some("t"), None, pull.clone(), true)), "off");
+        assert_eq!(
+            name(resolve(some("t"), some("me/rivens"), pull.clone(), true)),
+            "upload me/rivens"
+        );
+        assert_eq!(name(resolve(some("t"), some("me/rivens"), pull, false)), "error");
+        assert_eq!(name(resolve(some("t"), None, None, true)), "error");
     }
 
     #[test]
