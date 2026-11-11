@@ -55,8 +55,23 @@ header {
   backdrop-filter: blur(8px);
 }
 
+.header-actions { display: flex; align-items: center; justify-self: end; gap: 10px; }
 .brand h1 { margin: 0; font-size: 18px; letter-spacing: .02em; white-space: nowrap; }
 .brand button { padding: 0; border: none; background: transparent; color: var(--accent); font: inherit; letter-spacing: inherit; }
+.github-badge {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.github-badge:hover { color: var(--text); border-color: var(--accent); text-decoration: none; }
+.github-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 .auction-count {
   justify-self: end;
@@ -590,7 +605,7 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
   .brand h1 { font-size: 15px; }
   .picker { grid-column: 1 / -1; grid-row: 2; }
   .picker-menu { max-height: 50vh; max-height: 50dvh; }
-  .auction-count { grid-column: 2; grid-row: 1; }
+  .header-actions { grid-column: 2; grid-row: 1; }
   .auction-count-label { display: none; }
 
   .grid-head { gap: 8px 12px; }

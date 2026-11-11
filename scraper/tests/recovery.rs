@@ -95,16 +95,20 @@ fn restart_replays_uncommitted_gone_with_tracking_and_does_not_duplicate_history
     let t = Utc::now();
     let auction = fixture();
     let id = auction["id"].as_str().unwrap();
+    // Both price orders returning the same short page: the search returned everything.
     let raw = |at, auctions| {
+        let body = serde_json::json!({"payload":{"auctions":auctions}}).to_string();
         RawResponse::new(
             at,
             "kulstar".into(),
             "pc".into(),
-            vec![RawPage {
-                buyout_policy: None,
-                sort_by: "price_asc".into(),
-                body: serde_json::json!({"payload":{"auctions":auctions}}).to_string(),
-            }],
+            ["price_asc", "price_desc"]
+                .map(|sort_by| RawPage {
+                    buyout_policy: None,
+                    sort_by: sort_by.into(),
+                    body: body.clone(),
+                })
+                .into(),
             vec![],
         )
     };
@@ -375,8 +379,7 @@ fn feed_rows_keep_every_change_and_outlive_their_raw_archives() -> Result<()> {
         raws.push(raw);
     }
 
-    // A sweep part must merge with the feed parts, which requires an identical schema. Its short
-    // page counts as complete, so it has to return the watched listing too.
+    // A sweep part must merge with the feed parts, which requires an identical schema.
     let mut swept = listing(650, 200, "2026-11-01T10:14:00+00:00");
     swept["id"] = "swept".into();
     let sweep = RawResponse::new(
@@ -513,16 +516,20 @@ fn malformed_present_id_is_preserved_and_unknown_ids_do_not_infer_absence() -> R
     let a = fixture();
     let mut b = a.clone();
     b["id"] = "second".into();
+    // Both price orders returning the same short page: the search returned everything.
     let raw = |at, auctions| {
+        let body = serde_json::json!({"payload":{"auctions":auctions}}).to_string();
         RawResponse::new(
             at,
             "kulstar".into(),
             "pc".into(),
-            vec![RawPage {
-                buyout_policy: None,
-                sort_by: "price_asc".into(),
-                body: serde_json::json!({"payload":{"auctions":auctions}}).to_string(),
-            }],
+            ["price_asc", "price_desc"]
+                .map(|sort_by| RawPage {
+                    buyout_policy: None,
+                    sort_by: sort_by.into(),
+                    body: body.clone(),
+                })
+                .into(),
             vec![],
         )
     };
@@ -536,7 +543,8 @@ fn malformed_present_id_is_preserved_and_unknown_ids_do_not_infer_absence() -> R
         ],
     );
     let summary = pipeline.process(&weapon, &bad, &mut sink)?;
-    assert_eq!(summary.skipped, 2);
+    // Two malformed entries on each of the two pages.
+    assert_eq!(summary.skipped, 4);
     assert!(!summary.complete);
     assert_eq!(summary.gone, 0);
     sink.flush()?;

@@ -8,7 +8,7 @@ use anyhow::Result;
 use crate::identity::Registry;
 use crate::normalize::Normalizer;
 use crate::store::{ParquetSink, RawPage, RawResponse};
-use crate::tracking::{Coverage, Seen, Tracker};
+use crate::tracking::{Coverage, Seen, Tracker, returned_everything};
 use crate::wfm::{self, Auction, Weapon};
 
 pub struct Summary {
@@ -34,6 +34,8 @@ pub fn parse_pages(pages: &[RawPage]) -> Result<Pages> {
     let mut out: Vec<(Auction, String)> = Vec::new();
     let mut skipped = 0;
     let mut present = HashSet::new();
+    // (sort order, entries, listing ids) of each unfiltered page, to tell if they hold everything.
+    let mut unfiltered: Vec<(&str, usize, HashSet<String>)> = Vec::new();
     for page in pages {
         let (auctions, bad, ids) = match wfm::parse_auction_page(&page.body) {
             Ok(page) => page,
@@ -44,7 +46,6 @@ pub fn parse_pages(pages: &[RawPage]) -> Result<Pages> {
                 continue;
             }
         };
-        present.extend(ids);
         coverage.incomplete |= bad > 0;
         skipped += bad;
         let mut buyouts: Vec<Option<i64>> = auctions.iter().map(|a| a.buyout_price).collect();
@@ -53,7 +54,9 @@ pub fn parse_pages(pages: &[RawPage]) -> Result<Pages> {
         // A filtered page says nothing about auctions outside its search scope, even if short.
         if page.buyout_policy.is_none() {
             coverage.add_page(&page.sort_by, &buyouts);
+            unfiltered.push((&page.sort_by, buyouts.len(), ids.clone()));
         }
+        present.extend(ids);
         for auction in auctions {
             match index.get(&auction.id) {
                 Some(&i) => {
@@ -67,6 +70,11 @@ pub fn parse_pages(pages: &[RawPage]) -> Result<Pages> {
             }
         }
     }
+    coverage.complete = returned_everything(
+        unfiltered
+            .iter()
+            .map(|(sort_by, entries, ids)| (*sort_by, *entries, ids)),
+    );
     Ok(Pages {
         auctions: out,
         coverage,
@@ -83,10 +91,12 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Auctions that dropped out of the pages but can't be declared gone from the pages alone.
-    pub fn uncertain(&mut self, weapon: &str, pages: &[RawPage]) -> Result<Vec<String>> {
-        let pages = parse_pages(pages)?;
+    pub fn uncertain(&mut self, weapon: &str, raw: &RawResponse) -> Result<Vec<String>> {
+        let pages = parse_pages(&raw.pages)?;
         let present: HashSet<&str> = pages.present.iter().map(String::as_str).collect();
-        Ok(self.tracker.uncertain(weapon, &present, &pages.coverage))
+        Ok(self
+            .tracker
+            .uncertain(weapon, &present, &pages.coverage, raw.scraped_at))
     }
 
     pub fn process(
@@ -238,6 +248,7 @@ impl Pipeline {
                         created: r.created,
                         first_seen: raw.scraped_at,
                         last_seen: raw.scraped_at,
+                        verified_at: None,
                     },
                 )
             })

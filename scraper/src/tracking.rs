@@ -2,8 +2,9 @@
 //!
 //! Capped search pages cannot prove absence: sellers can change prices between fetches,
 //! and sequential sort orders are not an atomic snapshot. Only a complete, successfully
-//! decoded short page or an entry-endpoint check can establish removal. Other missing
-//! auctions remain unresolved until they reappear, are verified, or expire after four days.
+//! decoded fetch (see [`returned_everything`]) or an entry-endpoint check can establish
+//! removal. Other missing auctions remain unresolved until they reappear, are verified, or
+//! expire after four days.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -20,11 +21,13 @@ pub const PAGE_CAP: usize = 100;
 pub const EXPIRE_AFTER: TimeDelta = TimeDelta::days(4);
 /// A listing a feed keeps returning unchanged still gets a row this often, to record its sightings.
 pub const FEED_ROW_REFRESH: TimeDelta = TimeDelta::hours(1);
+/// A listing the entry endpoint confirmed isn't checked again for this long.
+pub const RECHECK_AFTER: TimeDelta = TimeDelta::days(1);
 
 /// Search coverage hints. Price bounds describe observed pages, not proof of removal.
 #[derive(Clone, Debug, Default)]
 pub struct Coverage {
-    /// A page came back below the cap, so every auction was returned.
+    /// The search returned every auction, see [`returned_everything`].
     pub complete: bool,
     /// Interrupted or malformed fetches must not infer absence or expiry.
     pub incomplete: bool,
@@ -37,12 +40,9 @@ pub struct Coverage {
 }
 
 impl Coverage {
-    /// Takes the buyout price of every auction on the page.
+    /// Takes the buyout price of every auction on the page. A short page counts like a full
+    /// one here: being short doesn't prove it holds everything.
     pub fn add_page(&mut self, sort_by: &str, buyouts: &[Option<i64>]) {
-        if buyouts.len() < PAGE_CAP {
-            self.complete = true;
-            return;
-        }
         let known = buyouts.iter().flatten().copied();
         match sort_by {
             "price_asc" => self.up_to = known.max().max(self.up_to),
@@ -57,8 +57,7 @@ impl Coverage {
         }
     }
 
-    /// A fully decoded short page from an uninterrupted fetch returned every listing.
-    /// Overlap of sequential capped pages cannot establish an atomic full snapshot.
+    /// An uninterrupted, fully decoded fetch returned every listing.
     pub fn is_complete(&self) -> bool {
         self.complete && !self.incomplete
     }
@@ -74,6 +73,27 @@ impl Coverage {
             Some(p) => self.up_to.is_some_and(|m| p < m) || self.from.is_some_and(|m| p > m),
         }
     }
+}
+
+/// Whether a weapon's unfiltered search pages, as (sort order, entries, listing ids), returned
+/// every auction. A short page alone proves nothing: the site often returns 98 or 99 auctions
+/// of a full page, and taking that as complete marked every other listing gone. So both price
+/// orders have to come back short with the same listings, which only happens when there are
+/// fewer auctions than one page holds.
+pub fn returned_everything<'a>(
+    pages: impl IntoIterator<Item = (&'a str, usize, &'a HashSet<String>)>,
+) -> bool {
+    let (mut asc, mut desc) = (false, false);
+    let mut listings: Option<&HashSet<String>> = None;
+    for (sort_by, entries, ids) in pages {
+        if entries >= PAGE_CAP || listings.is_some_and(|l| l != ids) {
+            return false;
+        }
+        listings = Some(ids);
+        asc |= sort_by == "price_asc";
+        desc |= sort_by == "price_desc";
+    }
+    asc && desc
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,6 +116,9 @@ pub struct Seen {
     pub created: DateTime<Utc>,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
+    /// When the entry endpoint last confirmed the listing still exists.
+    #[serde(default)]
+    pub verified_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,19 +194,29 @@ impl Tracker {
         })
     }
 
-    /// All absent auctions from incomplete coverage, regardless of their old prices.
+    /// Absent auctions from incomplete coverage, regardless of their old prices, in the order
+    /// they're worth an entry check: most recently seen first. Those most likely just sold, and
+    /// would otherwise stay listed for days; the longest unseen expire soon anyway. Listings
+    /// confirmed within [`RECHECK_AFTER`] wait, so they don't take every check.
     pub fn uncertain(
         &mut self,
         weapon: &str,
         present: &HashSet<&str>,
         coverage: &Coverage,
+        now: DateTime<Utc>,
     ) -> Vec<String> {
+        if coverage.is_complete() {
+            return Vec::new();
+        }
         let mut out: Vec<(&String, &Seen)> = self
             .weapon(weapon)
             .iter()
-            .filter(|(id, _)| !present.contains(id.as_str()) && !coverage.is_complete())
+            .filter(|(id, s)| {
+                !present.contains(id.as_str())
+                    && s.verified_at.is_none_or(|t| now - t >= RECHECK_AFTER)
+            })
             .collect();
-        out.sort_by_key(|(_, s)| s.last_seen);
+        out.sort_by_key(|(id, s)| (std::cmp::Reverse(s.last_seen), *id));
         out.into_iter().map(|(id, _)| id.clone()).collect()
     }
 
@@ -230,6 +263,7 @@ impl Tracker {
                 Some(false) => Some(GoneReason::Verified),
                 Some(true) => {
                     s.last_seen = now;
+                    s.verified_at = Some(now);
                     None
                 }
                 None if coverage.is_complete() => Some(GoneReason::Missing),
@@ -303,6 +337,7 @@ mod tests {
             created: at,
             first_seen: at,
             last_seen: at,
+            verified_at: None,
         }
     }
 
@@ -386,9 +421,51 @@ mod tests {
             &(0..PAGE_CAP).map(|_| Some(900)).collect::<Vec<_>>(),
         );
         assert!(c.covers(Some(950)) && !c.covers(Some(500)));
-        let mut full = Coverage::default();
-        full.add_page("price_asc", &[Some(1)]);
+        let full = Coverage {
+            complete: true,
+            ..Coverage::default()
+        };
         assert!(full.covers(None));
+    }
+
+    fn ids(range: std::ops::Range<usize>) -> HashSet<String> {
+        range.map(|i| format!("a{i}")).collect()
+    }
+
+    #[test]
+    fn a_page_just_short_of_the_cap_is_not_everything() {
+        // Real shape: the site returns 99 cheapest and 99 most expensive of 1800 listings.
+        let (cheap, pricey) = (ids(0..99), ids(1700..1799));
+        assert!(!returned_everything([("price_asc", 99, &cheap)]));
+        assert!(!returned_everything([
+            ("price_asc", 99, &cheap),
+            ("price_desc", 99, &pricey),
+        ]));
+    }
+
+    #[test]
+    fn both_orders_returning_the_same_short_page_is_everything() {
+        let all = ids(0..40);
+        assert!(returned_everything([
+            ("price_asc", 40, &all),
+            ("price_desc", 40, &all),
+        ]));
+        let empty = HashSet::new();
+        assert!(returned_everything([
+            ("price_asc", 0, &empty),
+            ("price_desc", 0, &empty),
+        ]));
+        // A listing added between the two requests: not a consistent snapshot.
+        assert!(!returned_everything([
+            ("price_asc", 40, &all),
+            ("price_desc", 41, &ids(0..41)),
+        ]));
+        // One order alone, however short, proves nothing.
+        assert!(!returned_everything([("price_asc", 5, &ids(0..5))]));
+        assert!(!returned_everything([
+            ("price_asc", 100, &ids(0..100)),
+            ("price_desc", 100, &ids(0..100)),
+        ]));
     }
 
     #[test]
@@ -408,7 +485,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            tracker.uncertain("w", &HashSet::new(), &coverage),
+            tracker.uncertain("w", &HashSet::new(), &coverage, later),
             vec!["middle"]
         );
     }
@@ -432,7 +509,7 @@ mod tests {
         );
         // Either auction may have moved outside the fetched price ranges.
         assert!(tracker.update("w", t1, vec![], &coverage, &none).is_empty());
-        let mut uncertain = tracker.uncertain("w", &HashSet::new(), &coverage);
+        let mut uncertain = tracker.uncertain("w", &HashSet::new(), &coverage, t1);
         uncertain.sort();
         assert_eq!(uncertain, vec!["cheap", "pricey"]);
         let verified = HashMap::from([("cheap".to_owned(), false)]);
@@ -445,6 +522,62 @@ mod tests {
         let gone = tracker.update("w", t1, vec![], &complete, &none);
         assert_eq!(gone[0].auction_id, "pricey");
         assert_eq!(gone[0].reason, GoneReason::Missing);
+    }
+
+    #[test]
+    fn entry_checks_go_to_the_latest_drop_outs_and_skip_recent_confirmations() {
+        let t0 = Utc::now();
+        let mut tracker = Tracker::in_memory();
+        let coverage = capped("price_asc", 10, 100);
+        let none = HashMap::new();
+        tracker.update(
+            "w",
+            t0,
+            vec![("old".into(), seen(50, t0))],
+            &coverage,
+            &none,
+        );
+        let t1 = t0 + TimeDelta::hours(4);
+        tracker.update(
+            "w",
+            t1,
+            vec![("new".into(), seen(60, t1))],
+            &coverage,
+            &none,
+        );
+        let t2 = t1 + TimeDelta::hours(4);
+        tracker.update("w", t2, vec![], &coverage, &none);
+        assert_eq!(
+            tracker.uncertain("w", &HashSet::new(), &coverage, t2),
+            vec!["new", "old"],
+            "the listing that dropped out last most likely just sold"
+        );
+
+        // Still listed: it stays, and other listings get the next checks.
+        let verified = HashMap::from([("new".to_owned(), true)]);
+        assert!(
+            tracker
+                .update("w", t2, vec![], &coverage, &verified)
+                .is_empty()
+        );
+        let t3 = t2 + TimeDelta::hours(4);
+        assert_eq!(
+            tracker.uncertain("w", &HashSet::new(), &coverage, t3),
+            vec!["old"]
+        );
+        assert_eq!(
+            tracker.uncertain("w", &HashSet::new(), &coverage, t2 + RECHECK_AFTER),
+            vec!["new", "old"]
+        );
+        let complete = Coverage {
+            complete: true,
+            ..Coverage::default()
+        };
+        assert!(
+            tracker
+                .uncertain("w", &HashSet::new(), &complete, t3)
+                .is_empty()
+        );
     }
 
     #[test]

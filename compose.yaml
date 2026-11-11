@@ -10,6 +10,7 @@ services:
       WFMT_HF_DATASET: ${HF_DATASET:-}
       WFMT_HF_TOKEN: ${HF_TOKEN:-}
       WFMT_HF_PULL_DATASET: ${HF_PULL_DATASET:-}
+      WFMT_VERIFY_MISSING: ${VERIFY_MISSING:-2}
     ports:
       - "${PORT:-8080}:8080"
     volumes:

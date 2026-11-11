@@ -73,8 +73,8 @@ pub struct EngineArgs {
     #[arg(long, env = "WFMT_FLUSH_EVERY", default_value_t = 3)]
     pub flush_every: usize,
 
-    /// Sort orders to page through, in order. The next one is only requested when the
-    /// previous page was full (100 auctions), so small weapons cost a single request.
+    /// Sort orders to fetch, in order. Listings missing from a fetch are only marked gone when
+    /// both `price_asc` and `price_desc` returned the same short page.
     #[arg(
         long,
         env = "WFMT_SORT_BY",
@@ -83,9 +83,10 @@ pub struct EngineArgs {
     )]
     pub sort_by: Vec<String>,
 
-    /// Per weapon fetch, check up to this many auctions that dropped out of the pages but were
-    /// priced outside the covered range (one request each). 0 disables.
-    #[arg(long, env = "WFMT_VERIFY_MISSING", default_value_t = 0)]
+    /// Per weapon fetch, ask warframe.market whether up to this many listings that dropped out
+    /// of the pages still exist, most recently seen first (one request each). Without checks
+    /// they count as listed until they expire after four days. 0 disables.
+    #[arg(long, env = "WFMT_VERIFY_MISSING", default_value_t = 2)]
     pub verify_missing: usize,
 
     /// Do not archive raw responses (disables `reprocess`).
@@ -502,13 +503,11 @@ impl Engine {
                     self.processing = true;
                     self.archive_progress(&raw)?;
                     self.processing = false;
-                    match wfm::parse_auctions(&raw.pages.last().unwrap().body) {
-                        Ok((auctions, skipped)) if auctions.len() + skipped < PAGE_CAP => break,
-                        Ok(_) => {}
-                        Err(e) => {
-                            fetch_error = Some(e);
-                            break;
-                        }
+                    // Even a short page needs the other orders: only both price orders
+                    // returning the same listings proves the search returned everything.
+                    if let Err(e) = wfm::parse_auctions(&raw.pages.last().unwrap().body) {
+                        fetch_error = Some(e);
+                        break;
                     }
                 }
                 Err(e) => {
@@ -562,7 +561,7 @@ impl Engine {
         }
         raw.complete = fetch_error.is_none();
         if raw.complete && self.args.verify_missing > 0 {
-            let uncertain = self.pipeline.uncertain(&weapon.slug, &raw.pages)?;
+            let uncertain = self.pipeline.uncertain(&weapon.slug, &raw)?;
             for (i, id) in uncertain
                 .into_iter()
                 .take(self.args.verify_missing)
@@ -1301,16 +1300,21 @@ mod tests {
             .client
             .set_api(format!("http://{}", listener.local_addr()?));
         let server = std::thread::spawn(move || -> Result<()> {
-            let (mut stream, _) = listener.accept()?;
-            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-            let mut request = [0; 4096];
-            stream.read(&mut request)?;
-            let body = r#"{"payload":{"auctions":[]}}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )?;
+            // A short page still needs the other order to prove the search was complete.
+            for sort_by in ["price_asc", "price_desc"] {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request)?;
+                let request = String::from_utf8_lossy(&request[..n]);
+                anyhow::ensure!(request.contains(&format!("sort_by={sort_by}")), "{request}");
+                let body = r#"{"payload":{"auctions":[]}}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )?;
+            }
             Ok(())
         });
         let weapon = engine.weapons[0].clone();

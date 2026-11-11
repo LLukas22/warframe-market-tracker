@@ -131,7 +131,7 @@ impl Client {
     pub async fn auction_exists(&mut self, id: &str) -> Result<bool> {
         let (status, body) = self.request(&format!("/v1/auctions/entry/{id}")).await?;
         if status.is_success() {
-            return Ok(true);
+            return Ok(entry_is_listed(&body));
         }
         if body.contains("not_exist") {
             return Ok(false);
@@ -310,6 +310,28 @@ struct AuctionsBody {
 #[derive(Deserialize)]
 struct AuctionsPayload {
     auctions: Vec<serde_json::Value>,
+}
+
+/// Whether an auction entry body shows a listing still for sale. A closed or hidden auction
+/// can't be bought, so it counts as gone. A body without those fields counts as listed.
+fn entry_is_listed(body: &str) -> bool {
+    let auction = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.pointer("/payload/auction").cloned());
+    let flag = |name: &str| auction.as_ref().and_then(|a| a.get(name)?.as_bool());
+    flag("closed") != Some(true) && flag("visible") != Some(false)
+}
+
+#[cfg(test)]
+#[test]
+fn closed_or_hidden_entries_are_not_listed() {
+    let entry = |fields: &str| format!(r#"{{"payload":{{"auction":{{"id":"a"{fields}}}}}}}"#);
+    assert!(entry_is_listed(&entry(r#","closed":false,"visible":true"#)));
+    assert!(entry_is_listed(&entry("")));
+    assert!(!entry_is_listed(&entry(r#","closed":true,"visible":true"#)));
+    assert!(!entry_is_listed(&entry(
+        r#","closed":false,"visible":false"#
+    )));
 }
 
 /// Parses an auction search body. Individual malformed auctions are skipped, not fatal.
