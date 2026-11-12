@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 use dioxus::router::Navigator;
 use serde::Deserialize;
 
-use crate::api::{self, RivenScan};
+use crate::api::{Overview, RivenScan, ScanAttr, attribute_name};
 use crate::ui::Route;
 
 /// What the last scan read, so the page it opens can show what to double-check.
@@ -18,6 +18,8 @@ use crate::ui::Route;
 pub struct ScanNote {
     /// The matched riven, or the scanned riven page's parameter.
     pub target: String,
+    /// What was read, so a wrong match can still be opened and corrected.
+    pub scan: String,
     pub warnings: Vec<String>,
 }
 
@@ -159,24 +161,16 @@ async fn follow(
     }
 }
 
-/// Opens the page for a scan: the stored riven if it has been listed before, else the scan.
+/// Always open the editable reading, including partial scans and scans matched to a listing.
 async fn open(scan: RivenScan, mut state: Signal<State>, navigator: Navigator) {
-    if scan.weapon.is_none() || scan.attributes.is_empty() {
+    if scan.weapon.is_none() && scan.attributes.is_empty() {
         return state.set(State::Failed(
             "Couldn't find a riven in that image. Use a screenshot of one riven card.".into(),
             scan.warnings,
         ));
     }
-    state.set(State::Busy("Looking it up…"));
-    let target = match api::scan_match(scan.clone()).await {
-        Ok(Some(id)) => Route::RivenPage {
-            id,
-            auction: String::new(),
-        },
-        // Not listed before, or the lookup failed: show the scan on its own.
-        _ => Route::ScannedRivenPage {
-            scan: scan.to_param(),
-        },
+    let target = Route::ScannedRivenPage {
+        scan: scan.to_param(),
     };
     *LAST_SCAN.write() = Some(ScanNote {
         target: match &target {
@@ -184,6 +178,7 @@ async fn open(scan: RivenScan, mut state: Signal<State>, navigator: Navigator) {
             Route::ScannedRivenPage { scan } => scan.clone(),
             _ => String::new(),
         },
+        scan: scan.to_param(),
         warnings: scan.warnings,
     });
     state.set(State::Idle);
@@ -279,19 +274,258 @@ pub fn ScanButton() -> Element {
 #[component]
 pub fn ScanNotice(target: String, matched: bool) -> Element {
     let note = LAST_SCAN.read().clone().filter(|n| n.target == target);
-    if note.is_none() && matched {
+    // The scanned riven's own page says where its stats came from; only warnings need saying.
+    if note
+        .as_ref()
+        .is_none_or(|n| !matched && n.warnings.is_empty())
+    {
         return rsx! {};
     }
+    let scan = note.as_ref().map(|n| n.scan.clone()).unwrap_or_default();
     let warnings = note.map(|n| n.warnings).unwrap_or_default();
     rsx! {
         div { class: "scan-note",
             if matched {
-                "Matched your screenshot to this riven, which has been listed on warframe.market before."
+                "Matched your screenshot to this riven, which has been listed on warframe.market before. "
+                Link { to: Route::ScannedRivenPage { scan }, "Wrong riven? Edit what the scan read" }
             } else {
-                "Read from a screenshot, and not listed on warframe.market before. Check the stats against your riven."
+                "The scanner wasn't sure about some of this, so check it against your riven:"
             }
             if !warnings.is_empty() {
                 ul { for w in warnings { li { "{w}" } } }
+            }
+        }
+    }
+}
+
+/// Positive and negative stats a riven can have: 2 or 3 positives, at most one negative.
+pub fn valid_layout(attributes: &[ScanAttr]) -> bool {
+    let positives = attributes.iter().filter(|a| a.positive).count();
+    (2..=3).contains(&positives) && attributes.len() - positives <= 1
+}
+
+/// What follows a stat's number on the riven card.
+fn unit(slug: &str) -> &'static str {
+    match slug {
+        s if s.starts_with("damage_vs_") || s.starts_with("damage_to_") => "×",
+        "punch_through" | "range" => "m",
+        "combo_duration" => "s",
+        "channeling_damage" => "",
+        _ => "%",
+    }
+}
+
+/// What the scanner read, editable, since OCR can misread a digit or a stat. Every change is
+/// passed up whole; selects apply at once, text and numbers when the field is left.
+#[component]
+pub fn ScanEditor(scan: RivenScan, onchange: EventHandler<RivenScan>) -> Element {
+    let loaded = use_context::<Signal<Option<Overview>>>();
+    let Some(overview) = loaded() else {
+        return rsx! {};
+    };
+    let mut weapons: Vec<(String, String)> = overview
+        .weapons
+        .iter()
+        .map(|w| (w.slug.clone(), w.name.clone()))
+        .collect();
+    weapons.sort_by(|a, b| a.1.cmp(&b.1));
+    let class = scan
+        .weapon
+        .as_ref()
+        .and_then(|slug| overview.weapons.iter().find(|w| &w.slug == slug))
+        .map(|w| w.class.clone());
+    // Stats this weapon can roll, plus any the scan has that it can't, so nothing vanishes.
+    let mut stats: Vec<(String, String, bool)> = overview
+        .attributes
+        .iter()
+        .map(|a| {
+            let fits = class.as_ref().is_none_or(|c| a.classes.contains(c));
+            (a.slug.clone(), a.name.clone(), fits)
+        })
+        .filter(|(slug, _, fits)| *fits || scan.attributes.iter().any(|a| &a.slug == slug))
+        .collect();
+    // An unrecognized stat must remain visible until the user corrects it.
+    for attr in &scan.attributes {
+        if !stats.iter().any(|(slug, _, _)| slug == &attr.slug) {
+            stats.push((attr.slug.clone(), attribute_name(&attr.slug), false));
+        }
+    }
+    stats.sort_by(|a, b| a.1.cmp(&b.1));
+    let number = |n: Option<i64>| n.map(|n| n.to_string()).unwrap_or_default();
+
+    // Each edit starts from the scan as it is now.
+    let current = scan.clone();
+    let edit = move |change: Box<dyn FnOnce(&mut RivenScan)>| {
+        let mut next = current.clone();
+        change(&mut next);
+        onchange.call(next);
+    };
+    let edit = std::rc::Rc::new(edit);
+
+    rsx! {
+        section { class: "scan-editor",
+            div { class: "scan-editor-head",
+                h3 { "Read from your screenshot" }
+                span { class: "muted small", "Fix anything the scanner got wrong; the page updates as you go." }
+            }
+            div { class: "scan-fields",
+                label {
+                    span { "Weapon" }
+                    select {
+                        value: "{scan.weapon.clone().unwrap_or_default()}",
+                        onchange: {
+                            let edit = edit.clone();
+                            move |e: FormEvent| {
+                                let v = e.value();
+                                edit(Box::new(move |s| s.weapon = (!v.is_empty()).then_some(v)));
+                            }
+                        },
+                        if scan.weapon.is_none() { option { value: "", "Choose a weapon" } }
+                        if let Some(slug) = scan.weapon.as_ref().filter(|s| !weapons.iter().any(|(w, _)| w == *s)) {
+                            option { value: "{slug}", "{slug} (unknown weapon)" }
+                        }
+                        for (slug, name) in weapons {
+                            option { key: "{slug}", value: "{slug}", "{name}" }
+                        }
+                    }
+                }
+                label {
+                    span { "Riven name" }
+                    input {
+                        r#type: "text",
+                        value: "{scan.name.clone().unwrap_or_default()}",
+                        placeholder: "e.g. Argi-cronicon",
+                        onchange: {
+                            let edit = edit.clone();
+                            move |e: FormEvent| {
+                                let v = e.value().trim().to_lowercase();
+                                edit(Box::new(move |s| s.name = (!v.is_empty()).then_some(v)));
+                            }
+                        },
+                    }
+                }
+                label {
+                    span { "Mastery rank" }
+                    input {
+                        r#type: "number", min: "0", max: "16", inputmode: "numeric",
+                        value: "{number(scan.mastery_rank)}",
+                        onchange: {
+                            let edit = edit.clone();
+                            move |e: FormEvent| {
+                                let v = e.value().trim().parse().ok();
+                                edit(Box::new(move |s| s.mastery_rank = v));
+                            }
+                        },
+                    }
+                }
+                label {
+                    span { "Rerolls" }
+                    input {
+                        r#type: "number", min: "0", inputmode: "numeric",
+                        value: "{number(scan.rerolls)}",
+                        onchange: {
+                            let edit = edit.clone();
+                            move |e: FormEvent| {
+                                let v = e.value().trim().parse().ok();
+                                edit(Box::new(move |s| s.rerolls = v));
+                            }
+                        },
+                    }
+                }
+            }
+
+            div { class: "scan-stats",
+                div { class: "scan-stats-head muted small",
+                    span { "Stats, as shown on the card" }
+                }
+                for (i, a) in scan.attributes.iter().enumerate() {
+                    div { key: "{i}-{a.slug}", class: if a.positive { "scan-stat positive" } else { "scan-stat negative" },
+                        select {
+                            class: "scan-stat-kind",
+                            aria_label: "Positive or negative",
+                            value: if a.positive { "p" } else { "n" },
+                            onchange: {
+                                let edit = edit.clone();
+                                move |e: FormEvent| {
+                                    let positive = e.value() == "p";
+                                    edit(Box::new(move |s| s.attributes[i].positive = positive));
+                                }
+                            },
+                            option { value: "p", "+ positive" }
+                            option { value: "n", "− negative" }
+                        }
+                        select {
+                            class: "scan-stat-name",
+                            aria_label: "Stat",
+                            value: "{a.slug}",
+                            onchange: {
+                                let edit = edit.clone();
+                                move |e: FormEvent| {
+                                    let slug = e.value();
+                                    edit(Box::new(move |s| s.attributes[i].slug = slug));
+                                }
+                            },
+                            for (slug, name, fits) in stats.iter() {
+                                option { key: "{slug}", value: "{slug}",
+                                    if *fits { "{name}" } else { "{name} (not on this weapon)" }
+                                }
+                            }
+                        }
+                        div { class: "scan-stat-value",
+                            input {
+                                r#type: "number", step: "any", inputmode: "decimal",
+                                aria_label: "{attribute_name(&a.slug)} value",
+                                value: "{a.value}",
+                                onchange: {
+                                    let edit = edit.clone();
+                                    move |e: FormEvent| {
+                                        if let Ok(v) = e.value().trim().replace(',', ".").parse::<f64>() {
+                                            if !v.is_finite() { return; }
+                                            edit(Box::new(move |s| s.attributes[i].value = v));
+                                        }
+                                    }
+                                },
+                            }
+                            span { class: "muted", "{unit(&a.slug)}" }
+                        }
+                        button {
+                            class: "picker-clear",
+                            title: "Remove this stat",
+                            aria_label: "Remove {attribute_name(&a.slug)}",
+                            onclick: {
+                                let edit = edit.clone();
+                                move |_| edit(Box::new(move |s| { s.attributes.remove(i); }))
+                            },
+                            "×"
+                        }
+                    }
+                }
+                if scan.attributes.len() < 4 {
+                    button {
+                        class: "link-button",
+                        onclick: {
+                            let edit = edit.clone();
+                            let unused = stats
+                                .iter()
+                                .find(|(slug, _, fits)| *fits && !scan.attributes.iter().any(|a| &a.slug == slug))
+                                .map(|(slug, _, _)| slug.clone());
+                            move |_| {
+                                if let Some(slug) = unused.clone() {
+                                    edit(Box::new(move |s| {
+                                        let positive = s.attributes.iter().filter(|a| a.positive).count() < 3;
+                                        s.attributes.push(ScanAttr { slug, value: 0.0, positive });
+                                    }));
+                                }
+                            }
+                        },
+                        "+ Add a stat"
+                    }
+                }
+                if !valid_layout(&scan.attributes) {
+                    p { class: "scan-note warn",
+                        "A riven has 2 or 3 positive stats and at most one negative, so this can't be graded yet."
+                    }
+                }
             }
         }
     }

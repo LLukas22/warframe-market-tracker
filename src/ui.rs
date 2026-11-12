@@ -100,7 +100,7 @@ pub(crate) enum Route {
     SearchRoute { id: String },
     #[route("/riven/:id?:auction")]
     RivenPage { id: String, auction: String },
-    /// A riven read from a screenshot that isn't in the data (see `RivenScan::to_param`).
+    /// An editable riven read from a screenshot (see `RivenScan::to_param`).
     #[route("/scanned?:scan")]
     ScannedRivenPage { scan: String },
 }
@@ -359,56 +359,104 @@ fn RivenPageContent(id: String, auction: String) -> Element {
 
 #[component]
 fn ScannedRivenPage(scan: String) -> Element {
-    rsx! { ScannedRivenContent { key: "{scan}", scan } }
+    // Not keyed by the scan: edits change the URL, and remounting would lose the editor's focus.
+    rsx! { ScannedRivenContent { scan } }
 }
 
 #[component]
 fn ScannedRivenContent(scan: String) -> Element {
-    let parsed = api::RivenScan::from_param(&scan);
+    let navigator = use_navigator();
     let version = use_context::<Signal<u64>>();
+    let mut draft = use_signal(|| api::RivenScan::from_param(&scan));
+    // The scanner's own reading, which its warnings belong to.
+    let mut original = use_signal(|| scan.clone());
+    // A new scan changes the URL under this page. Edits do too, but they already match it.
+    use_effect(use_reactive!(|scan| {
+        if draft.peek().as_ref().map(|d| d.to_param()).as_deref() != Some(scan.as_str()) {
+            draft.set(api::RivenScan::from_param(&scan));
+            original.set(scan);
+        }
+    }));
     let include_legacy = use_signal(|| false);
     let include_unfit = use_signal(|| false);
     let include_loose = use_signal(|| false);
     let mut detail = use_resource(move || {
         version.read();
-        let parsed = parsed.clone();
+        let scan = draft();
         let (legacy, unfit, loose) = (include_legacy(), include_unfit(), include_loose());
         async move {
-            match parsed {
+            match scan {
                 Some(scan) => api::scanned_detail(scan, legacy, unfit, loose).await,
                 None => Ok(None),
             }
         }
     });
+    // A corrected riven may turn out to have been listed before.
+    let matched = use_resource(move || {
+        let scan = draft();
+        async move {
+            match scan {
+                Some(scan) => api::scan_match(scan).await.ok().flatten(),
+                None => None,
+            }
+        }
+    });
+    // Keep showing the last result while an edit is graded, so the page doesn't jump.
+    let mut shown = use_signal(|| None::<Result<Option<api::RivenDetail>, String>>);
+    use_effect(move || {
+        if let Some(result) = &*detail.read() {
+            shown.set(Some(result.clone().map_err(|e| e.to_string())));
+        }
+    });
+    let onchange = move |next: api::RivenScan| {
+        let param = next.to_param();
+        draft.set(Some(next));
+        navigator.replace(Route::ScannedRivenPage { scan: param });
+    };
+    let listed_before = matched.read().clone().flatten();
+
     rsx! {
         main { class: "riven-page",
-            match &*detail.read() {
-                None => rsx! { p { role: "status", "Loading riven…" } },
-                Some(Err(error)) => rsx! {
-                    p { class: "error", "Could not load this riven: {error}" }
-                    button { onclick: move |_| detail.restart(), "Retry" }
-                },
-                Some(Ok(None)) => rsx! {
-                    h2 { "Riven not found" }
-                    p { "This scan doesn't name a known weapon. Try scanning the screenshot again." }
-                },
-                Some(Ok(Some(data))) => {
-                    let selected = &data.listing;
-                    rsx! {
-                        document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
-                        crate::scan::ScanNotice { target: scan.clone(), matched: false }
-                        if !selected.fit_ok {
-                            p { class: "scan-note warn",
-                                "These values don't fit any rank of this riven, so a number was probably misread. Similar rivens are still shown, without roll comparisons."
+            crate::scan::ScanNotice { target: original(), matched: false }
+            if let Some(current) = draft() {
+                crate::scan::ScanEditor { scan: current, onchange }
+            } else {
+                h2 { "Riven not found" }
+                p { "This scan link is broken. Try scanning the screenshot again." }
+            }
+            if let Some(id) = listed_before {
+                div { class: "scan-note",
+                    "This riven has been listed on warframe.market before. "
+                    Link { to: Route::RivenPage { id, auction: String::new() }, "Open its page and price history →" }
+                }
+            }
+            div { class: if detail.pending() { "scan-results updating" } else { "scan-results" },
+                match shown() {
+                    None => rsx! { p { role: "status", "Grading riven…" } },
+                    Some(Err(error)) => rsx! {
+                        p { class: "error", "Could not grade this riven: {error}" }
+                        button { onclick: move |_| detail.restart(), "Retry" }
+                    },
+                    Some(Ok(None)) => rsx! {
+                        p { class: "muted", "Choose the weapon above to grade this riven." }
+                    },
+                    Some(Ok(Some(data))) => {
+                        let selected = &data.listing;
+                        rsx! {
+                            document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
+                            if !selected.fit_ok {
+                                p { class: "scan-note warn",
+                                    "These values don't fit any rank of this riven, so a number or stat was probably misread. Check them against your riven above. Similar rivens are still shown, without roll comparisons."
+                                }
                             }
-                        }
-                        crate::riven_view::RivenSummary { listing: selected.clone(), now: None }
-                        h2 { class: "riven-section-title", "Similar rivens ({data.similar_total})" }
-                        SimilarRivens {
-                            selected: selected.clone(), similar: data.similar.clone(),
-                            similar_total: data.similar_total, comparisons_hidden: data.comparisons_hidden,
-                            now: data.server_time, updating: detail.pending(),
-                            include_legacy, include_unfit, include_loose,
+                            crate::riven_view::RivenSummary { listing: selected.clone(), now: None }
+                            h2 { class: "riven-section-title", "Similar rivens ({data.similar_total})" }
+                            SimilarRivens {
+                                selected: selected.clone(), similar: data.similar.clone(),
+                                similar_total: data.similar_total, comparisons_hidden: data.comparisons_hidden,
+                                now: data.server_time, updating: detail.pending(),
+                                include_legacy, include_unfit, include_loose,
+                            }
                         }
                     }
                 }
@@ -1450,6 +1498,44 @@ mod route_tests {
             }
         }
         assert_eq!(filters.weapon.as_deref(), Some("old_weapon"));
+    }
+
+    #[test]
+    fn edited_scans_survive_the_page_url_and_check_their_layout() {
+        use crate::api::{RivenScan, ScanAttr};
+        let attr = |slug: &str, value: f64, positive: bool| ScanAttr {
+            slug: slug.into(),
+            value,
+            positive,
+        };
+        let mut scan = RivenScan {
+            weapon: Some("okina".into()),
+            name: Some("argi-cronicon".into()),
+            mastery_rank: Some(16),
+            rerolls: None,
+            attributes: vec![
+                attr("fire_rate_/_attack_speed", 82.2, true),
+                attr("damage_vs_grineer", 1.61, true),
+                attr("zoom", -45.1, false),
+            ],
+            warnings: Vec::new(),
+        };
+        assert!(crate::scan::valid_layout(&scan.attributes));
+        let route = Route::ScannedRivenPage {
+            scan: scan.to_param(),
+        };
+        let Route::ScannedRivenPage { scan: param } = route.to_string().parse().unwrap() else {
+            panic!("not a scanned riven route");
+        };
+        assert_eq!(RivenScan::from_param(&param), Some(scan.clone()));
+
+        // One positive, or two negatives, isn't a riven.
+        scan.attributes.remove(0);
+        assert!(!crate::scan::valid_layout(&scan.attributes));
+        scan.attributes.push(attr("range", 1.0, true));
+        assert!(crate::scan::valid_layout(&scan.attributes));
+        scan.attributes[2].positive = false;
+        assert!(!crate::scan::valid_layout(&scan.attributes));
     }
 
     #[test]
