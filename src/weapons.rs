@@ -2,8 +2,8 @@
 
 use dioxus::prelude::*;
 
-use crate::api::{Query, WeaponInfo, looks_like_riven_id};
-use crate::ui::{format_age, format_plat};
+use crate::api::{WeaponInfo, looks_like_riven_id};
+use crate::ui::{Route, format_age, format_plat};
 
 pub fn group_label(group: &str) -> &str {
     match group {
@@ -74,17 +74,17 @@ pub fn WeaponImage(slug: String, has_image: bool, name: String, size: &'static s
 
 /// Search box with a dropdown of matching weapon names.
 #[component]
-pub fn WeaponPicker(weapons: Vec<WeaponInfo>, query: Signal<Query>) -> Element {
-    let mut query = query;
+pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
+    let navigator = use_navigator();
+    let route = use_route::<Route>();
     let mut text = use_signal(String::new);
     let mut open = use_signal(|| false);
     let mut active = use_signal(|| 0usize);
 
-    let selected = query
-        .read()
-        .weapon
-        .as_ref()
-        .and_then(|slug| weapons.iter().find(|w| &w.slug == slug).cloned());
+    let selected = match &route {
+        Route::WeaponRoute { slug } => weapons.iter().find(|w| &w.slug == slug).cloned(),
+        _ => None,
+    };
 
     let needle = text().trim().to_lowercase();
     let matches: Vec<WeaponInfo> = if needle.is_empty() {
@@ -113,16 +113,13 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>, query: Signal<Query>) -> Element {
 
     let id_like = looks_like_riven_id(&needle);
     let mut choose = move |slug: String| {
-        query.with_mut(|q| {
-            q.weapon = Some(slug);
-            q.riven_id = None;
-        });
+        navigator.push(Route::WeaponRoute { slug });
         text.set(String::new());
         open.set(false);
         active.set(0);
     };
     let mut find_id = move |id: String| {
-        query.with_mut(|q| q.riven_id = Some(id));
+        navigator.push(Route::SearchRoute { id });
         text.set(String::new());
         open.set(false);
     };
@@ -186,12 +183,13 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>, query: Signal<Query>) -> Element {
                     },
                 }
                 if selected.is_some() {
-                    button {
+                    Link {
+                        to: Route::MarketRoute {},
                         class: "picker-clear",
                         title: "All weapons",
                         onclick: move |_| {
-                            query.with_mut(|q| q.weapon = None);
                             text.set(String::new());
+                            open.set(false);
                         },
                         "×"
                     }
@@ -221,35 +219,37 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>, query: Signal<Query>) -> Element {
                     for (i, w) in matches.into_iter().enumerate() {
                         div {
                             key: "{w.slug}",
-                            class: if i == active_index { "picker-item active" } else { "picker-item" },
                             onmouseenter: move |_| active.set(i),
-                            // mousedown fires before the input loses focus.
-                            onmousedown: {
-                                let slug = w.slug.clone();
-                                move |e: MouseEvent| {
-                                    e.prevent_default();
-                                    choose(slug.clone());
+                            // Keep the menu mounted until the link receives its click.
+                            onmousedown: move |e: MouseEvent| e.prevent_default(),
+                            Link {
+                                to: Route::WeaponRoute { slug: w.slug.clone() },
+                                class: if i == active_index { "picker-item active" } else { "picker-item" },
+                                onclick: move |_| {
+                                    text.set(String::new());
+                                    open.set(false);
+                                    active.set(0);
+                                },
+                                WeaponImage {
+                                    slug: w.slug.clone(),
+                                    has_image: w.has_image,
+                                    name: w.name.clone(),
+                                    size: "sm",
                                 }
-                            },
-                            WeaponImage {
-                                slug: w.slug.clone(),
-                                has_image: w.has_image,
-                                name: w.name.clone(),
-                                size: "sm",
-                            }
-                            div { class: "picker-name",
-                                div { "{w.name}" }
-                                div { class: "muted small", "{group_label(&w.group)}" }
-                            }
-                            div { class: "picker-stats",
-                                if let Some(m) = w.median_price {
-                                    div { class: "plat-small", "{format_plat(m)}p" }
+                                div { class: "picker-name",
+                                    div { "{w.name}" }
+                                    div { class: "muted small", "{group_label(&w.group)}" }
                                 }
-                                div { class: "muted small",
-                                    if w.listings > 0 {
-                                        "{w.listings} listings"
-                                    } else {
-                                        "not scraped yet"
+                                div { class: "picker-stats",
+                                    if let Some(m) = w.median_price {
+                                        div { class: "plat-small", "{format_plat(m)}p" }
+                                    }
+                                    div { class: "muted small",
+                                        if w.listings > 0 {
+                                            "{w.listings} listings"
+                                        } else {
+                                            "not scraped yet"
+                                        }
                                     }
                                 }
                             }
@@ -329,8 +329,7 @@ enum GridSort {
 
 /// Browsable weapon cards, shown when no weapon is selected.
 #[component]
-pub fn WeaponGrid(weapons: Vec<WeaponInfo>, query: Signal<Query>) -> Element {
-    let mut query = query;
+pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
     let mut group = use_signal(|| None::<&'static str>);
     let mut sort = use_signal(|| GridSort::Value);
     let mut show_all = use_signal(|| false);
@@ -390,16 +389,10 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>, query: Signal<Query>) -> Element {
         }
         div { class: "weapon-grid",
             for w in list {
-                div {
+                Link {
                     key: "{w.slug}",
+                    to: Route::WeaponRoute { slug: w.slug.clone() },
                     class: if w.listings == 0 { "weapon-card empty" } else { "weapon-card" },
-                    onclick: {
-                        let slug = w.slug.clone();
-                        move |_| {
-                            let slug = slug.clone();
-                            query.with_mut(|q| q.weapon = Some(slug));
-                        }
-                    },
                     WeaponImage {
                         slug: w.slug.clone(),
                         has_image: w.has_image,

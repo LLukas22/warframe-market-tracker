@@ -39,6 +39,9 @@ fn main() {
             .route("/img/weapon/{slug}", get(images::weapon))
             .route("/ocr/{*path}", get(ocr_assets::serve))
             .route("/api/data/export", post(transfer::export))
-            .route("/api/data/import", post(transfer::import)))
+            .route("/api/data/import", post(transfer::import))
+            // Covers HTML, API responses and WASM/JS when no precompressed asset exists.
+            // The layer negotiates Accept-Encoding and skips already encoded responses.
+            .layer(tower_http::compression::CompressionLayer::new()))
     });
 }

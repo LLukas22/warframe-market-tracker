@@ -41,13 +41,65 @@ pub struct Query {
     pub include_unfit: bool,
     /// List rivens with invalid prices too. Charts and medians never count them.
     pub include_outliers: bool,
+    /// The same riven has been observed at two different known prices.
+    #[serde(default)]
+    pub price_changed: bool,
+    /// The same riven has appeared under different nonempty seller names.
+    #[serde(default)]
+    pub owner_changed: bool,
     /// Minimum mean roll quality of the positive attributes, 0..1.
     pub min_quality: f64,
     pub min_price: Option<i64>,
     pub max_price: Option<i64>,
     pub sort: Sort,
-    /// Width of the price history buckets.
-    pub bucket_hours: u32,
+    /// The stretch of time covered by the price chart and the disappeared listings.
+    #[serde(default)]
+    pub period: Period,
+}
+
+pub const DAY_MS: i64 = 86_400_000;
+
+/// Days are UTC, like every date the app shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Period {
+    /// Since midnight.
+    Today,
+    /// The last 7 days.
+    #[default]
+    Week,
+    /// The last 30 days.
+    Month,
+    All,
+    /// Whole days, both inclusive, as the unix ms of their midnight. `None` is open-ended.
+    Custom {
+        from: Option<i64>,
+        to: Option<i64>,
+    },
+}
+
+impl Period {
+    /// Half-open `[start, end)` in unix ms; `None` is unbounded.
+    pub fn bounds(self, now: i64) -> (Option<i64>, Option<i64>) {
+        match self {
+            Period::Today => (Some(now - now.rem_euclid(DAY_MS)), None),
+            Period::Week => (Some(now - 7 * DAY_MS), None),
+            Period::Month => (Some(now - 30 * DAY_MS), None),
+            Period::All => (None, None),
+            Period::Custom { from, to } => (from, to.map(|t| t + DAY_MS)),
+        }
+    }
+
+    /// An open custom range is just "all time", and a reversed one is put the right way round.
+    pub fn custom(from: Option<i64>, to: Option<i64>) -> Self {
+        match (from, to) {
+            (None, None) => Period::All,
+            (Some(f), Some(t)) if f > t => Period::Custom {
+                from: Some(t),
+                to: Some(f),
+            },
+            _ => Period::Custom { from, to },
+        }
+    }
 }
 
 impl Default for Query {
@@ -61,11 +113,13 @@ impl Default for Query {
             include_legacy: false,
             include_unfit: false,
             include_outliers: false,
+            price_changed: false,
+            owner_changed: false,
             min_quality: 0.0,
             min_price: Some(10),
             max_price: None,
             sort: Sort::PriceAsc,
-            bucket_hours: 24,
+            period: Period::Week,
         }
     }
 }
@@ -184,6 +238,8 @@ pub struct SearchResult {
     /// The invalid price limit of the searched weapon.
     pub price_limit: Option<i64>,
     pub history: Vec<HistoryPoint>,
+    /// Width of the history buckets, chosen from the length of the period.
+    pub bucket_hours: u32,
     pub server_time: i64,
 }
 

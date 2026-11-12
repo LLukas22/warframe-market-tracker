@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::api::{self, HistoryPoint, StatEffect, attribute_name};
-use crate::ui::{format_date, format_plat};
+use crate::ui::{format_date, format_datetime, format_plat};
 
 const INITIAL_WIDTH: f64 = 900.0;
 const H: f64 = 260.0;
@@ -33,7 +33,7 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
     let w = width();
 
     if points.is_empty() {
-        return rsx! { div { class: "chart empty", "No price history for this search yet." } };
+        return rsx! { div { class: "chart empty", "No prices recorded for this search in this period." } };
     }
 
     let bucket_ms = i64::from(bucket_hours.max(1)) * 3_600_000;
@@ -45,6 +45,22 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
         .max()
         .unwrap_or(1);
     let (y_max, y_step) = nice_axis(top as f64);
+
+    // Hourly buckets need times; a chart within one day needs nothing else.
+    let hourly = bucket_hours < 24;
+    let one_day = t1 - t0 < api::DAY_MS;
+    let axis_label = move |t: i64| match (hourly, one_day) {
+        (false, _) => format_date(t),
+        (true, true) => format_datetime(t)[11..].to_owned(),
+        (true, false) => format_datetime(t)[5..].to_owned(),
+    };
+    let tooltip_label = move |t: i64| {
+        if hourly {
+            format!("{} UTC", format_datetime(t))
+        } else {
+            format_date(t)
+        }
+    };
 
     let x = move |t: i64| LEFT + (t - t0) as f64 / (t1 - t0) as f64 * (w - LEFT - RIGHT);
     let y = move |v: i64| TOP + (1.0 - v as f64 / y_max) * (H - TOP - BOTTOM);
@@ -74,12 +90,21 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
         .map(|i| i as f64 * y_step)
         .take_while(|v| *v <= y_max + 1e-9)
         .collect();
+    // Evenly spaced in time, on bucket boundaries: points can be unevenly spaced, and
+    // labelling them by index would crowd the labels wherever data is dense.
+    let t_last = points.last().unwrap().t;
     let x_ticks: Vec<i64> = {
-        let capacity = ((w - LEFT - RIGHT) / 120.0).floor().clamp(2.0, 6.0) as usize;
-        let n = points.len().min(capacity);
-        (0..n)
-            .map(|i| points[i * (points.len() - 1) / (n - 1).max(1)].t)
-            .collect()
+        let capacity = ((w - LEFT - RIGHT) / 120.0).floor().clamp(2.0, 6.0) as i64;
+        let buckets = (t_last - t0) / bucket_ms + 1;
+        let n = buckets.min(capacity).max(1);
+        let mut ticks: Vec<i64> = (0..n)
+            .map(|i| {
+                let t = t0 + (t_last - t0) * i / (n - 1).max(1);
+                t0 + ((t - t0) as f64 / bucket_ms as f64).round() as i64 * bucket_ms
+            })
+            .collect();
+        ticks.dedup();
+        ticks
     };
 
     // One column per point, so a tap or hover anywhere near a point selects it.
@@ -100,7 +125,7 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
         let left = x(p.t) / w * 100.0;
         rsx! {
             div { class: "tooltip", style: "left: clamp(110px, {left:.1}%, calc(100% - 110px))",
-                div { class: "tooltip-date", "{format_date(p.t)}" }
+                div { class: "tooltip-date", "{tooltip_label(p.t)}" }
                 div { "median {format_plat(p.median)}" }
                 div { "p25–p75 {format_plat(p.p25)} – {format_plat(p.p75)}" }
                 div { "cheapest {format_plat(p.min)}" }
@@ -146,8 +171,8 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
                         class: "axis",
                         x: "{x(t)}",
                         y: "{H - 8.0}",
-                        text_anchor: if t == t0 { "start" } else if t == points.last().unwrap().t { "end" } else { "middle" },
-                        "{format_date(t)}"
+                        text_anchor: if t == t0 { "start" } else if t >= t_last { "end" } else { "middle" },
+                        "{axis_label(t)}"
                     }
                 }
                 polygon { class: "band", points: "{band}" }

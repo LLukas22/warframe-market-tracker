@@ -6413,6 +6413,7 @@ dependencies = [
  "tar",
  "tokio",
  "tokio-util",
+ "tower-http",
  "wasm-bindgen",
  "wfmt-scraper",
  "wfmt-types",

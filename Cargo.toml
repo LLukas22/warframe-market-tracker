@@ -18,6 +18,7 @@ dioxus = { version = "0.7", features = ["fullstack", "router"] }
 serde = { version = "1", features = ["derive"] }
 
 # Server only
+tower-http = { version = "0.6", features = ["compression-gzip"], optional = true }
 arrow = { version = "60", default-features = false, optional = true }
 parquet = { version = "60", default-features = false, features = ["arrow", "zstd"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "io-util"], optional = true }
@@ -33,7 +34,7 @@ hf-hub = { version = "1", optional = true }
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-server = ["dep:wfmt-scraper", "dioxus/server", "dep:arrow", "dep:parquet", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub"]
+server = ["dep:tower-http", "dep:wfmt-scraper", "dioxus/server", "dep:arrow", "dep:parquet", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub"]
 
 # Must match the installed wasm-bindgen CLI (`wasm-bindgen --version`), dx refuses mismatches.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

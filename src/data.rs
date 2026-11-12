@@ -479,7 +479,16 @@ fn median(mut v: Vec<i64>) -> Option<i64> {
 #[cfg(test)]
 mod storage_tests {
     use super::*;
+    use crate::api::{DAY_MS, Period};
     use std::io::Read;
+
+    /// The fixtures are dated around 1970, outside the default period.
+    fn all_time() -> Query {
+        Query {
+            period: Period::All,
+            ..Query::default()
+        }
+    }
     use wfmt_scraper::{
         identity::Registry,
         maintenance::{MaintenanceArgs, maintain},
@@ -987,6 +996,224 @@ mod storage_tests {
     }
 
     #[test]
+    fn history_filters_combine_and_paginate_active_and_gone_rivens() {
+        fn pair(
+            inner: &mut Inner,
+            weapon: u16,
+            id: &str,
+            old_price: i64,
+            new_price: i64,
+            seller: &str,
+        ) {
+            let old = add_auction(inner, weapon, &format!("{id}-old"), old_price, 1000);
+            let new = add_auction(inner, weapon, &format!("{id}-new"), new_price, 3000);
+            let old_riven = inner.auctions[old as usize].riven;
+            let new_riven = inner.auctions[new as usize].riven;
+            inner.riven_auctions[new_riven as usize].clear();
+            inner.auctions[new as usize].riven = old_riven;
+            inner.riven_auctions[old_riven as usize].push(new);
+            inner.auctions[old as usize].owner_name = "Alice".into();
+            inner.auctions[new as usize].owner_name = seller.into();
+            inner.auctions[old as usize].gone = Some((2000, "missing".into()));
+            inner.gone.push(GoneEvent {
+                t: 2000,
+                auction: old,
+                price: Some(old_price),
+                direct_sell: true,
+            });
+        }
+        let mut inner = Inner::default();
+        let weapon = inner.intern_weapon("w", "W", "rifle");
+        pair(&mut inner, weapon, "price", 100, 200, "Alice");
+        pair(&mut inner, weapon, "owner", 100, 100, "Bob");
+        pair(&mut inner, weapon, "same", 100, 100, " alice ");
+        pair(&mut inner, weapon, "unknown", 100, 100, "");
+        for i in 0..57 {
+            pair(&mut inner, weapon, &format!("both{i}"), 100, 200, "Bob");
+        }
+        let unchanged = inner.auction_index["same-new"];
+        // Repeated observations and an unknown price don't count as price changes.
+        inner.observations.push(Observation {
+            t: 4000,
+            auction: unchanged,
+            price: None,
+            direct_sell: true,
+        });
+        inner.observations.push(Observation {
+            t: 5000,
+            auction: unchanged,
+            price: Some(100),
+            direct_sell: true,
+        });
+        inner.finish_load();
+        for (price_changed, owner_changed, expected) in [
+            (false, false, 61),
+            (true, false, 58),
+            (false, true, 58),
+            (true, true, 57),
+        ] {
+            let query = Query {
+                price_changed,
+                owner_changed,
+                ..all_time()
+            };
+            let result = inner.search(&query);
+            assert_eq!((result.total, result.gone_total), (expected, expected));
+            for gone in [false, true] {
+                let first = inner.search_page(&query, 0, Some(gone));
+                let second = inner.search_page(&query, 50, Some(gone));
+                let rows: Vec<_> = if gone {
+                    first.gone.into_iter().chain(second.gone).collect()
+                } else {
+                    first.listings.into_iter().chain(second.listings).collect()
+                };
+                assert_eq!(rows.len(), expected);
+                assert_eq!(
+                    rows.iter()
+                        .map(|l| &l.riven_id)
+                        .collect::<HashSet<_>>()
+                        .len(),
+                    expected
+                );
+                if price_changed && owner_changed {
+                    assert!(rows.iter().all(|l| l.riven_id.starts_with("both")));
+                }
+            }
+        }
+        let id = inner.search(&Query {
+            riven_id: Some("same".into()),
+            price_changed: true,
+            owner_changed: true,
+            ..all_time()
+        });
+        assert_eq!(
+            (id.total, id.gone_total),
+            (1, 1),
+            "ID searches ignore filters"
+        );
+
+        // A change within one auction is sufficient, and refresh rebuilds the cached flags.
+        inner.observations.push(Observation {
+            t: 6000,
+            auction: unchanged,
+            price: Some(125),
+            direct_sell: true,
+        });
+        inner.finish_load();
+        assert_eq!(
+            inner
+                .search(&Query {
+                    price_changed: true,
+                    ..all_time()
+                })
+                .total,
+            59
+        );
+        inner.observations.pop();
+        inner.finish_load();
+        assert_eq!(
+            inner
+                .search(&Query {
+                    price_changed: true,
+                    ..all_time()
+                })
+                .total,
+            58
+        );
+    }
+
+    #[test]
+    fn period_limits_chart_and_gone_listings_but_not_current_ones() {
+        let now = now_ms();
+        let mut inner = Inner::default();
+        let weapon = inner.intern_weapon("w", "W", "rifle");
+        // Seen long ago and gone long ago, seen recently and gone recently, and still listed.
+        let old = add_auction(&mut inner, weapon, "old", 100, now - 60 * DAY_MS);
+        let recent = add_auction(&mut inner, weapon, "recent", 200, now - 2 * DAY_MS);
+        add_auction(&mut inner, weapon, "current", 300, now - 3_600_000);
+        for (auction, t) in [(old, now - 59 * DAY_MS), (recent, now - DAY_MS)] {
+            inner.auctions[auction as usize].gone = Some((t, "missing".into()));
+            inner.gone.push(GoneEvent {
+                t,
+                auction,
+                price: Some(100),
+                direct_sell: true,
+            });
+        }
+        inner.finish_load();
+        let search = |period| {
+            inner.search(&Query {
+                period,
+                ..all_time()
+            })
+        };
+
+        let all = search(Period::All);
+        assert_eq!((all.total, all.gone_total), (1, 2));
+        assert_eq!(all.bucket_hours, 24);
+        assert_eq!(all.history.iter().map(|p| p.count).sum::<u32>(), 3);
+
+        let week = search(Period::Week);
+        assert_eq!((week.total, week.gone_total), (1, 1));
+        // Only two days of the week have data, so the buckets fit those.
+        assert_eq!(week.bucket_hours, 1);
+        assert_eq!(week.history.iter().map(|p| p.count).sum::<u32>(), 2);
+        assert!(
+            week.history
+                .iter()
+                .all(|p| p.t >= now - 7 * DAY_MS - 3_600_000)
+        );
+
+        let hours = |h: i64| bucket_hours_for(h * 3_600_000);
+        assert_eq!(
+            [
+                hours(24),
+                hours(168),
+                hours(720),
+                hours(2400),
+                hours(9000),
+                hours(20000)
+            ],
+            [1, 3, 12, 24, 168, 168]
+        );
+
+        let today = search(Period::Today);
+        assert_eq!(today.bucket_hours, 1);
+        assert_eq!(today.gone_total, 0);
+
+        // Whole days, both inclusive.
+        let day = now - 60 * DAY_MS;
+        let day = day - day.rem_euclid(DAY_MS);
+        let custom = search(Period::Custom {
+            from: Some(day),
+            to: Some(day + DAY_MS),
+        });
+        assert_eq!(custom.gone_total, 1);
+        assert_eq!(custom.history.iter().map(|p| p.count).sum::<u32>(), 1);
+        assert_eq!(custom.bucket_hours, 1);
+
+        // An id search shows the riven's whole past whatever the period.
+        let id = inner.auctions[old as usize].riven;
+        let found = inner.search(&Query {
+            riven_id: Some(inner.rivens[id as usize].clone()),
+            period: Period::Today,
+            ..all_time()
+        });
+        assert_eq!(found.gone_total, 1);
+    }
+
+    #[test]
+    fn old_search_requests_default_history_filters_to_off() {
+        let mut value = serde_json::to_value(Query::default()).unwrap();
+        value.as_object_mut().unwrap().remove("price_changed");
+        value.as_object_mut().unwrap().remove("owner_changed");
+        assert_eq!(
+            serde_json::from_value::<Query>(value).unwrap(),
+            Query::default()
+        );
+    }
+
+    #[test]
     fn listing_pages_reach_every_match_beyond_the_old_caps() {
         let mut inner = Inner::default();
         let weapon = inner.intern_weapon("w", "W", "rifle");
@@ -1013,7 +1240,7 @@ mod storage_tests {
             let query = Query {
                 weapon: Some("w".into()),
                 sort,
-                ..Query::default()
+                ..all_time()
             };
             let first = inner.search(&query);
             assert_eq!((first.total, first.gone_total), (237, 113));
@@ -1061,7 +1288,7 @@ mod storage_tests {
         inner.finish_load();
         let query = Query {
             weapon: Some("w".into()),
-            ..Query::default()
+            ..all_time()
         };
         let result = inner.search(&query);
         assert_eq!(result.total, 1);
@@ -1087,7 +1314,7 @@ mod storage_tests {
         inner.finish_load();
         let query = Query {
             weapon: Some("w".into()),
-            ..Query::default()
+            ..all_time()
         };
         let history = inner.search(&query).history;
         assert_eq!(history.len(), 1);
@@ -1133,7 +1360,7 @@ mod storage_tests {
         let query = Query {
             weapon: Some("w".into()),
             min_price: None,
-            ..Query::default()
+            ..all_time()
         };
 
         let result = inner.search(&query);
@@ -1173,7 +1400,7 @@ mod storage_tests {
         let id = inner.auctions[inner.auction_index["joke"] as usize].riven;
         let result = inner.search(&Query {
             riven_id: Some(inner.rivens[id as usize].clone()),
-            ..Query::default()
+            ..all_time()
         });
         assert_eq!(result.total, 1);
         assert!(result.listings[0].price_outlier);
@@ -1392,6 +1619,20 @@ mod storage_tests {
     }
 }
 
+/// Chart bucket width for a time span: the finest that keeps the chart at 100 points or fewer.
+fn bucket_hours_for(span_ms: i64) -> u32 {
+    [1, 3, 6, 12, 24, 72, 168]
+        .into_iter()
+        .find(|h| span_ms <= 100 * i64::from(*h) * 3_600_000)
+        .unwrap_or(168)
+}
+
+#[derive(Clone, Copy, Default)]
+struct RivenChanges {
+    price: bool,
+    owner: bool,
+}
+
 #[derive(Default)]
 pub struct Inner {
     /// Bumped whenever the loaded data changes, so clients know when to fetch again.
@@ -1408,6 +1649,8 @@ pub struct Inner {
     riven_index: HashMap<String, u32>,
     /// Auctions per riven.
     riven_auctions: Vec<Vec<u32>>,
+    /// Rebuilt on refresh so history filters don't rescan observations on every page.
+    riven_changes: Vec<RivenChanges>,
     /// Sorted by time.
     gone: Vec<GoneEvent>,
 }
@@ -1452,6 +1695,7 @@ impl Inner {
         self.rivens.push(id.to_owned());
         self.riven_index.insert(id.to_owned(), i);
         self.riven_auctions.push(Vec::new());
+        self.riven_changes.push(RivenChanges::default());
         i
     }
 
@@ -1661,6 +1905,27 @@ impl Inner {
         self.observations.sort_by_key(|o| o.t);
         self.gone.sort_by_key(|g| g.t);
 
+        self.riven_changes = vec![RivenChanges::default(); self.rivens.len()];
+        let mut first_prices = vec![None; self.rivens.len()];
+        for o in &self.observations {
+            let riven = self.auctions[o.auction as usize].riven as usize;
+            // Missing prices aren't evidence of a change; compare known numeric prices only.
+            if let Some(price) = o.price {
+                let first = first_prices[riven].get_or_insert(price);
+                self.riven_changes[riven].price |= *first != price;
+            }
+        }
+        for (riven, auctions) in self.riven_auctions.iter().enumerate() {
+            let mut sellers = auctions
+                .iter()
+                .map(|&i| self.auctions[i as usize].owner_name.trim())
+                .filter(|name| !name.is_empty());
+            if let Some(first) = sellers.next() {
+                self.riven_changes[riven].owner =
+                    sellers.any(|name| !name.eq_ignore_ascii_case(first));
+            }
+        }
+
         let mut prices: Vec<Vec<i64>> = vec![Vec::new(); self.weapons.len()];
         for a in &self.auctions {
             prices[a.weapon as usize].extend(auction_price(a));
@@ -1790,6 +2055,10 @@ impl Inner {
             return self.rivens[a.riven as usize].starts_with(prefix.as_str());
         }
         if weapon.is_some_and(|w| w != a.weapon) {
+            return false;
+        }
+        let changes = self.riven_changes[a.riven as usize];
+        if (q.price_changed && !changes.price) || (q.owner_changed && !changes.owner) {
             return false;
         }
         if !q.include_unfit && !a.fit_ok {
@@ -1922,6 +2191,7 @@ impl Inner {
                         outliers_hidden: 0,
                         price_limit: None,
                         history: Vec::new(),
+                        bucket_hours: 24,
                         server_time: now_ms(),
                     };
                 }
@@ -1984,12 +2254,23 @@ impl Inner {
             .map(|a| self.listing(a))
             .collect();
 
+        // The period limits the chart and the disappeared listings; current listings are current.
+        // An id search shows the riven's whole past.
+        let now = now_ms();
+        let (start, end) = if id_search {
+            (None, None)
+        } else {
+            q.period.bounds(now)
+        };
+        let in_period = |t: i64| start.is_none_or(|s| t >= s) && end.is_none_or(|e| t < e);
+
         // Disappeared listings (≈ sold), newest first, one per riven.
         let gone_events: Vec<&GoneEvent> = self
             .gone
             .iter()
             .filter(|g| {
-                matching[g.auction as usize]
+                in_period(g.t)
+                    && matching[g.auction as usize]
                     && self.gone_valid(g)
                     && Self::price_ok(q, g.price, g.direct_sell)
             })
@@ -2027,13 +2308,26 @@ impl Inner {
                 outliers_hidden,
                 price_limit: weapon.and_then(|w| self.weapons[w as usize].price_limit),
                 history: Vec::new(),
-                server_time: now_ms(),
+                bucket_hours: 24,
+                server_time: now,
             };
         }
 
+        // Observations are sorted by time, so the period is one slice of them.
+        let observations = {
+            let lo = start.map_or(0, |s| self.observations.partition_point(|o| o.t < s));
+            let hi = end.map_or(self.observations.len(), |e| {
+                self.observations.partition_point(|o| o.t < e)
+            });
+            &self.observations[lo..hi.max(lo)]
+        };
+        // Bucket width follows the time the data covers: hours for a day, days for months.
+        let span_start = observations.first().map(|o| o.t).or(start).unwrap_or(now);
+        let bucket_hours = bucket_hours_for(end.unwrap_or(now).min(now) - span_start);
+
         // Price history: per bucket, the latest price of every matching riven (cheapest copy),
         // plus the last prices of rivens that disappeared in that bucket.
-        let bucket = i64::from(q.bucket_hours.max(1)) * 3_600_000;
+        let bucket = i64::from(bucket_hours) * 3_600_000;
         let bucket_of = |t: i64| t - t.rem_euclid(bucket);
         let mut gone_by_bucket: HashMap<i64, HashMap<u32, i64>> = HashMap::new();
         for g in gone_events.iter().filter(|g| id_search || !gone_outlier(g)) {
@@ -2083,7 +2377,7 @@ impl Inner {
                 gone_median: median(gone),
             });
         };
-        for o in &self.observations {
+        for o in observations {
             if !matching[o.auction as usize] {
                 continue;
             }
@@ -2111,7 +2405,8 @@ impl Inner {
             outliers_hidden,
             price_limit: weapon.and_then(|w| self.weapons[w as usize].price_limit),
             history,
-            server_time: now_ms(),
+            bucket_hours,
+            server_time: now,
         }
     }
 
