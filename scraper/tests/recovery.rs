@@ -629,12 +629,12 @@ fn starting_only_prices_must_exceed_the_mean_without_causing_false_sales() -> Re
         body: serde_json::json!({"payload": {"auctions": [duplicate_bid]}}).to_string(),
     });
     let summary = pipeline.process(&weapon, &next, &mut sink)?;
-    assert_eq!(summary.auctions, 3);
+    assert_eq!(summary.auctions, 4);
     assert_eq!(
         summary.gone, 0,
         "a listing losing its price is still present"
     );
-    assert_eq!(sink.auctions.len(), 3);
+    assert_eq!(sink.auctions.len(), 4);
     assert!(
         sink.auctions
             .iter()
@@ -648,7 +648,17 @@ fn starting_only_prices_must_exceed_the_mean_without_causing_false_sales() -> Re
     sink.flush()?;
     let seen: serde_json::Value =
         serde_json::from_slice(&fs::read(store.seen_dir().join("kulstar.json"))?)?;
-    assert!(seen.get(original["id"].as_str().unwrap()).is_some());
+    let tracked = &seen[original["id"].as_str().unwrap()];
+    assert_eq!(tracked["price"], 1);
+    assert!(tracked["buyout"].is_null());
+    let stored = table(&root.0, "auctions");
+    let latest = stored
+        .iter()
+        .rev()
+        .find(|r| r["auction_id"] == original["id"])
+        .unwrap();
+    assert!(latest["buyout_price"].is_null());
+    assert_eq!(latest["starting_price"], "1");
     assert!(seen.get("zero-price").is_none());
     assert!(seen.get("below-average").is_none());
     assert!(seen.get("equal-average").is_none());
@@ -659,8 +669,9 @@ fn starting_only_prices_must_exceed_the_mean_without_causing_false_sales() -> Re
         &raw(t + TimeDelta::days(6), vec![above]),
         &mut sink,
     )?;
-    assert_eq!(summary.auctions, 0);
-    assert!(sink.auctions.is_empty());
+    // This is already tracked: its current starting price must still be recorded.
+    assert_eq!(summary.auctions, 1);
+    assert_eq!(sink.auctions[0].starting_price, Some(501));
     Ok(())
 }
 
@@ -676,5 +687,84 @@ fn legacy_archives_without_receipts_are_not_automatically_replayed() -> Result<(
     assert!(!raw.recoverable && raw.complete);
     store.save_raw(&raw)?;
     assert!(store.pending_raw()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn duplicate_pages_keep_newest_edit_and_latest_bid_on_ties() -> Result<()> {
+    let mut listing = fixture();
+    let mut pages = Vec::new();
+    for (sort, updated, price, bid) in [
+        ("price_asc", "2026-11-10T10:00:00Z", 100, 10),
+        ("price_desc", "2026-11-10T10:01:00Z", 200, 20),
+        ("price_desc", "2026-11-10T10:00:00Z", 50, 5),
+        ("price_desc", "2026-11-10T10:01:00Z", 200, 30),
+    ] {
+        listing["updated"] = updated.into();
+        listing["buyout_price"] = price.into();
+        listing["top_bid"] = bid.into();
+        pages.push(RawPage {
+            sort_by: sort.into(),
+            buyout_policy: None,
+            body: serde_json::json!({"payload":{"auctions":[listing]}}).to_string(),
+        });
+    }
+    let merged = wfmt_scraper::pipeline::parse_pages(&pages)?;
+    assert_eq!(merged.auctions.len(), 1);
+    assert_eq!(merged.auctions[0].0.buyout_price, Some(200));
+    assert_eq!(merged.auctions[0].0.top_bid(), Some(30));
+    assert_eq!(
+        merged.auctions[0].1,
+        "price_asc,price_desc,price_desc,price_desc"
+    );
+    Ok(())
+}
+
+#[test]
+fn feed_price_withdrawal_survives_restart_and_restoration() -> Result<()> {
+    let root = Temp::new();
+    let store = Store::new(root.0.clone());
+    let weapons = wfm::parse_weapons(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
+    let mut listing = fixture();
+    listing["item"]["weapon_url_name"] = "kulstar".into();
+    listing["top_bid"] = serde_json::Value::Null;
+    listing["starting_price"] = serde_json::Value::Null;
+    let start = Utc::now();
+    // Reopen tracking each time: persistence must keep the withdrawal as well as the restoration.
+    for (minutes, buyout) in [(0, Some(500)), (3, None), (6, None), (9, Some(700))] {
+        listing["buyout_price"] = serde_json::json!(buyout);
+        let mut pipeline = Pipeline {
+            normalizer: Normalizer::new("2026-10-22T00:00:00Z".parse()?),
+            registry: Registry::open(store.registry_path())?,
+            tracker: Tracker::open(store.seen_dir()),
+        };
+        let mut sink = ParquetSink::new(root.0.join("parquet"));
+        let raw = RawResponse::new(
+            start + TimeDelta::minutes(minutes),
+            wfmt_types::FEED_RECENT.into(),
+            "pc".into(),
+            vec![RawPage {
+                sort_by: wfmt_types::FEED_RECENT.into(),
+                buyout_policy: None,
+                body: serde_json::json!({"payload":{"auctions":[listing]}}).to_string(),
+            }],
+            vec![],
+        );
+        let summary = pipeline.process_feed(&weapons, &raw, &mut sink)?;
+        assert_eq!(summary.auctions, usize::from(minutes != 6));
+        assert_eq!(summary.gone, 0);
+        sink.flush()?;
+        let seen: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.seen_dir().join("kulstar.json"))?)?;
+        assert_eq!(
+            seen[listing["id"].as_str().unwrap()]["price"],
+            serde_json::json!(buyout)
+        );
+    }
+    let stored = table(&root.0, "auctions");
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored[0]["buyout_price"], "500");
+    assert!(stored[1]["buyout_price"].is_null());
+    assert_eq!(stored[2]["buyout_price"], "700");
     Ok(())
 }

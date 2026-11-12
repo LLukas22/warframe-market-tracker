@@ -702,6 +702,7 @@ impl Engine {
         self.publish();
 
         let mut shutting_down = false;
+        let mut feed_since_weapon = false;
         let mut metadata_failed_at: Option<DateTime<Utc>> = None;
         let mut next_maintenance = Instant::now();
         let mut next_feed_prune = Instant::now();
@@ -809,13 +810,18 @@ impl Engine {
                 self.handle(command)?;
             }
 
-            // Feeds run between weapons, sharing the client's rate limit with the sweep.
+            // At most one feed between weapons, even if multiple slow feeds are overdue.
+            // Oldest deadline first also prevents one feed from starving the other.
+            let sweep_waiting = self.state.sweep.is_some() || sweep_due;
             let due = feeds
                 .iter_mut()
-                .find(|(_, _, next)| Instant::now() >= *next);
-            if let Some((feed, interval, next)) = due.filter(|_| !self.weapons.is_empty()) {
+                .filter(|(_, _, next)| Instant::now() >= *next)
+                .min_by_key(|(_, _, next)| *next);
+            if let Some((feed, interval, next)) =
+                due.filter(|_| !self.weapons.is_empty() && !(sweep_waiting && feed_since_weapon))
+            {
                 let feed = *feed;
-                *next = Instant::now() + *interval;
+                feed_since_weapon = true;
                 let started = Instant::now();
                 let result = {
                     let fetch = self.fetch_feed(feed);
@@ -835,6 +841,9 @@ impl Engine {
                         }
                     }
                 };
+                // Backoff can outlast the poll interval. Start the next interval after
+                // completion (or cancellation), so a failed feed cannot immediately repeat.
+                *next = Instant::now() + *interval;
                 let Some(result) = result else {
                     continue;
                 };
@@ -891,6 +900,7 @@ impl Engine {
                 continue;
             }
             let slug = sweep.queue.remove(0);
+            feed_since_weapon = false;
             let Some(weapon) = self.weapons.iter().find(|w| w.slug == slug).cloned() else {
                 tracing::warn!(weapon = %slug, "weapon no longer exists, skipping");
                 sweep.progress.total = sweep.progress.total.saturating_sub(1);
@@ -1111,6 +1121,78 @@ mod tests {
         }
         stop.send(true)?;
         running.await??;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slow_failed_feeds_allow_sweep_and_other_feed_to_run() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("wfmt-fair-{}", crate::dataset::unique_id()));
+        let store = Store::new(root.clone());
+        store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
+        let mut args = options(false);
+        args.recent_interval_secs = 1;
+        args.popular_interval_secs = 1;
+        let mut engine = Engine::new(root.clone(), "2026-10-22T00:00:00Z".parse()?, args)?;
+        engine.meta.checked_at = Some(Utc::now());
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        engine
+            .client
+            .set_api(format!("http://{}", listener.local_addr()?));
+        let (stop, shutdown) = watch::channel(false);
+        let server = std::thread::spawn(move || -> Result<Vec<String>> {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut paths = Vec::new();
+            while paths.len() < 4 {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(stream) => stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        anyhow::ensure!(
+                            Instant::now() < deadline,
+                            "scheduler stopped making requests"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut request = Vec::new();
+                let mut buf = [0; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf)?;
+                    anyhow::ensure!(n > 0, "incomplete request");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let path = String::from_utf8_lossy(&request)
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .to_owned();
+                let (status, body) = if path.contains("/search?") {
+                    ("200 OK", r#"{"payload":{"auctions":[]}}"#)
+                } else {
+                    // Simulate a failed poll lasting longer than its scheduling interval.
+                    std::thread::sleep(Duration::from_millis(1100));
+                    ("400 Bad Request", "{}")
+                };
+                paths.push(path);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )?;
+            }
+            stop.send(true)?;
+            Ok(paths)
+        });
+        tokio::time::timeout(Duration::from_secs(20), engine.run(shutdown)).await??;
+        let paths = server.join().unwrap()?;
+        assert_eq!(paths[0], "/v1/auctions");
+        assert!(paths[1].contains("/search?") && paths[1].contains("price_asc"));
+        assert!(paths[2].contains("/search?") && paths[2].contains("price_desc"));
+        assert_eq!(paths[3], "/v1/auctions/popular");
         fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -27,8 +27,7 @@ use wfmt_scraper::identity::{IdAttr, IdInput, Registry};
 use wfmt_scraper::riven::{self, AttrInput, RivenInput, WeaponClass};
 
 const RESCAN_EVERY: Duration = Duration::from_secs(5);
-const MAX_LISTINGS: usize = 200;
-const MAX_GONE: usize = 50;
+const LISTING_PAGE_SIZE: usize = 50;
 const WEEK_MS: i64 = 7 * 86_400_000;
 
 // Prices are free text, and sellers park rivens at joke prices like 88888 or 666666. A price is
@@ -988,6 +987,72 @@ mod storage_tests {
     }
 
     #[test]
+    fn listing_pages_reach_every_match_beyond_the_old_caps() {
+        let mut inner = Inner::default();
+        let weapon = inner.intern_weapon("w", "W", "rifle");
+        for i in 0..237 {
+            add_auction(&mut inner, weapon, &format!("active{i:03}"), 100, 1000);
+        }
+        for i in 0..113 {
+            let index = add_auction(&mut inner, weapon, &format!("gone{i:03}"), 100, 1000);
+            inner.auctions[index as usize].gone = Some((2000 + i, "missing".into()));
+            inner.gone.push(GoneEvent {
+                t: 2000 + i,
+                auction: index,
+                price: Some(100),
+                direct_sell: true,
+            });
+        }
+        inner.finish_load();
+        for sort in [
+            Sort::PriceAsc,
+            Sort::PriceDesc,
+            Sort::QualityDesc,
+            Sort::Newest,
+        ] {
+            let query = Query {
+                weapon: Some("w".into()),
+                sort,
+                ..Query::default()
+            };
+            let first = inner.search(&query);
+            assert_eq!((first.total, first.gone_total), (237, 113));
+            assert_eq!((first.listings.len(), first.gone.len()), (50, 50));
+            for (gone, expected) in [(false, 237), (true, 113)] {
+                let mut ids = HashSet::new();
+                for offset in (0..expected).step_by(LISTING_PAGE_SIZE) {
+                    let page = inner.search_page(&query, offset, Some(gone));
+                    assert!(page.history.is_empty());
+                    let rows = if gone {
+                        assert!(page.listings.is_empty());
+                        page.gone
+                    } else {
+                        assert!(page.gone.is_empty());
+                        page.listings
+                    };
+                    assert_eq!(rows.len(), (expected - offset).min(LISTING_PAGE_SIZE));
+                    for row in rows {
+                        assert_eq!(row.gone_at.is_some(), gone);
+                        assert!(ids.insert(row.auction_id), "duplicate across pages");
+                    }
+                }
+                assert_eq!(ids.len(), expected);
+                let end = inner.search_page(&query, expected, Some(gone));
+                assert!(end.listings.is_empty() && end.gone.is_empty());
+            }
+            let filtered = inner.search_page(
+                &Query {
+                    min_price: Some(101),
+                    ..query
+                },
+                0,
+                Some(false),
+            );
+            assert_eq!(filtered.total, 0);
+        }
+    }
+
+    #[test]
     fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
         let mut inner = Inner::default();
         let weapon = inner.intern_weapon("w", "W", "rifle");
@@ -1209,6 +1274,35 @@ mod storage_tests {
                     .iter()
                     .any(|a| a.buyout_price == Some(123_456))
             );
+        }
+        // A later feed withdraws all prices. The reader must replace the old price
+        // and retain an unknown-price observation so the history can show a gap.
+        sighted["buyout_price"] = serde_json::Value::Null;
+        sighted["starting_price"] = serde_json::Value::Null;
+        sighted["top_bid"] = serde_json::Value::Null;
+        let withdrawn_at = swept_at + chrono::TimeDelta::hours(2);
+        pipeline.process_feed(
+            std::slice::from_ref(&weapon),
+            &raw(
+                withdrawn_at,
+                wfmt_types::FEED_RECENT,
+                serde_json::json!({"payload": {"auctions": [sighted]}}).to_string(),
+            ),
+            &mut sink,
+        )?;
+        sink.flush()?;
+        let reloaded = Store::new(root.clone());
+        reloaded.refresh();
+        {
+            let inner = reloaded.inner.read().unwrap();
+            let index = inner.auction_index[sighted["id"].as_str().unwrap()];
+            let auction = &inner.auctions[index as usize];
+            assert_eq!(auction_price(auction), None);
+            assert_eq!(auction.last_seen, withdrawn_at.timestamp_millis());
+            assert!(inner.is_current(auction), "withdrawal is not a sale");
+            assert!(inner.observations.iter().any(|o| {
+                o.auction == index && o.t == withdrawn_at.timestamp_millis() && o.price.is_none()
+            }));
         }
         fs::remove_dir_all(root)?;
         Ok(())
@@ -1795,6 +1889,11 @@ impl Inner {
     }
 
     pub fn search(&self, q: &Query) -> SearchResult {
+        self.search_page(q, 0, None)
+    }
+
+    /// `None` includes both first pages and history; subsequent pages fetch only one tab.
+    pub fn search_page(&self, q: &Query, offset: usize, gone_tab: Option<bool>) -> SearchResult {
         // An id search shows everything about that riven, whatever the other filters say.
         let id_query;
         let q = match &q.riven_id {
@@ -1874,7 +1973,14 @@ impl Inner {
         let total = current.len();
         let listings = current
             .into_iter()
-            .take(MAX_LISTINGS)
+            .skip(offset)
+            .take(if gone_tab == Some(true) {
+                0
+            } else if id_search && gone_tab.is_none() {
+                usize::MAX
+            } else {
+                LISTING_PAGE_SIZE
+            })
             .map(|a| self.listing(a))
             .collect();
 
@@ -1901,9 +2007,29 @@ impl Inner {
         let gone_total = recent_gone.len();
         let gone = recent_gone
             .into_iter()
-            .take(MAX_GONE)
+            .skip(offset)
+            .take(if gone_tab == Some(false) {
+                0
+            } else if id_search && gone_tab.is_none() {
+                usize::MAX
+            } else {
+                LISTING_PAGE_SIZE
+            })
             .map(|g| self.listing(&self.auctions[g.auction as usize]))
             .collect();
+
+        if gone_tab.is_some() {
+            return SearchResult {
+                listings,
+                total,
+                gone,
+                gone_total,
+                outliers_hidden,
+                price_limit: weapon.and_then(|w| self.weapons[w as usize].price_limit),
+                history: Vec::new(),
+                server_time: now_ms(),
+            };
+        }
 
         // Price history: per bucket, the latest price of every matching riven (cheapest copy),
         // plus the last prices of rivens that disappeared in that bucket.

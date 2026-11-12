@@ -611,14 +611,16 @@ fn MarketPage(overview: Overview, query: Signal<Query>, data_version: Signal<u64
             } else {
                 WeaponGrid { weapons: overview.weapons.clone(), query }
             }
-            Results {
+            {rsx! { Results {
+                key: "{shown_query():?}",
+                search_query: shown_query().unwrap_or_else(|| query()),
                 result: r.clone(),
                 bucket_hours: query.read().bucket_hours,
                 show_weapon: selected.is_none(),
                 weapons: overview.weapons.clone(),
                 id_search: riven_search.is_some(),
                 weapon: selected.as_ref().map(|w| w.slug.clone()),
-            }
+            } }}
         },
         Some(Err(e)) => rsx! { div { class: "error", "Search failed: {e}" } },
         None => rsx! { div { class: "muted", "Searching…" } },
@@ -887,6 +889,7 @@ fn Filters(overview: Overview, query: Signal<Query>) -> Element {
 #[component]
 fn Results(
     result: SearchResult,
+    search_query: Query,
     bucket_hours: u32,
     show_weapon: bool,
     weapons: Vec<crate::api::WeaponInfo>,
@@ -896,14 +899,8 @@ fn Results(
     weapon: Option<String>,
 ) -> Element {
     let mut query = use_context::<Signal<Query>>();
-    let shown = result.listings.len();
     let now = result.server_time;
-    let mut show_all_gone = use_signal(|| false);
-    let gone: Vec<Listing> = if show_all_gone() {
-        result.gone.clone()
-    } else {
-        result.gone.iter().take(8).cloned().collect()
-    };
+    let mut gone_tab = use_signal(|| false);
     let has_image = |l: &Listing| {
         weapons
             .iter()
@@ -937,71 +934,146 @@ fn Results(
         if let Some(slug) = weapon {
             StatEffectsPanel { key: "{slug}", weapon: slug.clone() }
         }
-        div { class: "section-head",
-            h2 { "Current listings" }
-            span { class: "muted small",
-                "{result.total} found"
-                if result.total > shown {
-                    " · showing the first {shown}"
-                }
+        div { class: "listing-tabs", role: "tablist", aria_label: "Listing status",
+            button {
+                role: "tab", id: "active-tab", aria_selected: !gone_tab(), aria_controls: "listing-panel",
+                class: if !gone_tab() { "active" } else { "" },
+                onclick: move |_| gone_tab.set(false),
+                "Active ({result.total})"
             }
-            if result.outliers_hidden > 0 {
-                button {
-                    class: "link-button",
-                    title: "Prices far above the normal high end of the weapon. Click to list them.",
-                    onclick: move |_| query.with_mut(|q| q.include_outliers = true),
-                    "{result.outliers_hidden} with invalid prices hidden"
-                    if let Some(limit) = result.price_limit {
-                        " (over {format_plat(limit)}p)"
+            button {
+                role: "tab", id: "gone-tab", aria_selected: gone_tab(), aria_controls: "listing-panel",
+                class: if gone_tab() { "active" } else { "" },
+                onclick: move |_| gone_tab.set(true),
+                "Gone / sold ({result.gone_total})"
+            }
+        }
+        if gone_tab() {
+            p { class: "muted small", "Disappeared listings may be sold or delisted; warframe.market does not confirm sales." }
+        }
+        if result.outliers_hidden > 0 && !gone_tab() {
+            button {
+                class: "link-button",
+                onclick: move |_| query.with_mut(|q| q.include_outliers = true),
+                "{result.outliers_hidden} with invalid prices hidden"
+            }
+        }
+        {rsx! { ListingFeed {
+            key: "{gone_tab()}",
+            query: search_query,
+            gone: gone_tab(),
+            initial: if gone_tab() { result.gone.clone() } else { result.listings.clone() },
+            total: if gone_tab() { result.gone_total } else { result.total },
+            now, show_weapon, weapons,
+        } }}
+    }
+}
+
+/// A feed owns its requests, so changing weapon, filters or tab cancels stale loads.
+#[component]
+fn ListingFeed(
+    query: Query,
+    gone: bool,
+    initial: Vec<Listing>,
+    total: usize,
+    now: i64,
+    show_weapon: bool,
+    weapons: Vec<crate::api::WeaponInfo>,
+) -> Element {
+    let mut rows = use_signal(|| initial);
+    let mut offset = use_signal(|| rows.peek().len());
+    let mut more = use_signal(|| *offset.peek() < total);
+    let mut loading = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let load = EventHandler::new(move |()| {
+        if loading() || !more() {
+            return;
+        }
+        loading.set(true);
+        error.set(None);
+        let query = query.clone();
+        spawn(async move {
+            match api::listing_page(query, offset(), gone).await {
+                Ok(page) => {
+                    let (batch, total) = if gone {
+                        (page.gone, page.gone_total)
+                    } else {
+                        (page.listings, page.total)
+                    };
+                    let count = batch.len();
+                    offset += count;
+                    more.set(count > 0 && offset() < total);
+                    rows.with_mut(|rows| {
+                        for listing in batch {
+                            if !rows.iter().any(|l| l.auction_id == listing.auction_id) {
+                                rows.push(listing);
+                            }
+                        }
+                    });
+                }
+                Err(e) => error.set(Some(e.to_string())),
+            }
+            loading.set(false);
+        });
+    });
+    rsx! {
+        div { id: "listing-panel", role: "tabpanel",
+            aria_labelledby: if gone { "gone-tab" } else { "active-tab" },
+            aria_busy: loading(),
+            div { class: if gone { "listings gone" } else { "listings" },
+                for l in rows.read().iter() {
+                    ListingRow { key: "{l.auction_id}", listing: l.clone(), now, show_weapon,
+                        has_image: weapons.iter().any(|w| w.slug == l.weapon_slug && w.has_image),
+                        open_initially: false,
                     }
                 }
             }
-        }
-        if result.listings.is_empty() {
-            div { class: "empty-state", "Nothing matches. Try loosening the filters." }
-        }
-        div { class: "listings",
-            for l in result.listings.iter() {
-                ListingRow {
-                    key: "{l.auction_id}",
-                    listing: l.clone(),
-                    now,
-                    show_weapon,
-                    has_image: has_image(l),
-                    open_initially: false,
+            if rows.read().is_empty() {
+                div { class: "empty-state", "No listings match this tab. Try loosening the filters." }
+            }
+            if loading() {
+                p { class: "listing-load", role: "status", "Loading more listings…" }
+            } else if let Some(message) = error() {
+                div { class: "listing-load", role: "alert",
+                    p { class: "error", "Could not load more listings: {message}" }
+                    button { onclick: move |_| load.call(()), "Retry" }
                 }
+            } else if more() {
+                LoadMore { key: "{offset()}", onload: load }
+            } else if !rows.read().is_empty() {
+                p { class: "listing-load muted small", "All matching listings loaded." }
             }
         }
+    }
+}
 
-        div { class: "section-head",
-            h2 { "Recently disappeared" }
-            span { class: "muted small",
-                "{result.gone_total} listings went away (sold or delisted) · warframe.market has no sold signal, so this is the closest proxy"
-            }
-        }
-        if result.gone.is_empty() {
-            div { class: "empty-state",
-                "Nothing yet. Disappearances show up from the second scrape of a weapon on."
-            }
-        }
-        div { class: "listings gone",
-            for l in gone {
-                ListingRow {
-                    key: "gone-{l.auction_id}",
-                    has_image: has_image(&l),
-                    listing: l,
-                    now,
-                    show_weapon,
-                    open_initially: false,
-                }
-            }
-        }
-        if result.gone.len() > 8 {
-            button {
-                class: "show-all",
-                onclick: move |_| show_all_gone.toggle(),
-                if show_all_gone() { "Show fewer" } else { "Show {result.gone.len()} most recent" }
-            }
+/// Observe one sentinel per page; disconnect on firing or when the feed is removed.
+#[component]
+fn LoadMore(onload: EventHandler<()>) -> Element {
+    rsx! {
+        div { id: "listing-sentinel", class: "listing-load",
+            onmounted: move |_| async move {
+                let mut eval = document::eval(r#"
+                    const node = document.getElementById('listing-sentinel');
+                    if (!node || !window.IntersectionObserver) return;
+                    await new Promise(resolve => {
+                        const cleanup = () => { observer.disconnect(); removed.disconnect(); resolve(); };
+                        const observer = new IntersectionObserver(entries => {
+                            if (entries.some(entry => entry.isIntersecting)) {
+                                dioxus.send(true);
+                                cleanup();
+                            }
+                        }, { rootMargin: '400px' });
+                        const removed = new MutationObserver(() => {
+                            if (!node.isConnected) cleanup();
+                        });
+                        removed.observe(document.body, {childList: true, subtree: true});
+                        observer.observe(node);
+                    });
+                "#);
+                if let Ok(true) = eval.recv::<bool>().await { onload.call(()); }
+            },
+            button { onclick: move |_| onload.call(()), "Load more listings" }
         }
     }
 }

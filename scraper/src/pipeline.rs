@@ -60,6 +60,11 @@ pub fn parse_pages(pages: &[RawPage]) -> Result<Pages> {
         for auction in auctions {
             match index.get(&auction.id) {
                 Some(&i) => {
+                    // Pages are fetched sequentially. Prefer the newest edit, and the
+                    // later observation on ties (bids need not change `updated`).
+                    if auction.updated >= out[i].0.updated {
+                        out[i].0 = auction;
+                    }
                     out[i].1.push(',');
                     out[i].1.push_str(&page.sort_by);
                 }
@@ -122,8 +127,11 @@ impl Pipeline {
             .fold((0i128, 0i128), |(sum, count), p| {
                 (sum + i128::from(p), count + 1)
             });
+        // Admission rules apply to new listings only. Once tracked, every price
+        // change must reach both Parquet readers and the tracker, even a removed buyout.
         auctions.retain(|(auction, _)| {
-            auction.market_price().is_some()
+            self.tracker.contains(&weapon.slug, &auction.id)
+                || auction.market_price().is_some()
                 || (count > 0
                     && auction
                         .starting_price
@@ -149,7 +157,8 @@ impl Pipeline {
     /// inferred from what it leaves out. Raw feed archives are short-lived, so the rows are the
     /// lasting record; only sightings that add nothing are skipped (see `Tracker::needs_row`),
     /// because consecutive polls overlap. Starting-only listings wait for a weapon search, which
-    /// has the reference prices they are judged against. `weapons` limits what gets recorded.
+    /// has the reference prices they are judged against. Already tracked listings always
+    /// keep their price changes, including withdrawn buyouts. `weapons` limits what gets recorded.
     pub fn process_feed(
         &mut self,
         weapons: &[Weapon],
@@ -187,7 +196,8 @@ impl Pipeline {
             let fresh: Vec<(Auction, String)> = listings
                 .into_iter()
                 .filter(|(a, _)| {
-                    a.market_price().is_some() && self.tracker.needs_row(&slug, a, raw.scraped_at)
+                    (a.market_price().is_some() || self.tracker.contains(&slug, &a.id))
+                        && self.tracker.needs_row(&slug, a, raw.scraped_at)
                 })
                 .collect();
             let (fitted, gone) = self.commit(

@@ -216,6 +216,16 @@ pub async fn search(query: Query) -> Result<SearchResult, ServerFnError> {
     crate::data::run(move |store| store.search(&query)).await
 }
 
+/// Fetch another bounded page without recomputing the price chart.
+#[post("/api/listing-page")]
+pub async fn listing_page(
+    query: Query,
+    offset: usize,
+    gone: bool,
+) -> Result<SearchResult, ServerFnError> {
+    crate::data::run(move |store| store.search_page(&query, offset, Some(gone))).await
+}
+
 /// A distinct historical riven, represented by its latest eligible listing.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SimilarRiven {

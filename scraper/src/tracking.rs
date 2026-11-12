@@ -182,6 +182,10 @@ impl Tracker {
         self.weapons.get_mut(slug).unwrap()
     }
 
+    pub fn contains(&mut self, weapon: &str, auction_id: &str) -> bool {
+        self.weapon(weapon).contains_key(auction_id)
+    }
+
     /// Whether a feed sighting is worth a row: the listing is new or edited, has a new bid, or
     /// hasn't had a row for a while. Sightings without a row are lost with their raw archive.
     pub fn needs_row(&mut self, weapon: &str, auction: &Auction, now: DateTime<Utc>) -> bool {
