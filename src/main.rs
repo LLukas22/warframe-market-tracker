@@ -13,6 +13,7 @@ mod images;
 mod journey;
 #[cfg(feature = "server")]
 mod ocr_assets;
+mod riven_view;
 mod scan;
 mod scraper;
 #[cfg(feature = "server")]

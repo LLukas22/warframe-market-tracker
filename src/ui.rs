@@ -292,6 +292,7 @@ fn RivenPageContent(id: String, auction: String) -> Element {
     let include_legacy = use_signal(|| false);
     let include_unfit = use_signal(|| false);
     let include_loose = use_signal(|| false);
+    let mut similar_tab = use_signal(|| false);
     let mut detail = use_resource(move || {
         version.read();
         let legacy = include_legacy();
@@ -318,19 +319,36 @@ fn RivenPageContent(id: String, auction: String) -> Element {
                     let selected = &data.listing;
                     rsx! {
                         document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
-                        h2 { "Riven details" }
-                        ListingRow {
-                            listing: selected.clone(), now: data.server_time,
-                            show_weapon: false, has_image: false, open_initially: true,
+                        crate::riven_view::RivenSummary { listing: selected.clone(), now: Some(data.server_time) }
+                        div { class: "listing-bar",
+                            div { class: "listing-tabs", role: "tablist", aria_label: "Riven sections",
+                                button {
+                                    role: "tab", id: "history-tab", aria_selected: !similar_tab(), aria_controls: "history-panel",
+                                    class: if !similar_tab() { "active" } else { "" },
+                                    onclick: move |_| similar_tab.set(false),
+                                    "History"
+                                }
+                                button {
+                                    role: "tab", id: "similar-tab", aria_selected: similar_tab(), aria_controls: "similar-panel",
+                                    class: if similar_tab() { "active" } else { "" },
+                                    onclick: move |_| similar_tab.set(true),
+                                    "Similar rivens ({data.similar_total})"
+                                }
+                            }
                         }
-                        crate::journey::RivenJourney {
-                            id: selected.riven_id.clone(), selected_auction: selected.auction_id.clone(),
+                        // Both stay mounted, so switching tabs keeps their state and loaded data.
+                        div { id: "history-panel", role: "tabpanel", aria_labelledby: "history-tab", hidden: similar_tab(),
+                            crate::journey::RivenJourney {
+                                id: selected.riven_id.clone(), selected_auction: selected.auction_id.clone(),
+                            }
                         }
-                        SimilarRivens {
-                            selected: selected.clone(), similar: data.similar.clone(),
-                            similar_total: data.similar_total, comparisons_hidden: data.comparisons_hidden,
-                            now: data.server_time, updating: detail.pending(),
-                            include_legacy, include_unfit, include_loose,
+                        div { id: "similar-panel", role: "tabpanel", aria_labelledby: "similar-tab", hidden: !similar_tab(),
+                            SimilarRivens {
+                                selected: selected.clone(), similar: data.similar.clone(),
+                                similar_total: data.similar_total, comparisons_hidden: data.comparisons_hidden,
+                                now: data.server_time, updating: detail.pending(),
+                                include_legacy, include_unfit, include_loose,
+                            }
                         }
                     }
                 }
@@ -378,14 +396,14 @@ fn ScannedRivenContent(scan: String) -> Element {
                     let selected = &data.listing;
                     rsx! {
                         document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
-                        h2 { "Scanned riven" }
                         crate::scan::ScanNotice { target: scan.clone(), matched: false }
                         if !selected.fit_ok {
                             p { class: "scan-note warn",
                                 "These values don't fit any rank of this riven, so a number was probably misread. Similar rivens are still shown, without roll comparisons."
                             }
                         }
-                        ScannedRivenCard { listing: selected.clone() }
+                        crate::riven_view::RivenSummary { listing: selected.clone(), now: None }
+                        h2 { class: "riven-section-title", "Similar rivens ({data.similar_total})" }
                         SimilarRivens {
                             selected: selected.clone(), similar: data.similar.clone(),
                             similar_total: data.similar_total, comparisons_hidden: data.comparisons_hidden,
@@ -395,72 +413,6 @@ fn ScannedRivenContent(scan: String) -> Element {
                     }
                 }
             }
-        }
-    }
-}
-
-/// A scanned riven, laid out like an opened listing but without price, seller or id.
-#[component]
-fn ScannedRivenCard(listing: Listing) -> Element {
-    let loaded = use_context::<Signal<Option<Overview>>>();
-    let l = &listing;
-    let has_image = loaded()
-        .and_then(|o| {
-            o.weapons
-                .iter()
-                .find(|w| w.slug == l.weapon_slug)
-                .map(|w| w.has_image)
-        })
-        .unwrap_or(false);
-    let rank = l
-        .rank
-        .map(|r| format!("R{r} by its values"))
-        .unwrap_or_else(|| "R?".into());
-    let mr = l
-        .mastery_level
-        .map(|m| m.to_string())
-        .unwrap_or_else(|| "?".into());
-    let rolls = l.re_rolls.unwrap_or(0);
-    let quality = l.mean_quality.map(|q| format!("{:.0}%", q * 100.0));
-    rsx! {
-        div { class: "listing open scanned",
-            div { class: "listing-main",
-                WeaponImage { slug: l.weapon_slug.clone(), has_image, name: l.weapon_name.clone(), size: "sm" }
-                div { class: "name",
-                    div { class: "riven-name", "{l.weapon_name} {l.riven_name}" }
-                    div { class: "muted small", "{rank} · MR{mr} · {rolls} rolls" }
-                    div {
-                        span { class: "tag info", "from a screenshot" }
-                        if l.legacy_stats == Some(true) {
-                            span { class: "tag warn", "pre-rework" }
-                        }
-                        if !l.fit_ok {
-                            span { class: "tag bad", "unverified" }
-                        }
-                    }
-                }
-                div { class: "attrs",
-                    for a in l.attributes.iter() {
-                        div {
-                            key: "{a.slug}",
-                            class: if a.positive { "attr positive" } else { "attr negative" },
-                            span { class: "attr-value", "{format_value(&a.slug, a.value)}" }
-                            span { class: "attr-name", "{attribute_name(&a.slug)}" }
-                            if let Some(q) = a.quality {
-                                span { class: "quality", title: "roll {q * 100.0:.0}%",
-                                    span { class: "quality-bar", style: "width: {q * 100.0:.0}%" }
-                                }
-                            }
-                        }
-                    }
-                }
-                div { class: "meta",
-                    if let Some(q) = quality {
-                        div { class: "roll", title: "average roll of the positive stats", "{q} roll" }
-                    }
-                }
-            }
-            ListingDetail { listing: listing.clone(), url: String::new() }
         }
     }
 }
@@ -483,9 +435,8 @@ fn SimilarRivens(
     let mut include_loose = include_loose;
     rsx! {
         section { class: "similar-rivens",
-            h2 { "Similar rivens seen before" }
-            p { class: "muted",
-                "Same weapon, closest stat matches first. Prices are observed listings, not confirmed sales."
+            p { class: "muted small",
+                "Same weapon, closest stats first. Prices are asking prices, not confirmed sales."
             }
             details { class: "similar-options",
                 summary { "Comparison settings" }
@@ -509,7 +460,9 @@ fn SimilarRivens(
                 }
             }
             if updating { p { role: "status", "Updating comparisons…" } }
-            p { class: "muted small", "{similar.len()} closest matches · {similar_total} found" }
+            if similar_total > similar.len().min(10) {
+                p { class: "muted small", "Showing the {similar.len().min(10)} closest of {similar_total}." }
+            }
             if similar.is_empty() {
                 p { "No matching rivens in the stored history with these settings yet." }
             }
@@ -526,7 +479,7 @@ fn SimilarRivens(
                     }
                     ListingRow {
                         listing: matched.listing.clone(), now: now,
-                        show_weapon: false, has_image: false, open_initially: false,
+                        show_weapon: false, has_image: false,
                     }
                 }
             }
@@ -1080,7 +1033,7 @@ fn Results(
             h2 { "Matching rivens" }
             for listing in matches {
                 ListingRow { key: "{listing.riven_id}", listing: listing.clone(), now,
-                    show_weapon: true, has_image: has_image(listing), open_initially: false }
+                    show_weapon: true, has_image: has_image(listing) }
             }
         };
     }
@@ -1212,7 +1165,6 @@ fn ListingFeed(
                 for l in rows.read().iter() {
                     ListingRow { key: "{l.auction_id}", listing: l.clone(), now, show_weapon,
                         has_image: weapons.iter().any(|w| w.slug == l.weapon_slug && w.has_image),
-                        open_initially: false,
                     }
                 }
             }
@@ -1303,13 +1255,7 @@ fn bucket_label(hours: u32) -> String {
 }
 
 #[component]
-fn ListingRow(
-    listing: Listing,
-    now: i64,
-    show_weapon: bool,
-    has_image: bool,
-    open_initially: bool,
-) -> Element {
+fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) -> Element {
     let navigator = use_navigator();
     let l = &listing;
     let target = Route::RivenPage {
@@ -1327,18 +1273,13 @@ fn ListingRow(
     };
     let quality = l.mean_quality.map(|q| format!("{:.0}%", q * 100.0));
     let invalid_limit = l.price_limit.map(format_plat).unwrap_or_default();
-    let rank = l
-        .rank
-        .map(|r| format!("R{r}"))
-        .unwrap_or_else(|| "R?".into());
     let rolls = l.re_rolls.unwrap_or(0);
     let mr = l.mastery_level.unwrap_or(0);
-    let url = format!("https://warframe.market/auction/{}", l.auction_id);
     let age = format_age(now, l.created);
 
     rsx! {
-        div { class: if open_initially { "listing open" } else { "listing" },
-            div { class: "listing-main", onclick: move |_| { if !open_initially { navigator.push(row_target.clone()); } },
+        div { class: "listing",
+            div { class: "listing-main", onclick: move |_| { navigator.push(row_target.clone()); },
                 if show_weapon {
                     WeaponImage {
                         slug: l.weapon_slug.clone(),
@@ -1356,7 +1297,7 @@ fn ListingRow(
                         Link { to: target, onclick: move |e: MouseEvent| e.stop_propagation(), "{l.weapon_name} {l.riven_name}" }
                     }
                     div { class: "muted small",
-                        "{rank} · MR{mr} · {rolls} rolls · {l.polarity}"
+                        "MR{mr} · {rolls} rolls · {l.polarity}"
                     }
                     RivenId { id: l.riven_id.clone(), short: true }
                     div {
@@ -1394,12 +1335,13 @@ fn ListingRow(
                         }
                     }
                 }
-                div { class: "attrs",
+                // Buyers max a riven anyway, so stats show at rank 8 when they could be verified.
+                div { class: "attrs", title: "Stats at max rank",
                     for a in l.attributes.iter() {
                         div {
                             key: "{a.slug}",
                             class: if a.positive { "attr positive" } else { "attr negative" },
-                            span { class: "attr-value", "{format_value(&a.slug, a.value)}" }
+                            span { class: "attr-value", "{format_value(&a.slug, a.value_rank8.unwrap_or(a.value))}" }
                             span { class: "attr-name", "{attribute_name(&a.slug)}" }
                             if let Some(q) = a.quality {
                                 span { class: "quality", title: "roll {q * 100.0:.0}%",
@@ -1417,65 +1359,13 @@ fn ListingRow(
                     div { class: "muted small", "listed {age} ago" }
                 }
             }
-            if open_initially {
-                ListingDetail { listing: listing.clone(), url }
-            }
-        }
-    }
-}
-
-#[component]
-fn ListingDetail(listing: Listing, url: String) -> Element {
-    rsx! {
-        details { class: "detail extra-details",
-            summary {
-                if listing.auction_id.is_empty() { "More details · normalized stats" } else { "More details · normalized stats & riven ID" }
-            }
-            table {
-                thead {
-                    tr {
-                        th { "Stat" }
-                        th { "Listed" }
-                        th { "At rank 8" }
-                        th { "Roll" }
-                    }
-                }
-                tbody {
-                    for a in listing.attributes.iter() {
-                        tr { key: "{a.slug}",
-                            td { class: if a.positive { "pos" } else { "neg" },
-                                if a.positive { "+" } else { "−" }
-                                " {attribute_name(&a.slug)}"
-                            }
-                            td { "{format_value(&a.slug, a.value)}" }
-                            td {
-                                {a.value_rank8.map(|v| format_value(&a.slug, v)).unwrap_or_else(|| "—".into())}
-                            }
-                            td {
-                                {a.quality.map(|q| format!("{:.0}%", q * 100.0)).unwrap_or_else(|| "—".into())}
-                            }
-                        }
-                    }
-                }
-            }
-            // Scanned rivens have no id or auction.
-            if !listing.auction_id.is_empty() {
-                div { class: "detail-id",
-                    span { class: "muted small", "Riven id" }
-                    RivenId { id: listing.riven_id.clone(), short: false }
-                }
-                div { class: "muted small",
-                    "first seen {format_datetime(listing.first_seen)} UTC · seller reputation {listing.owner_reputation.unwrap_or(0)} · "
-                    a { href: "{url}", target: "_blank", rel: "noopener", "open on warframe.market ↗" }
-                }
-            }
         }
     }
 }
 
 /// A riven id with a copy button. Clicks don't bubble up to the listing row.
 #[component]
-fn RivenId(id: String, short: bool) -> Element {
+pub(crate) fn RivenId(id: String, short: bool) -> Element {
     let mut copied = use_signal(|| false);
     let shown = if short {
         id.chars().take(8).collect()
@@ -1560,6 +1450,34 @@ mod route_tests {
             }
         }
         assert_eq!(filters.weapon.as_deref(), Some("old_weapon"));
+    }
+
+    #[test]
+    fn roll_ranges_span_the_worst_to_the_best_roll() {
+        let close = |(a, b): (f64, f64), (x, y): (f64, f64)| {
+            assert!(
+                (a - x).abs() < 1e-9 && (b - y).abs() < 1e-9,
+                "{a},{b} vs {x},{y}"
+            );
+        };
+        // A perfect roll is the top of its range; the bottom is 0.9 / 1.1 of it.
+        close(
+            api::roll_range("critical_chance", 110.0, 1.0),
+            (90.0, 110.0),
+        );
+        close(api::roll_range("critical_chance", 90.0, 0.0), (90.0, 110.0));
+        close(
+            api::roll_range("critical_chance", 100.0, 0.5),
+            (90.0, 110.0),
+        );
+        // Negatives run from mildest to harshest.
+        close(api::roll_range("zoom", -50.0, 0.5), (-45.0, -55.0));
+        // Faction damage scales the change, not the multiplier.
+        close(api::roll_range("damage_vs_grineer", 1.5, 0.5), (1.45, 1.55));
+        close(
+            api::roll_range("damage_vs_grineer", 0.95, 0.5),
+            (0.955, 0.945),
+        );
     }
 
     #[test]

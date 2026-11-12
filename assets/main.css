@@ -695,7 +695,7 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 /* Dedicated riven details and historical comparisons. */
 .riven-page { display: block; width: 100%; max-width: 1280px; margin: 0 auto; padding: 24px 24px 60px; }
 .riven-page > h2 { margin-bottom: 14px; }
-.similar-rivens { margin-top: 32px; }
+.similar-rivens { margin-top: 4px; }
 .similar-rivens h3 { margin: 24px 0 10px; }
 .similar-options { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 16px 0; }
 .similar-options label { display: flex; align-items: center; gap: 6px; }
@@ -716,8 +716,8 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 .extra-details[open] > * + * { margin-top: 14px; }
 .similar-options { display: block; }
 .similar-options label { margin-top: 12px; }
-.journey { margin-top: 24px; }
-.journey-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 20px 0; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.journey { margin-top: 0; }
+.journey-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 4px 0 18px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
 .journey-summary > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .journey-summary span, .journey-summary small { color: var(--muted); font-size: 12px; }
 .journey-summary strong { font-size: 20px; font-weight: 600; }
@@ -761,3 +761,45 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 .weapon-card:hover, .picker-item:hover, .brand a:hover { text-decoration: none; }
 .weapon-card:focus-visible, .picker-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .brand a { display: inline-block; color: var(--accent); }
+
+/* Riven page: header, stats on their possible range, then tabs. */
+.riven-summary { display: flex; flex-direction: column; gap: 16px; padding: 18px 20px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.riven-head { display: flex; align-items: center; gap: 18px; }
+.riven-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.riven-title h2 { font-size: 22px; text-transform: capitalize; }
+.riven-tags .tag { margin-top: 2px; }
+.riven-offer { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; text-align: right; }
+.riven-offer .plat { font-size: 26px; }
+.riven-foot { display: flex; flex-wrap: wrap; gap: 6px 20px; align-items: center; padding-top: 12px; border-top: 1px solid var(--border); }
+.riven-foot .riven-id code { color: var(--text); }
+.riven-section-title { margin: 28px 0 8px; }
+
+.stat-panel { display: flex; flex-direction: column; gap: 14px; }
+.stat-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.stat-panel-head h3 { margin: 0; }
+.stat-panel-head strong { color: var(--text); font-size: 14px; }
+.stat-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 6px 24px; align-items: center; }
+.stat-label { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.stat-value { flex: none; min-width: 72px; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-row.positive .stat-value { color: var(--positive); }
+.stat-row.negative .stat-value { color: var(--negative); }
+.stat-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat-verdict { margin-left: auto; flex: none; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-scale { display: grid; grid-template-columns: 64px 1fr 64px; gap: 10px; align-items: center; }
+.stat-end { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.stat-end:first-child { text-align: right; }
+.stat-track { position: relative; height: 8px; border-radius: 4px; background: var(--panel-3); }
+.stat-fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; opacity: .55; }
+.stat-marker { position: absolute; top: 50%; width: 14px; height: 14px; border-radius: 50%; transform: translate(-50%, -50%); border: 2px solid var(--panel); }
+.stat-row.positive .stat-fill, .stat-row.positive .stat-marker { background: var(--positive); }
+.stat-row.negative .stat-fill, .stat-row.negative .stat-marker { background: var(--negative); }
+
+@media (max-width: 760px) {
+  .riven-summary { padding: 14px; }
+  .riven-head { flex-wrap: wrap; gap: 12px; }
+  .riven-head .weapon-img.md { width: 56px; height: 56px; }
+  .riven-title h2 { font-size: 18px; }
+  .riven-offer { flex: 0 0 100%; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; text-align: left; }
+  .stat-row { grid-template-columns: minmax(0, 1fr); }
+  .stat-scale { grid-template-columns: 56px 1fr 56px; }
+}

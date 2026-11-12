@@ -116,7 +116,7 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
                 div { span { "Last seen" } strong { "{format_date(last)}" } small { "{format_datetime(last)} UTC" } }
                 div { span { "Listing history" } strong { "{auctions.len()} listings" } small { "{sellers.len()} distinct sellers observed" } }
             }
-            div { class: "section-head", h2 { "Price history" } span { class: "muted small", "Observed prices · platinum" } }
+            div { class: "section-head", h2 { "Price history" } span { class: "muted small", "one line per listing" } }
             div { class: "chart journey-chart",
                 onresize: move |event| { if let Ok(size) = event.get_content_box_size() {
                     if size.width >= 280.0 && (size.width - width()).abs() > 0.5 { width.set(size.width); }
@@ -148,11 +148,11 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
                     if let Some((a, p)) = focused {
                         strong { "{p.price.map(format_plat).unwrap_or_default()}p" }
                         span { "{a.owner_name} · {format_datetime(p.t)} UTC" }
-                    } else { span { class: "muted", "Hover, tap or focus a point to inspect an observation." } }
+                    } else { span { class: "muted", "Hover or tap a point for details." } }
                 }
             }
             div { class: "section-head", h2 { "Sellers & sightings" } }
-            p { class: "muted small", "Each bar shows a listing’s first-to-last observed interval. Different sellers may indicate a resale; overlapping listings and ownership transfers cannot be confirmed." }
+            p { class: "muted small", "Each bar spans one listing, first to last sighting. A new seller may mean a resale, but that can't be confirmed." }
             div { class: "sighting-axis", span { "{format_date(first)}" } span { "{format_date(last)}" } }
             ol { class: "sighting-list",
                 for (i, a) in auctions.iter().enumerate().rev().take(displayed) {

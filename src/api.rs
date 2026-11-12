@@ -541,12 +541,32 @@ pub fn attribute_name(slug: &str) -> String {
 /// Formats a listed value the way it shows in game.
 pub fn format_value(slug: &str, value: f64) -> String {
     match slug {
-        s if s.starts_with("damage_vs_") || s.starts_with("damage_to_") => format!("x{value:.2}"),
+        s if is_multiplier(s) => format!("x{value:.2}"),
         "punch_through" | "range" => format!("{value:+.1}m"),
         "combo_duration" => format!("{value:+.1}s"),
         "channeling_damage" => format!("{value:+.1}"),
         _ => format!("{value:+.1}%"),
     }
+}
+
+/// Faction damage is shown as a multiplier, `x1.61`, rather than as a change.
+fn is_multiplier(slug: &str) -> bool {
+    slug.starts_with("damage_vs_") || slug.starts_with("damage_to_")
+}
+
+/// The values a stat could have had on this riven: worst roll to best, or for a negative,
+/// mildest to harshest. A roll scales the stat's base value by 0.9 to 1.1, and `quality`
+/// says where in that range this one landed, so the range follows from the listed value.
+pub fn roll_range(slug: &str, value: f64, quality: f64) -> (f64, f64) {
+    let roll = 0.9 + 0.2 * quality.clamp(0.0, 1.0);
+    let at = |w: f64| {
+        if is_multiplier(slug) && value > 0.0 {
+            1.0 + (value - 1.0) * w / roll
+        } else {
+            value * w / roll
+        }
+    };
+    (at(0.9), at(1.1))
 }
 
 /// Whether a search box input looks like a riven id (or a prefix of one).
