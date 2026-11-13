@@ -36,6 +36,9 @@ fn main() {
         transfer::recover(data::data_dir()).await?;
         worker::start().await?;
         hub::start();
+        // Load the data in the background while the server starts listening, so the first
+        // visitor doesn't pay for it. Pages rendered before it's done fetch from the browser.
+        tokio::task::spawn_blocking(data::warm);
         Ok(dioxus::server::router(ui::App)
             .route("/img/weapon/{slug}", get(images::weapon))
             .route("/ocr/{*path}", get(ocr_assets::serve))

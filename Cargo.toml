@@ -30,15 +30,18 @@ futures-util = { version = "0.3", optional = true }
 tar = { version = "0.4", optional = true }
 tokio-util = { version = "0.7", features = ["io"], optional = true }
 hf-hub = { version = "1", optional = true }
+# Fast hashing for the in-memory indexes; keys are ids from our own dataset.
+rustc-hash = { version = "2", optional = true }
 
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-server = ["dep:tower-http", "dep:wfmt-scraper", "dioxus/server", "dep:arrow", "dep:parquet", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub"]
+server = ["dep:tower-http", "dep:wfmt-scraper", "dioxus/server", "dep:arrow", "dep:parquet", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub", "dep:rustc-hash"]
 
 # Must match the installed wasm-bindgen CLI (`wasm-bindgen --version`), dx refuses mismatches.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.129"
+js-sys = "0.3"
 
 [dev-dependencies]
 flate2 = "1"
@@ -52,3 +55,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# The browser build (see the Dockerfile): download size dominates first load, and the client
+# does little computation, so optimize for size. The server keeps the plain release profile.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1

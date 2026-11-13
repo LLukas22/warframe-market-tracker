@@ -48,6 +48,17 @@ const MAX_UNPACKED: u64 = 256 << 30;
 /// One export or import at a time.
 static BUSY: Mutex<()> = Mutex::const_new(());
 
+/// The task owns the guard and all cleanup/restart work, independently of the request.
+fn operation<T: Send + 'static>(
+    guard: tokio::sync::MutexGuard<'static, ()>,
+    work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<T>> {
+    tokio::spawn(async move {
+        let _guard = guard;
+        work.await
+    })
+}
+
 /// The response to send if this token doesn't allow a transfer.
 async fn rejection(given: &str) -> Option<Response> {
     let denied = crate::admin::check(given).await.err()?;
@@ -326,7 +337,11 @@ pub async fn export(Form(form): Form<ExportForm>) -> Response {
     let Ok(_busy) = BUSY.try_lock() else {
         return text(StatusCode::CONFLICT, BUSY_MESSAGE);
     };
-    let file = match build_export(crate::data::data_dir()).await {
+    let file = match operation(_busy, build_export(crate::data::data_dir()))
+        .await
+        .context("export task failed")
+        .and_then(|result| result)
+    {
         Ok(file) => file,
         Err(error) => return text(StatusCode::CONFLICT, format!("{error:#}")),
     };
@@ -423,7 +438,11 @@ pub async fn import(headers: HeaderMap, body: Body) -> Response {
     let Ok(_busy) = BUSY.try_lock() else {
         return text(StatusCode::CONFLICT, BUSY_MESSAGE);
     };
-    match import_upload(body, crate::data::data_dir()).await {
+    match operation(_busy, import_upload(body, crate::data::data_dir()))
+        .await
+        .context("import task failed")
+        .and_then(|result| result)
+    {
         Ok(backup) => text(
             StatusCode::OK,
             format!("Imported. The previous data was moved to {backup}."),
@@ -455,6 +474,31 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_keeps_operation_exclusive_until_cleanup() {
+        static LOCK: Mutex<()> = Mutex::const_new(());
+        let (started, wait_started) = tokio::sync::oneshot::channel();
+        let (finish, wait_finish) = tokio::sync::oneshot::channel();
+        let (cleaned, wait_cleaned) = tokio::sync::oneshot::channel();
+        let task = operation(LOCK.try_lock().unwrap(), async move {
+            started.send(()).unwrap();
+            wait_finish.await.unwrap();
+            cleaned.send(()).unwrap();
+            Ok(())
+        });
+        let request = tokio::spawn(task);
+        wait_started.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(LOCK.try_lock().is_err());
+        finish.send(()).unwrap();
+        wait_cleaned.await.unwrap();
+        // Acquiring waits until the operation has returned and dropped its guard.
+        let _guard = tokio::time::timeout(std::time::Duration::from_secs(1), LOCK.lock())
+            .await
+            .unwrap();
     }
 
     fn write(path: &Path, bytes: &[u8]) {

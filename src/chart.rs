@@ -6,6 +6,11 @@ use crate::api::{self, HistoryPoint, StatEffect, attribute_name};
 use crate::ui::{format_date, format_datetime, format_plat};
 
 const INITIAL_WIDTH: f64 = 900.0;
+
+thread_local! {
+    /// The price chart's last measured width, shared by every chart instance.
+    static LAST_WIDTH: std::cell::Cell<f64> = const { std::cell::Cell::new(INITIAL_WIDTH) };
+}
 const H: f64 = 260.0;
 const LEFT: f64 = 56.0;
 const RIGHT: f64 = 16.0;
@@ -28,7 +33,9 @@ pub(crate) fn nice_axis(max: f64) -> (f64, f64) {
 #[component]
 pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
     let mut hovered = use_signal(|| None::<usize>);
-    let mut width = use_signal(|| INITIAL_WIDTH);
+    // Start at the last measured width: a remounted chart drawn at a guessed width
+    // visibly rescales once it is measured.
+    let mut width = use_signal(|| LAST_WIDTH.get());
     // Match SVG units to CSS pixels so labels and markers keep their proportions.
     let w = width();
 
@@ -142,6 +149,7 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
             onresize: move |event| {
                 if let Ok(size) = event.get_content_box_size() {
                     if size.width > LEFT + RIGHT && (size.width - width()).abs() > 0.5 {
+                        LAST_WIDTH.set(size.width);
                         width.set(size.width);
                     }
                 }
@@ -230,17 +238,31 @@ fn format_multiplier(effect: f64) -> String {
 #[component]
 pub fn StatEffectsPanel(weapon: String) -> Element {
     let data_version = use_context::<Signal<u64>>();
-    let result = use_resource(move || {
-        let weapon = weapon.clone();
-        async move {
-            data_version.read();
-            api::stat_effects(weapon).await
+    let cache = use_context::<crate::ui::ViewCache>();
+    let seed_weapon = weapon.clone();
+    let seed = crate::ui::use_seed(move || api::seed::stat_effects(&seed_weapon));
+    // Seeded from the cache so returning to a weapon doesn't pop this panel in late and
+    // push the listings down.
+    let cached = use_hook(|| {
+        if let Some(data) = seed {
+            cache.store_effects(weapon.clone(), data);
         }
+        cache.effects(&weapon)
     });
-    let result = result.read();
-    let Some(Ok(data)) = &*result else {
-        return rsx! {};
+    let result = use_resource(move || {
+        data_version.read();
+        let weapon = weapon.clone();
+        async move { cache.load_effects(weapon).await }
+    });
+    let fetched = result.read();
+    let data = match &*fetched {
+        Some(Ok(data)) => data.clone(),
+        _ => match cached {
+            Some(data) => data,
+            None => return rsx! {},
+        },
     };
+    let data = &data;
     let price_range = match (data.low_price, data.high_price) {
         (Some(low), Some(high)) => format!("{}–{}p", format_plat(low), format_plat(high)),
         _ => "no prices".to_owned(),

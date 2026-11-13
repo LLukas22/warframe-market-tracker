@@ -81,12 +81,27 @@ impl Period {
     /// Half-open `[start, end)` in unix ms; `None` is unbounded.
     pub fn bounds(self, now: i64) -> (Option<i64>, Option<i64>) {
         match self {
-            Period::Today => (Some(now - now.rem_euclid(DAY_MS)), None),
-            Period::Week => (Some(now - 7 * DAY_MS), None),
-            Period::Month => (Some(now - 30 * DAY_MS), None),
+            Period::Today => (Some(now.saturating_sub(now.rem_euclid(DAY_MS))), None),
+            Period::Week => (Some(now.saturating_sub(7 * DAY_MS)), None),
+            Period::Month => (Some(now.saturating_sub(30 * DAY_MS)), None),
             Period::All => (None, None),
-            Period::Custom { from, to } => (from, to.map(|t| t + DAY_MS)),
+            Period::Custom { from, to } => (from, to.map(|t| t.saturating_add(DAY_MS))),
         }
+    }
+
+    #[cfg(feature = "server")]
+    fn validate(self) -> Result<(), ServerFnError> {
+        if let Self::Custom { from, to } = self {
+            if to.is_some_and(|t| t.checked_add(DAY_MS).is_none()) {
+                return Err(ServerFnError::new("The end date is out of range"));
+            }
+            if matches!((from, to), (Some(f), Some(t)) if f > t) {
+                return Err(ServerFnError::new(
+                    "The start date must not follow the end date",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// An open custom range is just "all time", and a reversed one is put the right way round.
@@ -264,12 +279,13 @@ pub struct RivenAuction {
 
 #[get("/api/overview")]
 pub async fn overview() -> Result<Overview, ServerFnError> {
-    crate::data::run(|store| store.overview()).await
+    crate::data::run(|store| store.overview_memo()).await
 }
 
 #[post("/api/search")]
 pub async fn search(query: Query) -> Result<SearchResult, ServerFnError> {
-    crate::data::run(move |store| store.search(&query)).await
+    query.period.validate()?;
+    crate::data::run(move |store| store.search_memo(&query)).await
 }
 
 /// Fetch another bounded page without recomputing the price chart.
@@ -279,6 +295,7 @@ pub async fn listing_page(
     offset: usize,
     gone: bool,
 ) -> Result<SearchResult, ServerFnError> {
+    query.period.validate()?;
     crate::data::run(move |store| store.search_page(&query, offset, Some(gone))).await
 }
 
@@ -695,4 +712,65 @@ pub async fn hub_upload(token: String) -> Result<(), ServerFnError> {
             details: None,
         })?;
     crate::hub::request_upload().map_err(ServerFnError::new)
+}
+
+/// Answers for the server's first render of a page, embedded in its HTML so the browser shows
+/// real content before the WASM has loaded and doesn't repeat the request (see `ui::use_seed`).
+/// `None` when the data can't answer without waiting, and always in the browser, which then
+/// fetches as usual.
+pub mod seed {
+    use super::{Overview, Query, RivenDetail, SearchResult, StatEffects};
+
+    macro_rules! seeds {
+        ($(fn $name:ident($($arg:ident: $ty:ty),*) -> $out:ty = |$store:ident| $body:expr;)*) => {$(
+            #[cfg(feature = "server")]
+            pub fn $name($($arg: $ty),*) -> Option<$out> {
+                crate::data::try_now(|$store| $body)
+            }
+            #[cfg(not(feature = "server"))]
+            pub fn $name($(_: $ty),*) -> Option<$out> {
+                None
+            }
+        )*};
+    }
+
+    seeds! {
+        fn overview() -> Overview = |store| store.overview_memo();
+        fn search(query: &Query) -> SearchResult = |store| store.search_memo(query);
+        fn stat_effects(weapon: &str) -> StatEffects = |store| store.stat_effects(weapon);
+        fn riven_detail(id: &str, auction: Option<&str>) -> Option<RivenDetail> =
+            |store| store.riven_detail(id, auction, false, false, false);
+    }
+}
+
+#[cfg(all(test, feature = "server"))]
+mod period_tests {
+    use super::*;
+
+    #[test]
+    fn deserialized_ranges_are_validated_and_arithmetic_never_overflows() {
+        let period: Period = serde_json::from_value(serde_json::json!({
+            "Custom": { "from": null, "to": i64::MAX }
+        }))
+        .unwrap();
+        assert!(period.validate().is_err());
+        assert_eq!(period.bounds(0).1, Some(i64::MAX));
+        assert!(
+            Period::Custom {
+                from: Some(2),
+                to: Some(1)
+            }
+            .validate()
+            .is_err()
+        );
+        let valid = Period::Custom {
+            from: Some(0),
+            to: Some(DAY_MS),
+        };
+        assert!(valid.validate().is_ok());
+        assert_eq!(valid.bounds(0), (Some(0), Some(2 * DAY_MS)));
+        for period in [Period::Today, Period::Week, Period::Month] {
+            let _ = period.bounds(i64::MIN);
+        }
+    }
 }

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use chrono::{DateTime, TimeDelta, Utc};
 use clap::Args;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use wfmt_types::{
     COMMAND_DIR, Command, CurrentFetch, FetchLog, LOCK_FILE, Phase, STATUS_FILE, ScraperStatus,
     Settings, SweepProgress, SweepSummary, Trigger,
@@ -154,6 +154,39 @@ pub fn send_command(data_dir: &Path, command: &Command) -> Result<()> {
     fs::write(&tmp, serde_json::to_vec(command)?)?;
     fs::rename(tmp, dir.join(format!("{name}.json")))?;
     Ok(())
+}
+
+// Polled by the engine itself: no task can outlive it and consume a successor's commands.
+struct Commands {
+    dir: PathBuf,
+    pending: VecDeque<Command>,
+    poll: tokio::time::Interval,
+}
+
+impl Commands {
+    fn new(dir: PathBuf) -> Self {
+        let mut poll = tokio::time::interval(Duration::from_secs(1));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self {
+            dir,
+            pending: VecDeque::new(),
+            poll,
+        }
+    }
+
+    fn try_recv(&mut self) -> Option<Command> {
+        self.pending.pop_front()
+    }
+
+    async fn recv(&mut self) -> Option<Command> {
+        loop {
+            if let Some(command) = self.try_recv() {
+                return Some(command);
+            }
+            self.poll.tick().await;
+            self.pending.extend(take_commands(&self.dir));
+        }
+    }
 }
 
 fn take_commands(data_dir: &Path) -> Vec<Command> {
@@ -678,21 +711,9 @@ impl Engine {
 
     /// Runs until `shutdown` fires.
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let dir = self.data_dir.clone();
+        let mut rx = Commands::new(self.data_dir.clone());
         // Drop stale commands from before this engine started.
-        take_commands(&dir);
-        tokio::spawn(async move {
-            // Ends with the engine, or it would take commands meant for the next one.
-            while !tx.is_closed() {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                for command in take_commands(&dir) {
-                    if tx.send(command).is_err() {
-                        return;
-                    }
-                }
-            }
-        });
+        take_commands(&self.data_dir);
 
         let mut deferred: VecDeque<Command> = VecDeque::new();
         if let Some(sweep) = &self.state.sweep {
@@ -771,7 +792,7 @@ impl Engine {
                     }
                 }
             }
-            while let Ok(command) = rx.try_recv() {
+            while let Some(command) = rx.try_recv() {
                 deferred.push_back(command);
             }
             let now = Utc::now();
@@ -999,6 +1020,29 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[tokio::test]
+    async fn dropped_command_poll_cannot_consume_a_successors_commands() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("wfmt-commands-{}", crate::dataset::unique_id()));
+        fs::create_dir_all(&root)?;
+        let mut old = Commands::new(root.clone());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), old.recv())
+                .await
+                .is_err()
+        );
+        drop(old);
+        send_command(&root, &Command::Cancel)?;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let mut next = Commands::new(root.clone());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), next.recv()).await?,
+            Some(Command::Cancel)
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     fn options(no_raw: bool) -> EngineArgs {
         EngineArgs {

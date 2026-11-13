@@ -10,8 +10,9 @@ WORKDIR /src
 FROM base AS build
 # Must match the dioxus version in Cargo.lock (and DX_VERSION in .github/workflows/docker.yml).
 RUN curl -fsSL "https://github.com/DioxusLabs/dioxus/releases/download/v0.7.10/dx-$(uname -m)-unknown-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin dx
+RUN apt-get update && apt-get install -y --no-install-recommends brotli && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN dx bundle --web --release
+RUN scripts/bundle-web.sh
 
 # The screenshot scanner, served from /app/ocr. Builds in parallel with the app.
 FROM base AS ocr

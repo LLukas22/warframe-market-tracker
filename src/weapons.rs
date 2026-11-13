@@ -77,6 +77,8 @@ pub fn WeaponImage(slug: String, has_image: bool, name: String, size: &'static s
 pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
     let navigator = use_navigator();
     let route = use_route::<Route>();
+    let cache = use_context::<crate::ui::ViewCache>();
+    let filters = use_context::<Signal<crate::api::Query>>();
     let mut text = use_signal(String::new);
     let mut open = use_signal(|| false);
     let mut active = use_signal(|| 0usize);
@@ -219,7 +221,13 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                     for (i, w) in matches.into_iter().enumerate() {
                         div {
                             key: "{w.slug}",
-                            onmouseenter: move |_| active.set(i),
+                            onmouseenter: {
+                                let slug = w.slug.clone();
+                                move |_| {
+                                    active.set(i);
+                                    cache.prefetch_weapon(filters.peek().clone(), slug.clone());
+                                }
+                            },
                             // Keep the menu mounted until the link receives its click.
                             onmousedown: move |e: MouseEvent| e.prevent_default(),
                             Link {
@@ -263,7 +271,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
 
 /// Header card for the selected weapon.
 #[component]
-pub fn WeaponHeader(weapon: WeaponInfo, now: i64) -> Element {
+pub fn WeaponHeader(weapon: WeaponInfo, now: Option<i64>) -> Element {
     let w = &weapon;
     let url = format!(
         "https://warframe.market/auctions/search?type=riven&weapon_url_name={}&sort_by=price_asc",
@@ -281,7 +289,7 @@ pub fn WeaponHeader(weapon: WeaponInfo, now: i64) -> Element {
                 h2 { "{w.name}" }
                 div { class: "muted",
                     "{group_label(&w.group)} · {w.class} riven"
-                    if w.last_scrape > 0 {
+                    if let Some(now) = now.filter(|_| w.last_scrape > 0) {
                         " · scraped {format_age(now, w.last_scrape)} ago"
                     }
                 }
@@ -327,12 +335,37 @@ enum GridSort {
     Name,
 }
 
+/// The grid's tab, sort and expansion. Owned by the app shell so they survive visiting a
+/// weapon and coming back.
+#[derive(Clone, Copy)]
+pub struct GridState {
+    group: Signal<Option<&'static str>>,
+    sort: Signal<GridSort>,
+    show_all: Signal<bool>,
+}
+
+impl GridState {
+    pub fn new() -> Self {
+        Self {
+            group: Signal::new(None),
+            sort: Signal::new(GridSort::Value),
+            show_all: Signal::new(false),
+        }
+    }
+}
+
 /// Browsable weapon cards, shown when no weapon is selected.
 #[component]
 pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
-    let mut group = use_signal(|| None::<&'static str>);
-    let mut sort = use_signal(|| GridSort::Value);
-    let mut show_all = use_signal(|| false);
+    let GridState {
+        mut group,
+        mut sort,
+        mut show_all,
+    } = use_context();
+    let cache = use_context::<crate::ui::ViewCache>();
+    let filters = use_context::<Signal<crate::api::Query>>();
+    // Hovering a card starts loading its page, so the click usually finds it ready.
+    let prefetch = move |slug: String| cache.prefetch_weapon(filters.peek().clone(), slug);
 
     let mut list: Vec<WeaponInfo> = weapons
         .iter()
@@ -382,39 +415,47 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                         },
                     )
                 },
-                option { value: "value", "Most valuable" }
-                option { value: "listings", "Most listed" }
-                option { value: "name", "Name" }
+                option { value: "value", selected: sort() == GridSort::Value, "Most valuable" }
+                option { value: "listings", selected: sort() == GridSort::Listings, "Most listed" }
+                option { value: "name", selected: sort() == GridSort::Name, "Name" }
             }
         }
         div { class: "weapon-grid",
             for w in list {
-                Link {
+                // A cell around the link, which takes no event handlers besides clicks.
+                div {
                     key: "{w.slug}",
-                    to: Route::WeaponRoute { slug: w.slug.clone() },
-                    class: if w.listings == 0 { "weapon-card empty" } else { "weapon-card" },
-                    WeaponImage {
-                        slug: w.slug.clone(),
-                        has_image: w.has_image,
-                        name: w.name.clone(),
-                        size: "md",
-                    }
-                    div { class: "weapon-card-name", "{w.name}" }
-                    div { class: "muted small", "{group_label(&w.group)}" }
-                    div { class: "weapon-card-stats",
-                        if let Some(m) = w.median_price {
-                            span { class: "plat-small", "{format_plat(m)}p" }
-                            span { class: "muted small", " median" }
-                        } else if w.listings == 0 {
-                            span { class: "muted small", "not scraped yet" }
-                        } else {
-                            span { class: "muted small", "no verified prices" }
+                    class: "weapon-cell",
+                    onmouseenter: {
+                        let slug = w.slug.clone();
+                        move |_| prefetch(slug.clone())
+                    },
+                    Link {
+                        to: Route::WeaponRoute { slug: w.slug.clone() },
+                        class: if w.listings == 0 { "weapon-card empty" } else { "weapon-card" },
+                        WeaponImage {
+                            slug: w.slug.clone(),
+                            has_image: w.has_image,
+                            name: w.name.clone(),
+                            size: "md",
                         }
-                    }
-                    div { class: "muted small",
-                        "{w.listings} listings"
-                        if w.gone_7d > 0 {
-                            " · {w.gone_7d} gone"
+                        div { class: "weapon-card-name", "{w.name}" }
+                        div { class: "muted small", "{group_label(&w.group)}" }
+                        div { class: "weapon-card-stats",
+                            if let Some(m) = w.median_price {
+                                span { class: "plat-small", "{format_plat(m)}p" }
+                                span { class: "muted small", " median" }
+                            } else if w.listings == 0 {
+                                span { class: "muted small", "not scraped yet" }
+                            } else {
+                                span { class: "muted small", "no verified prices" }
+                            }
+                        }
+                        div { class: "muted small",
+                            "{w.listings} listings"
+                            if w.gone_7d > 0 {
+                                " · {w.gone_7d} gone"
+                            }
                         }
                     }
                 }

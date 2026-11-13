@@ -3,7 +3,9 @@
 //! New parts are picked up incrementally. When compaction replaces loaded files, rebuild
 //! the cache from the new snapshot so observations aren't counted twice.
 
-use std::collections::{HashMap, HashSet};
+// FxHash instead of SipHash: the indexes are hashed millions of times per load and per
+// search, and their keys come from our own dataset rather than from requests.
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +16,7 @@ use arrow::array::{
     Array, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
     TimestampMillisecondArray,
 };
+use arrow::record_batch::RecordBatch;
 use dioxus::prelude::ServerFnError;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
@@ -80,6 +83,33 @@ pub async fn weapon_thumb(slug: String) -> Option<String> {
     run(move |store| store.thumb(&slug)).await.ok().flatten()
 }
 
+/// Loads the data before the first request arrives, so the first visitor doesn't wait for it.
+pub fn warm() {
+    STORE.refresh();
+}
+
+/// Runs `f` on the loaded data only if that takes no waiting: no refresh, no lock held by a
+/// reload. For server rendering, which must never hold a page back; the browser fetches
+/// whatever this couldn't answer.
+pub fn try_now<T>(f: impl FnOnce(&Inner) -> T) -> Option<T> {
+    if !STORE.ready.load(Ordering::Acquire) {
+        return None;
+    }
+    let inner = STORE.inner.try_read().ok()?;
+    Some(f(&inner))
+}
+
+/// How long a memoized answer may be reused. Answers depend on the clock too (periods, ages).
+const MEMO_TTL: Duration = Duration::from_secs(30);
+const SEARCH_MEMO_SIZE: usize = 8;
+
+/// Every open page refetches the overview after each scraper batch, and the start page
+/// searches all weapons; both scan every auction (~10–45 ms on 100k auctions), while a
+/// single weapon's search takes well under a millisecond. So only those two are memoized,
+/// per data version.
+static OVERVIEW_MEMO: Mutex<Option<(u64, Instant, Overview)>> = Mutex::new(None);
+static SEARCH_MEMO: Mutex<Vec<(u64, Instant, Query, SearchResult)>> = Mutex::new(Vec::new());
+
 /// Refreshes the store if needed and runs `f` on a blocking thread.
 pub async fn run<T, F>(f: F) -> Result<T, ServerFnError>
 where
@@ -95,7 +125,18 @@ where
     .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
+/// Tests can pin the clock, so answers on the real dataset compare across runs.
+#[cfg(test)]
+static FROZEN_NOW: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
 fn now_ms() -> i64 {
+    #[cfg(test)]
+    {
+        let frozen = FROZEN_NOW.load(Ordering::Relaxed);
+        if frozen != 0 {
+            return frozen;
+        }
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -163,34 +204,59 @@ impl Store {
             }
         };
         *last = Some(Instant::now());
-        {
-            let mut inner = self.inner.write().unwrap();
-            if inner.loaded.iter().any(|p| !p.exists()) {
-                *inner = Inner {
-                    version: inner.version + 1,
-                    ..Inner::default()
-                };
-                *self.catalog_mtime.lock().unwrap() = None;
+        let rebuild = self
+            .inner
+            .read()
+            .unwrap()
+            .loaded
+            .iter()
+            .any(|p| !p.exists());
+        if rebuild {
+            // Build the replacement aside and swap it in: clearing the live store first would
+            // serve empty pages for the second or so the full load takes.
+            let mut fresh = Inner::default();
+            *self.catalog_mtime.lock().unwrap() = None;
+            if let Some(catalog) = self.changed_catalog() {
+                apply_catalog(&mut fresh, catalog);
             }
-        }
-        self.refresh_catalog();
-        let parquet = self.dir.join("parquet");
-        let (pending, pending_gone) = {
-            let inner = self.inner.read().unwrap();
-            let parts: Vec<(PathBuf, PathBuf)> = part_files(&parquet)
-                .into_iter()
-                .filter(|(a, _)| !inner.loaded.contains(a))
-                .collect();
-            let gone: Vec<PathBuf> = gone_files(&parquet)
-                .into_iter()
-                .filter(|g| !inner.loaded.contains(g))
-                .collect();
-            (parts, gone)
-        };
-        if pending.is_empty() && pending_gone.is_empty() {
+            Self::load_pending(&self.dir, &mut fresh);
+            let mut inner = self.inner.write().unwrap();
+            fresh.version = inner.version + 1;
+            *inner = fresh;
             return;
         }
-        let mut inner = self.inner.write().unwrap();
+        // Only take the write lock, which stalls every reader, when there's something to apply.
+        if let Some(catalog) = self.changed_catalog() {
+            apply_catalog(&mut self.inner.write().unwrap(), catalog);
+        }
+        let parquet = self.dir.join("parquet");
+        let has_new = {
+            let inner = self.inner.read().unwrap();
+            part_files(&parquet)
+                .iter()
+                .any(|(a, _)| !inner.loaded.contains(a))
+                || gone_files(&parquet)
+                    .iter()
+                    .any(|g| !inner.loaded.contains(g))
+        };
+        if has_new {
+            let mut inner = self.inner.write().unwrap();
+            Self::load_pending(&self.dir, &mut inner);
+            inner.version += 1;
+        }
+    }
+
+    /// Loads the parts `inner` hasn't loaded yet.
+    fn load_pending(dir: &Path, inner: &mut Inner) {
+        let parquet = dir.join("parquet");
+        let pending: Vec<(PathBuf, PathBuf)> = part_files(&parquet)
+            .into_iter()
+            .filter(|(a, _)| !inner.loaded.contains(a))
+            .collect();
+        let pending_gone: Vec<PathBuf> = gone_files(&parquet)
+            .into_iter()
+            .filter(|g| !inner.loaded.contains(g))
+            .collect();
         for (auctions, attributes) in pending {
             match inner.load(&auctions, &attributes) {
                 Ok(()) => {
@@ -209,40 +275,42 @@ impl Store {
             }
         }
         inner.finish_load();
-        inner.version += 1;
     }
 
-    /// Loads the scraper's cached `/v2/riven/weapons` so every weapon has a name, group and
-    /// image, even before its first scrape.
-    fn refresh_catalog(&self) {
+    /// Reads the scraper's cached `/v2/riven/weapons` if it changed since the last call. It
+    /// gives every weapon a name, group and image, even before its first scrape.
+    fn changed_catalog(&self) -> Option<Catalog> {
         let path = self.dir.join("cache/riven_weapons.json");
-        let Ok(mtime) = fs::metadata(&path).and_then(|m| m.modified()) else {
-            return;
-        };
+        let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok()?;
         let mut last = self.catalog_mtime.lock().unwrap();
         if *last == Some(mtime) {
-            return;
+            return None;
         }
         let parsed = fs::read(&path)
             .map_err(|e| e.to_string())
             .and_then(|b| serde_json::from_slice::<Catalog>(&b).map_err(|e| e.to_string()));
         match parsed {
             Ok(catalog) => {
-                let mut inner = self.inner.write().unwrap();
-                for w in catalog.data {
-                    let class = weapon_class(&w.riven_type, &w.group);
-                    let index = inner.intern_weapon(&w.slug, &w.i18n.en.name, class);
-                    let weapon = &mut inner.weapons[index as usize];
-                    weapon.name = w.i18n.en.name;
-                    weapon.is_bow =
-                        w.riven_type != "melee" && w.game_ref.to_ascii_lowercase().contains("bow");
-                    weapon.group = w.group;
-                    weapon.thumb = w.i18n.en.thumb;
-                }
                 *last = Some(mtime);
+                Some(catalog)
             }
-            Err(e) => eprintln!("failed to load {}: {e}", path.display()),
+            Err(e) => {
+                eprintln!("failed to load {}: {e}", path.display());
+                None
+            }
         }
+    }
+}
+
+fn apply_catalog(inner: &mut Inner, catalog: Catalog) {
+    for w in catalog.data {
+        let class = weapon_class(&w.riven_type, &w.group);
+        let index = inner.intern_weapon(&w.slug, &w.i18n.en.name, class);
+        let weapon = &mut inner.weapons[index as usize];
+        weapon.name = w.i18n.en.name;
+        weapon.is_bow = w.riven_type != "melee" && w.game_ref.to_ascii_lowercase().contains("bow");
+        weapon.group = w.group;
+        weapon.thumb = w.i18n.en.thumb;
     }
 }
 
@@ -390,11 +458,31 @@ struct Auction {
 }
 
 /// One auction seen in one scrape.
+/// 24 bytes rather than the 32 an `Option<i64>` price takes: charts stream through up to a
+/// million of these per request.
 struct Observation {
     t: i64,
+    /// The price, or `Observation::NO_PRICE`.
+    price: i64,
     auction: u32,
-    price: Option<i64>,
     direct_sell: bool,
+}
+
+impl Observation {
+    const NO_PRICE: i64 = i64::MIN;
+
+    fn new(t: i64, auction: u32, price: Option<i64>, direct_sell: bool) -> Self {
+        Self {
+            t,
+            price: price.unwrap_or(Self::NO_PRICE),
+            auction,
+            direct_sell,
+        }
+    }
+
+    fn price(&self) -> Option<i64> {
+        (self.price != Self::NO_PRICE).then_some(self.price)
+    }
 }
 
 /// An auction that disappeared (sold or removed).
@@ -471,10 +559,65 @@ fn auction_price(a: &Auction) -> Option<i64> {
     price_of(a.buyout_price, a.top_bid, a.starting_price)
 }
 
+/// A map from dense indexes (auctions, rivens) to an optional price, for one chart bucket.
+/// A vector with a list of the slots in use, so a bucket costs what it holds, not the size.
+struct BucketSlots {
+    slots: Vec<i64>,
+    touched: Vec<u32>,
+}
+
+impl BucketSlots {
+    const EMPTY: i64 = i64::MIN;
+    /// Present without a price.
+    const NONE: i64 = i64::MIN + 1;
+
+    fn new(len: usize) -> Self {
+        Self {
+            slots: vec![Self::EMPTY; len],
+            touched: Vec::new(),
+        }
+    }
+
+    fn slot(&mut self, index: u32) -> &mut i64 {
+        let slot = &mut self.slots[index as usize];
+        if *slot == Self::EMPTY {
+            self.touched.push(index);
+        }
+        slot
+    }
+
+    fn set(&mut self, index: u32, price: Option<i64>) {
+        *self.slot(index) = price.unwrap_or(Self::NONE);
+    }
+
+    /// Keeps the lower of the present price and `price`.
+    fn min(&mut self, index: u32, price: i64) {
+        let slot = self.slot(index);
+        if *slot == Self::EMPTY || *slot == Self::NONE || price < *slot {
+            *slot = price;
+        }
+    }
+
+    /// The entries in insertion order, leaving the map empty.
+    fn drain(&mut self) -> impl Iterator<Item = (u32, Option<i64>)> + '_ {
+        let slots = &mut self.slots;
+        self.touched.drain(..).map(move |index| {
+            let value = std::mem::replace(&mut slots[index as usize], Self::EMPTY);
+            (index, (value != Self::NONE).then_some(value))
+        })
+    }
+}
+
 fn median(mut v: Vec<i64>) -> Option<i64> {
     v.sort_unstable();
     v.get(v.len() / 2).copied()
 }
+
+#[cfg(test)]
+mod bench;
+
+#[cfg(test)]
+mod golden;
 
 #[cfg(test)]
 mod storage_tests {
@@ -555,12 +698,9 @@ mod storage_tests {
         });
         inner.auction_index.insert(id.into(), index);
         inner.riven_auctions[riven as usize].push(index);
-        inner.observations.push(Observation {
-            t: last_seen,
-            auction: index,
-            price: Some(price),
-            direct_sell: true,
-        });
+        inner
+            .observations
+            .push(Observation::new(last_seen, index, Some(price), true));
         index
     }
 
@@ -824,12 +964,9 @@ mod storage_tests {
         let mut inner = Inner::default();
         let weapon = inner.intern_weapon("w", "W", "rifle");
         let index = add_auction(&mut inner, weapon, "riven", 200, 3000);
-        inner.observations.push(Observation {
-            t: 1000,
-            auction: index,
-            price: Some(100),
-            direct_sell: true,
-        });
+        inner
+            .observations
+            .push(Observation::new(1000, index, Some(100), true));
         inner.auctions[index as usize].gone = Some((2000, "missing".into()));
         let history = inner.riven_history("riven");
         assert_eq!(
@@ -1033,18 +1170,12 @@ mod storage_tests {
         }
         let unchanged = inner.auction_index["same-new"];
         // Repeated observations and an unknown price don't count as price changes.
-        inner.observations.push(Observation {
-            t: 4000,
-            auction: unchanged,
-            price: None,
-            direct_sell: true,
-        });
-        inner.observations.push(Observation {
-            t: 5000,
-            auction: unchanged,
-            price: Some(100),
-            direct_sell: true,
-        });
+        inner
+            .observations
+            .push(Observation::new(4000, unchanged, None, true));
+        inner
+            .observations
+            .push(Observation::new(5000, unchanged, Some(100), true));
         inner.finish_load();
         for (price_changed, owner_changed, expected) in [
             (false, false, 61),
@@ -1093,12 +1224,9 @@ mod storage_tests {
         );
 
         // A change within one auction is sufficient, and refresh rebuilds the cached flags.
-        inner.observations.push(Observation {
-            t: 6000,
-            auction: unchanged,
-            price: Some(125),
-            direct_sell: true,
-        });
+        inner
+            .observations
+            .push(Observation::new(6000, unchanged, Some(125), true));
         inner.finish_load();
         assert_eq!(
             inner
@@ -1246,7 +1374,7 @@ mod storage_tests {
             assert_eq!((first.total, first.gone_total), (237, 113));
             assert_eq!((first.listings.len(), first.gone.len()), (50, 50));
             for (gone, expected) in [(false, 237), (true, 113)] {
-                let mut ids = HashSet::new();
+                let mut ids = HashSet::default();
                 for offset in (0..expected).step_by(LISTING_PAGE_SIZE) {
                     let page = inner.search_page(&query, offset, Some(gone));
                     assert!(page.history.is_empty());
@@ -1295,6 +1423,8 @@ mod storage_tests {
         assert!(result.listings[0].unconfirmed);
         assert_eq!(result.listings[0].last_seen, 1000);
         inner.auctions[a as usize].gone = Some((2000, "expired".into()));
+        // As after `load_gone`: every load ends with `finish_load`.
+        inner.finish_load();
         assert_eq!(inner.search(&query).total, 0);
     }
 
@@ -1305,12 +1435,9 @@ mod storage_tests {
         let a = add_auction(&mut inner, weapon, "a", 100, 1000);
         let b = add_auction(&mut inner, weapon, "b", 150, 2000);
         inner.auctions[b as usize].riven = inner.auctions[a as usize].riven;
-        inner.observations.push(Observation {
-            t: 3000,
-            auction: a,
-            price: Some(200),
-            direct_sell: true,
-        });
+        inner
+            .observations
+            .push(Observation::new(3000, a, Some(200), true));
         inner.finish_load();
         let query = Query {
             weapon: Some("w".into()),
@@ -1528,7 +1655,7 @@ mod storage_tests {
             assert_eq!(auction.last_seen, withdrawn_at.timestamp_millis());
             assert!(inner.is_current(auction), "withdrawal is not a sale");
             assert!(inner.observations.iter().any(|o| {
-                o.auction == index && o.t == withdrawn_at.timestamp_millis() && o.price.is_none()
+                o.auction == index && o.t == withdrawn_at.timestamp_millis() && o.price().is_none()
             }));
         }
         fs::remove_dir_all(root)?;
@@ -1653,6 +1780,53 @@ pub struct Inner {
     riven_changes: Vec<RivenChanges>,
     /// Sorted by time.
     gone: Vec<GoneEvent>,
+    /// Per auction, what searches filter on (see `Row`). Rebuilt by `finish_load`.
+    rows: Vec<Row>,
+}
+
+/// The fields searches filter and sort on, for one auction, packed tight. A search visits
+/// every auction, and its chart up to a million observations at random auctions; reading
+/// these 40 bytes instead of the full auction (a few hundred, with pointers to follow) keeps
+/// that in cache. Filters on specific stats still check the auction's attributes.
+#[derive(Clone, Copy)]
+struct Row {
+    /// `auction_price`, or `Row::NO_PRICE`.
+    price: i64,
+    /// The weapon's invalid-price limit, or `i64::MAX`.
+    limit: i64,
+    created: i64,
+    /// NaN when unknown, so no minimum is met.
+    mean_quality: f64,
+    riven: u32,
+    weapon: u16,
+    flags: u8,
+}
+
+impl Row {
+    const NO_PRICE: i64 = i64::MIN;
+    const FIT_OK: u8 = 1;
+    const LEGACY: u8 = 2;
+    const DIRECT: u8 = 4;
+    const CURRENT: u8 = 8;
+    const CURSED: u8 = 16;
+
+    fn has(&self, flag: u8) -> bool {
+        self.flags & flag != 0
+    }
+
+    fn price(&self) -> Option<i64> {
+        (self.price != Self::NO_PRICE).then_some(self.price)
+    }
+
+    /// `Inner::price_outlier` for the auction's own price.
+    fn outlier(&self) -> bool {
+        self.price != Self::NO_PRICE && self.price > self.limit
+    }
+
+    /// `Inner::price_outlier` for another price of the same weapon.
+    fn outlier_price(&self, price: Option<i64>) -> bool {
+        price.is_some_and(|p| p > self.limit)
+    }
 }
 
 type LoadResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -1670,6 +1844,77 @@ macro_rules! column {
             .and_then(|c| c.as_any().downcast_ref::<$ty>())
             .ok_or(concat!("missing column ", $name))?
     };
+}
+
+// Decode and validate every batch before any live indexes are changed. In particular,
+// a corrupt later row group must not leave a prefix that gets replayed on every refresh.
+fn checked_batches(
+    batches: impl IntoIterator<Item = LoadResult<RecordBatch>>,
+    validate: fn(&RecordBatch) -> LoadResult<()>,
+) -> LoadResult<Vec<RecordBatch>> {
+    batches
+        .into_iter()
+        .map(|batch| {
+            let batch = batch?;
+            validate(&batch)?;
+            Ok(batch)
+        })
+        .collect()
+}
+
+fn validate_attributes(b: &RecordBatch) -> LoadResult<()> {
+    let _ = column!(b, "scraped_at", TimestampMillisecondArray);
+    let _ = column!(b, "auction_id", StringArray);
+    let _ = column!(b, "position", Int32Array);
+    let _ = column!(b, "attribute", StringArray);
+    let _ = column!(b, "positive", BooleanArray);
+    let _ = column!(b, "value", Float64Array);
+    let _ = column!(b, "value_rank8", Float64Array);
+    let _ = column!(b, "quality", Float64Array);
+    Ok(())
+}
+
+fn validate_auctions(b: &RecordBatch) -> LoadResult<()> {
+    let _ = column!(b, "scraped_at", TimestampMillisecondArray);
+    let _ = column!(b, "auction_id", StringArray);
+    let _ = column!(b, "weapon_slug", StringArray);
+    let _ = column!(b, "weapon_name", StringArray);
+    let _ = column!(b, "weapon_class", StringArray);
+    let _ = column!(b, "riven_name", StringArray);
+    let _ = column!(b, "polarity", StringArray);
+    let _ = column!(b, "mastery_level", Int64Array);
+    let _ = column!(b, "re_rolls", Int64Array);
+    let _ = column!(b, "rank", Int32Array);
+    let _ = column!(b, "legacy_stats", BooleanArray);
+    let _ = column!(b, "fit_ok", BooleanArray);
+    let _ = column!(b, "mean_positive_quality", Float64Array);
+    let _ = column!(b, "buyout_price", Int64Array);
+    let _ = column!(b, "starting_price", Int64Array);
+    let _ = column!(b, "top_bid", Int64Array);
+    let _ = column!(b, "is_direct_sell", BooleanArray);
+    let _ = column!(b, "visible", BooleanArray);
+    let _ = column!(b, "closed", BooleanArray);
+    let _ = column!(b, "created", TimestampMillisecondArray);
+    let _ = column!(b, "owner_name", StringArray);
+    let _ = column!(b, "owner_reputation", Int64Array);
+    Ok(())
+}
+
+fn validate_gone(b: &RecordBatch) -> LoadResult<()> {
+    let _ = column!(b, "detected_at", TimestampMillisecondArray);
+    let _ = column!(b, "auction_id", StringArray);
+    let _ = column!(b, "reason", StringArray);
+    let _ = column!(b, "last_price", Int64Array);
+    let _ = column!(b, "direct_sell", BooleanArray);
+    Ok(())
+}
+
+/// Overwrites `s` with `value`, reusing its buffer.
+fn set_str(s: &mut String, value: &str) {
+    if s != value {
+        s.clear();
+        s.push_str(value);
+    }
 }
 
 fn opt<A: Array, T>(a: &A, i: usize, get: impl Fn(&A, usize) -> T) -> Option<T> {
@@ -1719,10 +1964,24 @@ impl Inner {
     }
 
     fn load(&mut self, auctions_path: &Path, attributes_path: &Path) -> LoadResult<()> {
-        // Attributes keyed by (auction id, scraped_at).
-        let mut attrs: HashMap<(String, i64), Vec<Attr>> = HashMap::new();
-        for b in read_batches(attributes_path)? {
-            let b = b?;
+        self.load_parts(
+            read_batches(auctions_path)?.map(|b| b.map_err(Into::into)),
+            read_batches(attributes_path)?.map(|b| b.map_err(Into::into)),
+        )
+    }
+
+    fn load_parts(
+        &mut self,
+        auctions: impl IntoIterator<Item = LoadResult<RecordBatch>>,
+        attributes: impl IntoIterator<Item = LoadResult<RecordBatch>>,
+    ) -> LoadResult<()> {
+        let attributes = checked_batches(attributes, validate_attributes)?;
+        let auctions = checked_batches(auctions, validate_auctions)?;
+        // The attributes of each auction's newest sighting in this part, with its scraped_at.
+        // Older sightings never end up as an auction's current version, so their attributes
+        // aren't kept. Keyed by the id alone so lookups borrow it instead of allocating.
+        let mut attrs: HashMap<String, (i64, Vec<Attr>)> = HashMap::default();
+        for b in attributes {
             let scraped = column!(b, "scraped_at", TimestampMillisecondArray);
             let id = column!(b, "auction_id", StringArray);
             let position = column!(b, "position", Int32Array);
@@ -1741,15 +2000,23 @@ impl Inner {
                     value_rank8: opt(rank8, i, Float64Array::value),
                     quality: opt(quality, i, Float64Array::value),
                 };
-                attrs
-                    .entry((id.value(i).to_owned(), scraped.value(i)))
-                    .or_default()
-                    .push(a);
+                let (auction_id, t) = (id.value(i), scraped.value(i));
+                match attrs.get_mut(auction_id) {
+                    Some((at, list)) if *at == t => list.push(a),
+                    Some((at, list)) if *at < t => {
+                        *at = t;
+                        list.clear();
+                        list.push(a);
+                    }
+                    Some(_) => {}
+                    None => {
+                        attrs.insert(auction_id.to_owned(), (t, vec![a]));
+                    }
+                }
             }
         }
 
-        for b in read_batches(auctions_path)? {
-            let b = b?;
+        for b in auctions {
             let scraped = column!(b, "scraped_at", TimestampMillisecondArray);
             let id = column!(b, "auction_id", StringArray);
             let weapon_slug = column!(b, "weapon_slug", StringArray);
@@ -1806,72 +2073,108 @@ impl Inner {
                 let buyout_price = opt(buyout, i, Int64Array::value);
                 let starting_price = opt(starting, i, Int64Array::value);
                 let top = opt(top_bid, i, Int64Array::value);
-                let fresh = Auction {
-                    id: auction_id.to_owned(),
-                    weapon,
-                    riven,
-                    gone: None,
-                    riven_name: riven_name.value(i).to_owned(),
-                    polarity: polarity.value(i).to_owned(),
-                    mastery_level: opt(mastery, i, Int64Array::value),
-                    re_rolls: opt(re_rolls, i, Int64Array::value),
-                    rank: opt(rank, i, Int32Array::value),
-                    legacy_stats: opt(legacy, i, BooleanArray::value),
-                    fit_ok: fit_ok.value(i),
-                    mean_quality: opt(mean_q, i, Float64Array::value),
-                    owner_name: owner_name.value(i).to_owned(),
-                    owner_reputation: opt(owner_rep, i, Int64Array::value),
-                    created: created.value(i),
-                    first_seen: t,
-                    last_seen: t,
-                    attrs: attrs
-                        .remove(&(auction_id.to_owned(), t))
-                        .unwrap_or_default(),
-                    buyout_price,
-                    starting_price,
-                    top_bid: top,
-                    direct_sell: direct.value(i),
+                let existing = self.auction_index.get(auction_id).copied();
+                // Most rows are repeat sightings; an older one only moves `first_seen`, so
+                // build the full auction (strings, attributes) only for rows that become the
+                // latest version.
+                // This row's attributes, if it is the newest sighting in the part.
+                let mut take_attrs = || {
+                    attrs
+                        .get_mut(auction_id)
+                        .filter(|(at, _)| *at == t)
+                        .map(|(_, list)| std::mem::take(list))
+                        .unwrap_or_default()
                 };
-
-                let index = match self.auction_index.get(auction_id) {
-                    Some(&index) => {
-                        let existing = &mut self.auctions[index as usize];
-                        if t >= existing.last_seen {
-                            let first_seen = existing.first_seen.min(t);
-                            let old_riven = existing.riven;
-                            *existing = fresh;
-                            existing.first_seen = first_seen;
-                            if old_riven != riven {
-                                self.riven_auctions[old_riven as usize].retain(|&a| a != index);
-                                self.riven_auctions[riven as usize].push(index);
-                            }
-                        } else {
-                            existing.first_seen = existing.first_seen.min(t);
+                let index = match existing {
+                    // An older sighting only moves `first_seen`.
+                    Some(index) if t < self.auctions[index as usize].last_seen => {
+                        let a = &mut self.auctions[index as usize];
+                        a.first_seen = a.first_seen.min(t);
+                        index
+                    }
+                    // A newer one replaces the auction's details. Parts load oldest first, so
+                    // this is the common case: update in place, reusing the string buffers.
+                    Some(index) => {
+                        let a = &mut self.auctions[index as usize];
+                        let old_riven = a.riven;
+                        a.weapon = weapon;
+                        a.riven = riven;
+                        a.gone = None;
+                        set_str(&mut a.riven_name, riven_name.value(i));
+                        set_str(&mut a.polarity, polarity.value(i));
+                        a.mastery_level = opt(mastery, i, Int64Array::value);
+                        a.re_rolls = opt(re_rolls, i, Int64Array::value);
+                        a.rank = opt(rank, i, Int32Array::value);
+                        a.legacy_stats = opt(legacy, i, BooleanArray::value);
+                        a.fit_ok = fit_ok.value(i);
+                        a.mean_quality = opt(mean_q, i, Float64Array::value);
+                        set_str(&mut a.owner_name, owner_name.value(i));
+                        a.owner_reputation = opt(owner_rep, i, Int64Array::value);
+                        a.created = created.value(i);
+                        a.first_seen = a.first_seen.min(t);
+                        a.last_seen = t;
+                        a.attrs = take_attrs();
+                        a.buyout_price = buyout_price;
+                        a.starting_price = starting_price;
+                        a.top_bid = top;
+                        a.direct_sell = direct.value(i);
+                        if old_riven != riven {
+                            self.riven_auctions[old_riven as usize].retain(|&a| a != index);
+                            self.riven_auctions[riven as usize].push(index);
                         }
                         index
                     }
                     None => {
                         let index = self.auctions.len() as u32;
-                        self.auctions.push(fresh);
+                        self.auctions.push(Auction {
+                            id: auction_id.to_owned(),
+                            weapon,
+                            riven,
+                            gone: None,
+                            riven_name: riven_name.value(i).to_owned(),
+                            polarity: polarity.value(i).to_owned(),
+                            mastery_level: opt(mastery, i, Int64Array::value),
+                            re_rolls: opt(re_rolls, i, Int64Array::value),
+                            rank: opt(rank, i, Int32Array::value),
+                            legacy_stats: opt(legacy, i, BooleanArray::value),
+                            fit_ok: fit_ok.value(i),
+                            mean_quality: opt(mean_q, i, Float64Array::value),
+                            owner_name: owner_name.value(i).to_owned(),
+                            owner_reputation: opt(owner_rep, i, Int64Array::value),
+                            created: created.value(i),
+                            first_seen: t,
+                            last_seen: t,
+                            attrs: take_attrs(),
+                            buyout_price,
+                            starting_price,
+                            top_bid: top,
+                            direct_sell: direct.value(i),
+                        });
                         self.auction_index.insert(auction_id.to_owned(), index);
                         self.riven_auctions[riven as usize].push(index);
                         index
                     }
                 };
-                self.observations.push(Observation {
+                self.observations.push(Observation::new(
                     t,
-                    auction: index,
-                    price: price_of(buyout_price, top, starting_price),
-                    direct_sell: direct.value(i),
-                });
+                    index,
+                    price_of(buyout_price, top, starting_price),
+                    direct.value(i),
+                ));
             }
         }
         Ok(())
     }
 
     fn load_gone(&mut self, path: &Path) -> LoadResult<()> {
-        for b in read_batches(path)? {
-            let b = b?;
+        self.load_gone_batches(read_batches(path)?.map(|b| b.map_err(Into::into)))
+    }
+
+    fn load_gone_batches(
+        &mut self,
+        batches: impl IntoIterator<Item = LoadResult<RecordBatch>>,
+    ) -> LoadResult<()> {
+        for b in checked_batches(batches, validate_gone)? {
             let detected = column!(b, "detected_at", TimestampMillisecondArray);
             let id = column!(b, "auction_id", StringArray);
             let reason = column!(b, "reason", StringArray);
@@ -1910,7 +2213,7 @@ impl Inner {
         for o in &self.observations {
             let riven = self.auctions[o.auction as usize].riven as usize;
             // Missing prices aren't evidence of a change; compare known numeric prices only.
-            if let Some(price) = o.price {
+            if let Some(price) = o.price() {
                 let first = first_prices[riven].get_or_insert(price);
                 self.riven_changes[riven].price |= *first != price;
             }
@@ -1933,6 +2236,71 @@ impl Inner {
         for (weapon, mut prices) in self.weapons.iter_mut().zip(prices) {
             weapon.price_limit = price_limit(&mut prices);
         }
+        self.rows = self.build_rows();
+    }
+
+    fn build_rows(&self) -> Vec<Row> {
+        self.auctions
+            .iter()
+            .map(|a| {
+                let flag = |set: bool, flag: u8| if set { flag } else { 0 };
+                Row {
+                    price: auction_price(a).unwrap_or(Row::NO_PRICE),
+                    limit: self.weapons[a.weapon as usize]
+                        .price_limit
+                        .unwrap_or(i64::MAX),
+                    created: a.created,
+                    mean_quality: a.mean_quality.unwrap_or(f64::NAN),
+                    riven: a.riven,
+                    weapon: a.weapon,
+                    flags: flag(a.fit_ok, Row::FIT_OK)
+                        | flag(a.legacy_stats == Some(true), Row::LEGACY)
+                        | flag(a.direct_sell, Row::DIRECT)
+                        | flag(self.is_current(a), Row::CURRENT)
+                        | flag(a.attrs.iter().any(|x| !x.positive), Row::CURSED),
+                }
+            })
+            .collect()
+    }
+
+    /// The rows, rebuilt here if the auctions changed since `finish_load` (only in tests).
+    fn rows(&self) -> std::borrow::Cow<'_, [Row]> {
+        if self.rows.len() == self.auctions.len() {
+            std::borrow::Cow::Borrowed(&self.rows)
+        } else {
+            std::borrow::Cow::Owned(self.build_rows())
+        }
+    }
+
+    /// `matches` on the row; only stat filters look at the auction itself.
+    fn row_matches(&self, r: &Row, a: &Auction, q: &Query, weapon: Option<u16>) -> bool {
+        if q.riven_id.is_some() {
+            return self.matches(a, q, weapon);
+        }
+        if weapon.is_some_and(|w| w != r.weapon) {
+            return false;
+        }
+        if q.price_changed || q.owner_changed {
+            let changes = self.riven_changes[r.riven as usize];
+            if (q.price_changed && !changes.price) || (q.owner_changed && !changes.owner) {
+                return false;
+            }
+        }
+        if (!q.include_unfit && !r.has(Row::FIT_OK))
+            || (!q.include_legacy && r.has(Row::LEGACY))
+            || (q.min_quality > 0.0 && (r.mean_quality.is_nan() || r.mean_quality < q.min_quality))
+        {
+            return false;
+        }
+        match &q.curse {
+            CurseFilter::None if r.has(Row::CURSED) => return false,
+            CurseFilter::Required if !r.has(Row::CURSED) => return false,
+            _ => {}
+        }
+        if !q.positives.is_empty() || matches!(q.curse, CurseFilter::Attr(_)) {
+            return self.matches(a, q, weapon);
+        }
+        true
     }
 
     fn price_outlier(&self, weapon: u16, price: Option<i64>) -> bool {
@@ -1965,11 +2333,26 @@ impl Inner {
         let mut listings = vec![0u32; self.weapons.len()];
         // Sane current prices per weapon, for the median/cheapest shown in the weapon list.
         let mut prices: Vec<Vec<i64>> = vec![Vec::new(); self.weapons.len()];
-        let mut classes: Vec<HashSet<&str>> = vec![HashSet::new(); self.attrs.len()];
+        // Which weapon classes each attribute was seen on, as a bitmask over the few classes:
+        // this visits every attribute of every auction.
+        let mut class_names: Vec<&str> = Vec::new();
+        let weapon_class: Vec<usize> = self
+            .weapons
+            .iter()
+            .map(|w| match class_names.iter().position(|c| *c == w.class) {
+                Some(i) => i,
+                None => {
+                    class_names.push(&w.class);
+                    class_names.len() - 1
+                }
+            })
+            .collect();
+        assert!(class_names.len() <= 128, "class bitmask overflow");
+        let mut classes = vec![0u128; self.attrs.len()];
         for a in &self.auctions {
-            let class = self.weapons[a.weapon as usize].class.as_str();
+            let class = 1u128 << weapon_class[a.weapon as usize];
             for attr in &a.attrs {
-                classes[attr.attr as usize].insert(class);
+                classes[attr.attr as usize] |= class;
             }
             if !self.is_current(a) {
                 continue;
@@ -2030,8 +2413,13 @@ impl Inner {
             .attrs
             .iter()
             .zip(classes)
-            .map(|(slug, classes)| {
-                let mut classes: Vec<String> = classes.into_iter().map(str::to_owned).collect();
+            .map(|(slug, mask)| {
+                let mut classes: Vec<String> = class_names
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask & (1 << i) != 0)
+                    .map(|(_, c)| (*c).to_owned())
+                    .collect();
                 classes.sort();
                 AttrInfo {
                     slug: slug.clone(),
@@ -2161,6 +2549,36 @@ impl Inner {
         self.search_page(q, 0, None)
     }
 
+    /// `overview`, reused while the data and the memo are fresh (see `OVERVIEW_MEMO`).
+    pub fn overview_memo(&self) -> Overview {
+        let mut memo = OVERVIEW_MEMO.lock().unwrap();
+        if let Some((version, at, overview)) = &*memo
+            && *version == self.version
+            && at.elapsed() < MEMO_TTL
+        {
+            return overview.clone();
+        }
+        let overview = self.overview();
+        *memo = Some((self.version, Instant::now(), overview.clone()));
+        overview
+    }
+
+    /// `search`, reused for the all-weapon searches (see `OVERVIEW_MEMO`).
+    pub fn search_memo(&self, q: &Query) -> SearchResult {
+        if q.weapon.is_some() || q.riven_id.is_some() {
+            return self.search(q);
+        }
+        let mut memo = SEARCH_MEMO.lock().unwrap();
+        memo.retain(|(version, at, _, _)| *version == self.version && at.elapsed() < MEMO_TTL);
+        if let Some((_, _, _, result)) = memo.iter().find(|(_, _, query, _)| query == q) {
+            return result.clone();
+        }
+        let result = self.search(q);
+        memo.insert(0, (self.version, Instant::now(), q.clone(), result.clone()));
+        memo.truncate(SEARCH_MEMO_SIZE);
+        result
+    }
+
     /// `None` includes both first pages and history; subsequent pages fetch only one tab.
     pub fn search_page(&self, q: &Query, offset: usize, gone_tab: Option<bool>) -> SearchResult {
         // An id search shows everything about that riven, whatever the other filters say.
@@ -2198,60 +2616,91 @@ impl Inner {
             },
             None => None,
         };
-        let matching: Vec<bool> = self
-            .auctions
-            .iter()
-            .map(|a| self.matches(a, q, weapon))
-            .collect();
+        let rows = self.rows();
+        let matching: Vec<bool> = match &q.riven_id {
+            // Ignores all other filters: find the rivens, then mark their auctions.
+            Some(prefix) => {
+                let mut matching = vec![false; self.auctions.len()];
+                for (riven, id) in self.rivens.iter().enumerate() {
+                    if id.starts_with(prefix.as_str()) {
+                        for &a in &self.riven_auctions[riven] {
+                            matching[a as usize] = true;
+                        }
+                    }
+                }
+                matching
+            }
+            None => rows
+                .iter()
+                .zip(&self.auctions)
+                .map(|(r, a)| self.row_matches(r, a, q, weapon))
+                .collect(),
+        };
 
-        // Current listings, one per riven: the cheapest copy.
-        let price = |a: &Auction| auction_price(a).unwrap_or(0);
-        let mut best: HashMap<u32, &Auction> = HashMap::new();
-        for (a, m) in self.auctions.iter().zip(&matching) {
-            if !*m || !self.is_current(a) || !Self::price_ok(q, auction_price(a), a.direct_sell) {
+        // Current listings, one per riven: the cheapest copy. Indexed by riven rather than
+        // hashed: this visits every matching auction, ~100k for an all-weapon search.
+        let price = |i: u32| rows[i as usize].price().unwrap_or(0);
+        let mut best = vec![u32::MAX; self.rivens.len()];
+        let mut best_rivens = Vec::new();
+        for (index, (r, m)) in rows.iter().zip(&matching).enumerate() {
+            if !*m || !r.has(Row::CURRENT) || !Self::price_ok(q, r.price(), r.has(Row::DIRECT)) {
                 continue;
             }
-            best.entry(a.riven)
-                .and_modify(|b| {
-                    if price(a) < price(b) {
-                        *b = a;
-                    }
-                })
-                .or_insert(a);
+            let slot = &mut best[r.riven as usize];
+            if *slot == u32::MAX {
+                best_rivens.push(r.riven);
+                *slot = index as u32;
+            } else if price(index as u32) < price(*slot) {
+                *slot = index as u32;
+            }
         }
         // Invalid prices are hidden unless asked for. An id search shows everything, and the
         // charts below only count them for that one riven: they'd swamp any analysis.
         let id_search = q.riven_id.is_some();
         let show_outliers = q.include_outliers || id_search;
-        let (mut current, hidden): (Vec<&Auction>, Vec<&Auction>) = best
-            .into_values()
-            .partition(|a| show_outliers || !self.price_outlier(a.weapon, auction_price(a)));
+        let (mut current, hidden): (Vec<u32>, Vec<u32>) = best_rivens
+            .iter()
+            .map(|&riven| best[riven as usize])
+            .partition(|&i| show_outliers || !rows[i as usize].outlier());
         let outliers_hidden = hidden.len();
-        match q.sort {
-            Sort::PriceAsc => current.sort_by_key(|a| (price(a), a.id.as_str())),
-            Sort::PriceDesc => {
-                current.sort_by_key(|a| (std::cmp::Reverse(price(a)), a.id.as_str()))
-            }
-            Sort::QualityDesc => current.sort_by(|a, b| {
-                b.mean_quality
-                    .unwrap_or(-1.0)
-                    .total_cmp(&a.mean_quality.unwrap_or(-1.0))
-                    .then(a.id.cmp(&b.id))
-            }),
-            Sort::Newest => current.sort_by_key(|a| (std::cmp::Reverse(a.created), a.id.as_str())),
-        }
         let total = current.len();
-        let listings = current
-            .into_iter()
-            .skip(offset)
-            .take(if gone_tab == Some(true) {
+        let page = |gone: bool| {
+            if gone_tab == Some(!gone) {
                 0
             } else if id_search && gone_tab.is_none() {
                 usize::MAX
             } else {
                 LISTING_PAGE_SIZE
-            })
-            .map(|a| self.listing(a))
+            }
+        };
+        // A total order (ids are unique), so selecting the page and sorting only it gives
+        // the same rows as sorting everything.
+        // Compares rows first and reads the ids only for ties.
+        let id = |i: u32| self.auctions[i as usize].id.as_str();
+        let quality = |i: u32| {
+            let q = rows[i as usize].mean_quality;
+            if q.is_nan() { -1.0 } else { q }
+        };
+        let order = |&a: &u32, &b: &u32| {
+            let (ra, rb) = (&rows[a as usize], &rows[b as usize]);
+            match q.sort {
+                Sort::PriceAsc => price(a).cmp(&price(b)),
+                Sort::PriceDesc => price(b).cmp(&price(a)),
+                Sort::QualityDesc => quality(b).total_cmp(&quality(a)),
+                Sort::Newest => rb.created.cmp(&ra.created),
+            }
+            .then_with(|| id(a).cmp(id(b)))
+        };
+        let end = offset.saturating_add(page(false));
+        if end < current.len() {
+            current.select_nth_unstable_by(end, order);
+            current.truncate(end);
+        }
+        current.sort_unstable_by(order);
+        let listings = current
+            .into_iter()
+            .skip(offset)
+            .map(|i| self.listing(&self.auctions[i as usize]))
             .collect();
 
         // The period limits the chart and the disappeared listings; current listings are current.
@@ -2275,9 +2724,8 @@ impl Inner {
                     && Self::price_ok(q, g.price, g.direct_sell)
             })
             .collect();
-        let gone_outlier =
-            |g: &GoneEvent| self.price_outlier(self.auctions[g.auction as usize].weapon, g.price);
-        let mut seen_rivens = HashSet::new();
+        let gone_outlier = |g: &GoneEvent| rows[g.auction as usize].outlier_price(g.price);
+        let mut seen_rivens = HashSet::default();
         let recent_gone: Vec<&GoneEvent> = gone_events
             .iter()
             .rev()
@@ -2289,13 +2737,7 @@ impl Inner {
         let gone = recent_gone
             .into_iter()
             .skip(offset)
-            .take(if gone_tab == Some(false) {
-                0
-            } else if id_search && gone_tab.is_none() {
-                usize::MAX
-            } else {
-                LISTING_PAGE_SIZE
-            })
+            .take(page(true))
             .map(|g| self.listing(&self.auctions[g.auction as usize]))
             .collect();
 
@@ -2329,7 +2771,7 @@ impl Inner {
         // plus the last prices of rivens that disappeared in that bucket.
         let bucket = i64::from(bucket_hours) * 3_600_000;
         let bucket_of = |t: i64| t - t.rem_euclid(bucket);
-        let mut gone_by_bucket: HashMap<i64, HashMap<u32, i64>> = HashMap::new();
+        let mut gone_by_bucket: HashMap<i64, HashMap<u32, i64>> = HashMap::default();
         for g in gone_events.iter().filter(|g| id_search || !gone_outlier(g)) {
             if let Some(p) = g.price {
                 gone_by_bucket
@@ -2342,26 +2784,37 @@ impl Inner {
         let mut current_bucket = None;
         // Keep every copy until the bucket closes; its latest observation can rise or
         // cease to match the price filter. Only then choose the cheapest per riven.
-        let mut prices: HashMap<u32, Option<i64>> = HashMap::new();
-        let mut flush = |t: i64, prices: &mut HashMap<u32, Option<i64>>| {
-            if prices.is_empty() {
-                return;
-            }
-            let mut cheapest: HashMap<u32, i64> = HashMap::new();
+        // Indexed by auction and riven rather than hashed, since a long period visits
+        // a million observations; `touched` lists the slots to read and reset.
+        let mut prices = BucketSlots::new(self.auctions.len());
+        let mut cheapest = BucketSlots::new(self.rivens.len());
+        let mut flush = |t: i64, prices: &mut BucketSlots| {
             for (auction, price) in prices.drain() {
                 if let Some(price) = price {
-                    cheapest
-                        .entry(self.auctions[auction as usize].riven)
-                        .and_modify(|p| *p = (*p).min(price))
-                        .or_insert(price);
+                    cheapest.min(rows[auction as usize].riven, price);
                 }
             }
-            let mut v: Vec<i64> = cheapest.into_values().collect();
+            let mut v: Vec<i64> = cheapest.drain().filter_map(|(_, p)| p).collect();
             if v.is_empty() {
                 return;
             }
-            v.sort_unstable();
-            let pct = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize];
+            // Four ranks are needed, not a sorted list: select them, which is linear.
+            let last = (v.len() - 1) as f64;
+            let rank = |p: f64| (last * p).round() as usize;
+            let (r25, r50, r75) = (rank(0.25), rank(0.5), rank(0.75));
+            let (below, &mut median_value, above) = v.select_nth_unstable(r50);
+            let p75 = if r75 > r50 {
+                *above.select_nth_unstable(r75 - r50 - 1).1
+            } else {
+                median_value
+            };
+            let p25 = if r25 < r50 {
+                *below.select_nth_unstable(r25).1
+            } else {
+                median_value
+            };
+            // Everything up to rank 25 is at most p25, so the minimum is among those.
+            let min = v[..=r25].iter().copied().min().unwrap_or(median_value);
             let gone: Vec<i64> = gone_by_bucket
                 .remove(&t)
                 .map(|g| g.into_values().collect())
@@ -2369,29 +2822,33 @@ impl Inner {
             history.push(HistoryPoint {
                 t,
                 count: v.len() as u32,
-                min: v[0],
-                p25: pct(0.25),
-                median: pct(0.5),
-                p75: pct(0.75),
+                min,
+                p25,
+                median: median_value,
+                p75,
                 gone_count: gone.len() as u32,
                 gone_median: median(gone),
             });
         };
+        // Observations come in time order, so a bucket ends at a known time; dividing for
+        // every one of up to a million observations would cost more than the rest.
+        let mut bucket_end = i64::MIN;
         for o in observations {
             if !matching[o.auction as usize] {
                 continue;
             }
-            let b = bucket_of(o.t);
-            if current_bucket != Some(b) {
+            if o.t >= bucket_end {
+                let b = bucket_of(o.t);
                 if let Some(prev) = current_bucket {
                     flush(prev, &mut prices);
                 }
                 current_bucket = Some(b);
+                bucket_end = b + bucket;
             }
-            let eligible = Self::price_ok(q, o.price, o.direct_sell)
-                && (id_search
-                    || !self.price_outlier(self.auctions[o.auction as usize].weapon, o.price));
-            prices.insert(o.auction, o.price.filter(|_| eligible));
+            let price = o.price();
+            let eligible = Self::price_ok(q, price, o.direct_sell)
+                && (id_search || !rows[o.auction as usize].outlier_price(price));
+            prices.set(o.auction, price.filter(|_| eligible));
         }
         if let Some(prev) = current_bucket {
             flush(prev, &mut prices);
@@ -2419,8 +2876,15 @@ impl Inner {
         };
         // Verified buyouts only, one per riven: the cheapest copy, ordered by the riven's hash so
         // the held-out rivens are an arbitrary but repeatable selection.
-        let mut cheapest: HashMap<u32, (&Auction, i64)> = HashMap::new();
-        for a in self.auctions.iter().filter(|a| a.weapon == weapon) {
+        let mut cheapest: HashMap<u32, (&Auction, i64)> = HashMap::default();
+        // Find the weapon's auctions on the compact rows rather than reading every auction.
+        let rows = self.rows();
+        let auctions = rows
+            .iter()
+            .zip(&self.auctions)
+            .filter(|(r, _)| r.weapon == weapon)
+            .map(|(_, a)| a);
+        for a in auctions {
             let Some(price) = a.buyout_price.filter(|p| *p >= 10) else {
                 continue;
             };
@@ -2450,7 +2914,7 @@ impl Inner {
             return result;
         }
 
-        let mut counts: HashMap<(u16, bool), u32> = HashMap::new();
+        let mut counts: HashMap<(u16, bool), u32> = HashMap::default();
         for (_, a, _) in &rivens {
             for attr in &a.attrs {
                 *counts.entry((attr.attr, attr.positive)).or_default() += 1;
@@ -2561,8 +3025,8 @@ impl Inner {
     ) -> (Vec<SimilarRiven>, usize, usize) {
         // Pick a representative before scoring, so old relists cannot win twice or
         // make a riven appear closer than its latest eligible observation.
-        let mut hidden = HashSet::new();
-        let mut representatives: HashMap<u32, &Auction> = HashMap::new();
+        let mut hidden = HashSet::default();
+        let mut representatives: HashMap<u32, &Auction> = HashMap::default();
         for a in &self.auctions {
             if a.weapon != selected.weapon || a.riven == selected.riven {
                 continue;
@@ -2834,7 +3298,7 @@ impl Inner {
             return Vec::new();
         };
         let auctions = &self.riven_auctions[riven as usize];
-        let mut points: HashMap<u32, Vec<PricePoint>> = HashMap::new();
+        let mut points: HashMap<u32, Vec<PricePoint>> = HashMap::default();
         for o in self
             .observations
             .iter()
@@ -2842,7 +3306,7 @@ impl Inner {
         {
             points.entry(o.auction).or_default().push(PricePoint {
                 t: o.t,
-                price: o.price,
+                price: o.price(),
             });
         }
         let mut out: Vec<RivenAuction> = auctions
@@ -2881,3 +3345,6 @@ impl Inner {
         out
     }
 }
+
+#[cfg(test)]
+mod loading_tests;

@@ -249,7 +249,35 @@ aside {
 .filters-toggle { display: none; }
 
 .content { min-width: 0; display: flex; flex-direction: column; gap: 14px; transition: opacity .15s; }
-.content.loading { opacity: .55; pointer-events: none; }
+.results { min-width: 0; display: flex; flex-direction: column; gap: 14px; transition: opacity .15s; }
+.results.loading { opacity: .55; pointer-events: none; }
+
+/* Placeholders while data streams in, sized like what replaces them to avoid layout jumps. */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 5%, transparent), transparent);
+  transform: translateX(-100%);
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer { to { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .skeleton::after { animation: none; } }
+.skeleton-header { height: 142px; }
+.skeleton-chart { height: 300px; }
+.skeleton-row { height: 62px; border-radius: 9px; }
+.skeleton-filter { height: 34px; }
+.skeleton-card { height: 150px; }
+.skeleton-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.results-skeleton { display: flex; flex-direction: column; gap: 6px; }
+.results-skeleton .skeleton-chart { margin-bottom: 8px; }
 
 .section-head { display: flex; align-items: baseline; gap: 12px; margin-top: 10px; }
 
@@ -326,6 +354,8 @@ aside {
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 10px;
 }
+/* Holds the card link; a grid so the link fills the cell. */
+.weapon-cell { display: grid; }
 .weapon-card {
   display: flex;
   flex-direction: column;

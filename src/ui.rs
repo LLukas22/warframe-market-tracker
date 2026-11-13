@@ -110,37 +110,247 @@ pub fn App() -> Element {
     rsx! { Router::<Route> {} }
 }
 
+/// How many past requests of each kind the view cache keeps.
+const VIEW_CACHE_SIZE: usize = 12;
+/// How long a cached answer is used without asking the server, while the data version is
+/// unchanged. Ages like "seen 5m ago" are relative to the answer's server time, so this also
+/// bounds how far those lag.
+const FRESH_MS: f64 = 60_000.0;
+
+/// Milliseconds on the browser's clock. Only compared with itself; on the server, where the
+/// cache only carries the embedded first answers, everything counts as fresh.
+fn client_now() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    return js_sys::Date::now();
+    #[cfg(not(target_arch = "wasm32"))]
+    0.0
+}
+
+/// Data for a page's first render, embedded in the server's HTML (see `api::seed`). The
+/// hydrating browser reads it back, so its first render matches the server's; later mounts
+/// get `None` and load as usual. Like any hook, call it unconditionally.
+#[track_caller]
+pub(crate) fn use_seed<T>(seed: impl Fn() -> Option<T>) -> Option<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + Clone + 'static,
+{
+    use_server_cached(seed)
+}
+
+struct Entry<K, V> {
+    key: K,
+    value: V,
+    version: u64,
+    at: f64,
+}
+
+/// Recent answers, shared by every page. Pages remount on navigation; with this, a revisited
+/// view renders its last data at once, and needs no request at all while that data is fresh.
+/// It also lets a hover start loading a weapon before the click (see `prefetch_weapon`), and
+/// makes concurrent loads of the same thing share one request.
+#[derive(Clone, Copy)]
+pub(crate) struct ViewCache {
+    /// The data version (see `Shell`): answers from an older one are stale.
+    version: Signal<u64>,
+    searches: Signal<Vec<Entry<Query, SearchResult>>>,
+    effects: Signal<Vec<Entry<String, api::StatEffects>>>,
+    /// Requests under way, by `flight_key`.
+    in_flight: Signal<Vec<String>>,
+}
+
+/// Removes a request from `in_flight` when it ends, also when its task is cancelled.
+struct Flight(Signal<Vec<String>>, String);
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        if let Ok(mut in_flight) = self.0.try_write() {
+            in_flight.retain(|k| k != &self.1);
+        }
+    }
+}
+
+// Everything reads with `peek`: the cache feeds views but never triggers renders itself.
+impl ViewCache {
+    fn new(version: Signal<u64>) -> Self {
+        Self {
+            version,
+            searches: Signal::new(Vec::new()),
+            effects: Signal::new(Vec::new()),
+            in_flight: Signal::new(Vec::new()),
+        }
+    }
+
+    /// The last answer to `query`, however old.
+    fn search(&self, query: &Query) -> Option<SearchResult> {
+        self.lookup(self.searches, query, false)
+    }
+
+    fn store_search(&self, query: Query, result: SearchResult) {
+        self.remember(self.searches, query, result, *self.version.peek());
+    }
+
+    /// Answers `query` from the cache if fresh, else from the server, sharing a request
+    /// already under way.
+    async fn load_search(self, query: Query) -> Result<SearchResult, ServerFnError> {
+        let flight = format!("search {query:?}");
+        let fetch = api::search(query.clone());
+        self.load(self.searches, query, flight, fetch).await
+    }
+
+    pub(crate) fn effects(&self, weapon: &str) -> Option<api::StatEffects> {
+        self.lookup(self.effects, &weapon.to_owned(), false)
+    }
+
+    pub(crate) fn store_effects(&self, weapon: String, effects: api::StatEffects) {
+        self.remember(self.effects, weapon, effects, *self.version.peek());
+    }
+
+    pub(crate) async fn load_effects(
+        self,
+        weapon: String,
+    ) -> Result<api::StatEffects, ServerFnError> {
+        let flight = format!("effects {weapon}");
+        let fetch = api::stat_effects(weapon.clone());
+        self.load(self.effects, weapon, flight, fetch).await
+    }
+
+    /// Starts loading what a weapon's page shows, with the current filters, so opening it
+    /// right after (a hover is a good hint) shows it without waiting.
+    pub(crate) fn prefetch_weapon(self, filters: Query, slug: String) {
+        let query = Query {
+            weapon: Some(slug.clone()),
+            riven_id: None,
+            ..filters
+        };
+        if self.lookup(self.searches, &query, true).is_none() {
+            // Not tied to the hovered component, which navigation is about to unmount.
+            dioxus::core::spawn_forever(async move {
+                let _ = self.load_search(query).await;
+            });
+        }
+        if self.lookup(self.effects, &slug, true).is_none() {
+            dioxus::core::spawn_forever(async move {
+                let _ = self.load_effects(slug).await;
+            });
+        }
+    }
+
+    async fn load<K, V>(
+        self,
+        entries: Signal<Vec<Entry<K, V>>>,
+        key: K,
+        flight: String,
+        fetch: impl Future<Output = Result<V, ServerFnError>>,
+    ) -> Result<V, ServerFnError>
+    where
+        K: PartialEq + 'static,
+        V: Clone + 'static,
+    {
+        // Wait for a request under way instead of sending the same one again. If it fails,
+        // it leaves no answer and no flight, and this one asks itself.
+        loop {
+            if let Some(value) = self.lookup(entries, &key, true) {
+                return Ok(value);
+            }
+            if !self.in_flight.peek().contains(&flight) {
+                break;
+            }
+            sleep_ms(20).await;
+        }
+        let version = *self.version.peek();
+        let mut in_flight = self.in_flight;
+        in_flight.write().push(flight.clone());
+        let _flight = Flight(in_flight, flight);
+        let result = fetch.await;
+        if let Ok(value) = &result {
+            self.remember(entries, key, value.clone(), version);
+        }
+        result
+    }
+
+    fn lookup<K: PartialEq + 'static, V: Clone + 'static>(
+        &self,
+        entries: Signal<Vec<Entry<K, V>>>,
+        key: &K,
+        fresh_only: bool,
+    ) -> Option<V> {
+        let version = *self.version.peek();
+        let now = client_now();
+        entries
+            .peek()
+            .iter()
+            .find(|e| &e.key == key)
+            .filter(|e| !fresh_only || (e.version == version && now - e.at < FRESH_MS))
+            .map(|e| e.value.clone())
+    }
+
+    fn remember<K: PartialEq + 'static, V: 'static>(
+        &self,
+        mut entries: Signal<Vec<Entry<K, V>>>,
+        key: K,
+        value: V,
+        version: u64,
+    ) {
+        let mut entries = entries.write();
+        entries.retain(|e| e.key != key);
+        entries.insert(
+            0,
+            Entry {
+                key,
+                value,
+                version,
+                at: client_now(),
+            },
+        );
+        entries.truncate(VIEW_CACHE_SIZE);
+    }
+}
+
 #[component]
 fn Shell() -> Element {
     let mut scraper_open = use_signal(|| false);
     let query = use_signal(Query::default);
     use_context_provider(|| query);
+    // Bumped when the server's data changes; cached answers from before are stale.
+    let mut data_version = use_signal(|| 0u64);
+    use_context_provider(|| data_version);
+    use_context_provider(|| ViewCache::new(data_version));
+    use_context_provider(crate::weapons::GridState::new);
 
-    // Serialize the first catalog into the HTML so a fresh browser can render before WASM starts.
-    let mut overview = use_server_future(api::overview)?;
-    // A failed refresh must not take down a page that already has data.
-    let mut loaded = use_signal(|| {
-        overview
-            .peek()
-            .as_ref()
-            .and_then(|r| r.as_ref().ok())
-            .cloned()
+    // Never suspend on data: suspending held back the server response and blanked the page
+    // on every refresh. The catalog comes embedded in the server's HTML when the server has
+    // it at hand (see `api::seed`), else the page frame renders and it fills in on arrival.
+    let seed = use_seed(api::seed::overview);
+    let first = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(seed.clone())));
+    let mut overview = use_resource(move || {
+        let first = first.take();
+        async move {
+            match first {
+                Some(overview) => Ok(overview),
+                None => api::overview().await,
+            }
+        }
     });
+    // A failed refresh must not take down a page that already has data.
+    let mut loaded = use_signal(|| seed);
     use_context_provider(|| loaded);
     use_effect(move || {
-        if let Some(Ok(value)) = &*overview.read() {
+        if let Some(Ok(value)) = &*overview.read()
+            && loaded.peek().as_ref() != Some(value)
+        {
             loaded.set(Some(value.clone()));
         }
     });
 
     // New data while scraping: the count updates right away, the rest refetches on a version
-    // change, so nothing is requested while the data stands still.
+    // change, so nothing is requested while the data stands still. Unchanged polls don't
+    // touch any state, so they don't re-render anything either.
     let mut live = use_resource(api::live_stats);
     let mut stats = use_signal(|| None::<LiveStats>);
-    let mut data_version = use_signal(|| 0u64);
-    use_context_provider(|| data_version);
     use_effect(move || {
-        if let Some(Ok(value)) = &*live.read() {
+        if let Some(Ok(value)) = &*live.read()
+            && stats.peek().as_ref() != Some(value)
+        {
             let changed = stats
                 .peek()
                 .as_ref()
@@ -221,12 +431,12 @@ fn Shell() -> Element {
         }
         if scraper_open() {
             crate::scraper::ScraperPanel {}
-        } else if data.is_some() {
-            Outlet::<Route> {}
         } else if let Some(error) = load_error {
             div { class: "fatal", "Failed to load data: {error}" }
         } else {
-            div { class: "fatal muted", "Loading…" }
+            // Pages start their own requests right away and render placeholders for the
+            // catalog until it is loaded, instead of waiting for it one after the other.
+            Outlet::<Route> {}
         }
     }
 }
@@ -260,21 +470,24 @@ fn MarketRoute() -> Element {
     let loaded = use_context::<Signal<Option<Overview>>>();
     let query = use_context::<Signal<Query>>();
     let data_version = use_context::<Signal<u64>>();
+    let overview = loaded();
+    let unknown = matches!(
+        (&overview, &route),
+        (Some(o), Route::WeaponRoute { slug }) if !o.weapons.iter().any(|w| &w.slug == slug)
+    );
     rsx! {
-        if let Some(overview) = loaded() {
-            if matches!(&route, Route::WeaponRoute { slug } if !overview.weapons.iter().any(|w| &w.slug == slug)) {
-                main { class: "riven-page",
-                    document::Title { "Weapon not found · Riven Tracker" }
-                    h2 { "Weapon not found" }
-                    p {
-                        "This weapon is not in the catalog. Choose a weapon from the search box or "
-                        Link { to: Route::MarketRoute {}, "browse all weapons" }
-                        "."
-                    }
+        if unknown {
+            main { class: "riven-page",
+                document::Title { "Weapon not found · Riven Tracker" }
+                h2 { "Weapon not found" }
+                p {
+                    "This weapon is not in the catalog. Choose a weapon from the search box or "
+                    Link { to: Route::MarketRoute {}, "browse all weapons" }
+                    "."
                 }
-            } else {
-                MarketPage { key: "{route}", overview, query, data_version, route }
             }
+        } else {
+            MarketPage { key: "{route}", overview, query, data_version, route }
         }
     }
 }
@@ -293,19 +506,35 @@ fn RivenPageContent(id: String, auction: String) -> Element {
     let include_unfit = use_signal(|| false);
     let include_loose = use_signal(|| false);
     let mut similar_tab = use_signal(|| false);
+    let (seed_id, seed_auction) = (id.clone(), auction.clone());
+    let seed = use_seed(move || {
+        api::seed::riven_detail(
+            &seed_id,
+            Some(seed_auction.as_str()).filter(|a| !a.is_empty()),
+        )
+    });
+    // The embedded answer is for the default options; it stands in for their first request.
+    let first = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(seed.clone())));
     let mut detail = use_resource(move || {
         version.read();
         let legacy = include_legacy();
         let unfit = include_unfit();
         let loose = include_loose();
+        let first = first.take().filter(|_| !(legacy || unfit || loose));
         let id = id.clone();
         let auction = (!auction.is_empty()).then(|| auction.clone());
-        async move { api::riven_detail(id, auction, legacy, unfit, loose).await }
+        async move {
+            match first {
+                Some(detail) => Ok(detail),
+                None => api::riven_detail(id, auction, legacy, unfit, loose).await,
+            }
+        }
     });
+    let shown = detail.read().clone().or_else(|| seed.clone().map(Ok));
     rsx! {
         main { class: "riven-page",
             crate::scan::ScanNotice { target: id_for_notice, matched: true }
-            match &*detail.read() {
+            match &shown {
                 None => rsx! { p { role: "status", "Loading riven…" } },
                 Some(Err(error)) => rsx! {
                     p { class: "error", "Could not load this riven: {error}" }
@@ -621,72 +850,124 @@ fn active_filters(q: &Query) -> usize {
 
 #[component]
 fn MarketPage(
-    overview: Overview,
+    overview: Option<Overview>,
     query: Signal<Query>,
     data_version: Signal<u64>,
     route: Route,
 ) -> Element {
     let requested = query_for_route(query(), &route);
     let request_route = route.clone();
-    // Hydrate the initial search instead of requesting it again after downloading WASM.
-    // Keep the query in the serialized value too; hook side effects aren't hydrated.
-    let results = use_server_future(move || {
+    // A plain resource, not a server future: suspending here held back the whole server
+    // response until the search finished, and blanked the page on every filter change or
+    // live update. Now the frame renders first and the results stream in. The query rides
+    // along with the result so the page knows which filters the shown results belong to.
+    let cache = use_context::<ViewCache>();
+    let seed_route = route.clone();
+    let seed =
+        use_seed(move || api::seed::search(&query_for_route(query.peek().clone(), &seed_route)));
+    use_hook(|| {
+        if let Some(result) = seed {
+            cache.store_search(requested.clone(), result);
+        }
+    });
+    let results = use_resource(move || {
         data_version.read();
         let q = query_for_route(query(), &request_route);
         async move {
-            let result = api::search(q.clone()).await;
+            let result = cache.load_search(q.clone()).await;
             (q, result)
         }
-    })?;
-    let shown_query = results.read().as_ref().map(|(q, _)| q.clone());
-
-    let selected = requested
-        .weapon
+    });
+    // What to show: the fetched result if it answers the current query, else the cached
+    // answer to it, else the previous result (dimmed below) while the new one loads.
+    let current = match results.read().clone() {
+        Some((q, r)) if q == requested => Some((q, r)),
+        previous => cache
+            .search(&requested)
+            .map(|r| (requested.clone(), Ok(r)))
+            .or(previous),
+    };
+    let shown_query = current.as_ref().map(|(q, _)| q.clone());
+    let server_time = current
         .as_ref()
-        .and_then(|slug| overview.weapons.iter().find(|w| &w.slug == slug).cloned());
-    let loading = results.pending() && shown_query.as_ref() != Some(&requested);
+        .and_then(|(_, r)| r.as_ref().ok())
+        .map(|r| r.server_time);
+
+    let selected = requested.weapon.as_ref().and_then(|slug| {
+        overview
+            .as_ref()
+            .and_then(|o| o.weapons.iter().find(|w| &w.slug == slug).cloned())
+    });
+    let weapons = overview
+        .as_ref()
+        .map(|o| o.weapons.clone())
+        .unwrap_or_default();
+    // Live updates refresh in place; only a changed search dims the stale results.
+    let loading = results.pending() && shown_query.as_ref().is_some_and(|q| q != &requested);
     let riven_search = requested.riven_id.clone();
     // Only matters on narrow screens, where the filters would otherwise push the results down.
     let mut filters_open = use_signal(|| false);
     let filter_count = active_filters(&query.read());
 
-    let body = match &*results.read() {
-        Some((_, Ok(r))) => rsx! {
-            if let Some(id) = riven_search.clone() {
-                div { class: "id-banner",
-                    span { class: "muted", "Riven id" }
-                    code { "{id}" }
-                    span { class: "muted small",
-                        if r.total + r.gone_total == 0 {
-                            "no riven with this id"
-                        } else {
-                            "select a riven for its history and similar listings"
-                        }
-                    }
-                    Link {
-                        to: Route::MarketRoute {},
-                        class: "picker-clear",
-                        title: "All weapons",
-                        "×"
+    let head = if let Some(id) = riven_search.clone() {
+        let matches = current
+            .as_ref()
+            .and_then(|(_, r)| r.as_ref().ok())
+            .map(|r| r.total + r.gone_total);
+        rsx! {
+            div { class: "id-banner",
+                span { class: "muted", "Riven id" }
+                code { "{id}" }
+                span { class: "muted small",
+                    match matches {
+                        None => "searching…",
+                        Some(0) => "no riven with this id",
+                        Some(_) => "select a riven for its history and similar listings",
                     }
                 }
-            } else if let Some(w) = selected.clone() {
-                WeaponHeader { weapon: w, now: r.server_time }
-            } else {
-                WeaponGrid { weapons: overview.weapons.clone() }
+                Link {
+                    to: Route::MarketRoute {},
+                    class: "picker-clear",
+                    title: "All weapons",
+                    "×"
+                }
             }
-            {rsx! { Results {
-                key: "{shown_query:?}",
-                search_query: shown_query.clone().unwrap_or_else(|| requested.clone()),
+        }
+    } else if let Some(w) = selected.clone() {
+        rsx! { WeaponHeader { weapon: w, now: server_time } }
+    } else if requested.weapon.is_some() {
+        rsx! { div { class: "skeleton skeleton-header", aria_hidden: "true" } }
+    } else if let Some(o) = &overview {
+        rsx! { WeaponGrid { weapons: o.weapons.clone() } }
+    } else {
+        rsx! {
+            div { class: "skeleton-grid", aria_hidden: "true",
+                for i in 0..12 { div { key: "{i}", class: "skeleton skeleton-card" } }
+            }
+        }
+    };
+
+    let body = match &current {
+        Some((shown, Ok(r))) => rsx! {
+            Results {
+                key: "{shown:?}",
+                search_query: shown.clone(),
                 result: r.clone(),
-                show_weapon: selected.is_none(),
-                weapons: overview.weapons.clone(),
+                show_weapon: requested.weapon.is_none(),
+                weapons,
                 id_search: riven_search.is_some(),
-                weapon: selected.as_ref().map(|w| w.slug.clone()),
-            } }}
+                weapon: requested.weapon.clone(),
+            }
         },
         Some((_, Err(e))) => rsx! { div { class: "error", "Search failed: {e}" } },
-        None => rsx! { div { class: "muted", "Searching…" } },
+        None => rsx! {
+            div { class: "results-skeleton", role: "status", aria_label: "Loading listings",
+                if riven_search.is_none() {
+                    div { class: "skeleton skeleton-chart" }
+                }
+                for i in 0..6 { div { key: "{i}", class: "skeleton skeleton-row" } }
+            }
+        },
     };
 
     rsx! {
@@ -705,15 +986,25 @@ fn MarketPage(
                     }
                     span { class: "filters-toggle-icon", if filters_open() { "▴" } else { "▾" } }
                 }
-                Filters {
-                    overview: overview.clone(),
-                    query,
-                    weapon: requested.weapon.clone(),
-                    now: results.read().as_ref().and_then(|(_, r)| r.as_ref().ok()).map(|r| r.server_time),
+                if let Some(o) = overview.clone() {
+                    Filters {
+                        overview: o,
+                        query,
+                        weapon: requested.weapon.clone(),
+                        now: server_time,
+                    }
+                } else {
+                    div { class: "filters", aria_hidden: "true",
+                        for i in 0..6 { div { key: "{i}", class: "skeleton skeleton-filter" } }
+                    }
                 }
             }
-            section { class: if loading { "content loading" } else { "content" },
-                {body}
+            section { class: "content",
+                {head}
+                div { class: if loading { "results loading" } else { "results" },
+                    aria_busy: loading,
+                    {body}
+                }
             }
         }
     }
@@ -742,6 +1033,9 @@ fn Filters(
 ) -> Element {
     let mut query = query;
     let q = query();
+    // The slider's position while dragging, before it's applied.
+    let mut quality_drag = use_signal(|| None::<f64>);
+    let quality = quality_drag().unwrap_or(q.min_quality);
 
     let class = weapon
         .as_ref()
@@ -934,17 +1228,22 @@ fn Filters(
                 }
                 label { class: "slider-label",
                     span { "Min roll quality" }
-                    span { class: "slider-value", "{(q.min_quality * 100.0).round()}%" }
+                    span { class: "slider-value", "{(quality * 100.0).round()}%" }
                 }
+                // Searches when released, not for every step passed while dragging.
                 input {
                     r#type: "range",
                     aria_label: "Min roll quality",
                     min: "0",
                     max: "100",
                     step: "5",
-                    value: "{(q.min_quality * 100.0).round()}",
+                    value: "{(quality * 100.0).round()}",
                     oninput: move |e| {
+                        quality_drag.set(Some(e.value().parse::<f64>().unwrap_or(0.0) / 100.0));
+                    },
+                    onchange: move |e| {
                         let v = e.value().parse::<f64>().unwrap_or(0.0) / 100.0;
+                        quality_drag.set(None);
                         query.with_mut(|q| q.min_quality = v);
                     },
                 }

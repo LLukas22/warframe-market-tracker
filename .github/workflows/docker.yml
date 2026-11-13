@@ -38,7 +38,9 @@ jobs:
           curl -fsSL "https://github.com/DioxusLabs/dioxus/releases/download/v$DX_VERSION/dx-$(uname -m)-unknown-linux-gnu.tar.gz" \
             | tar -xz -C ~/.local/bin dx
 
-      - run: dx bundle --web --release
+      - run: sudo apt-get install -y --no-install-recommends brotli
+
+      - run: scripts/bundle-web.sh
 
       # Artifacts drop the executable bit, a tarball keeps it.
       - run: tar -cf app.tar -C target/dx/warframe-market-tracker/release/web .

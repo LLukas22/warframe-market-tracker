@@ -97,6 +97,12 @@ fn identifiable(mut gram: Vec<Vec<f64>>) -> Vec<bool> {
 }
 
 pub fn fit(x: &[Vec<f64>], y: &[f64]) -> Option<Fit> {
+    fit_with(x, y, true)
+}
+
+/// With `uncertainty` false, only what predictions need: the cross-validation folds use
+/// nothing else, and the standard errors and identifiability cost several p³ steps each.
+fn fit_with(x: &[Vec<f64>], y: &[f64], uncertainty: bool) -> Option<Fit> {
     let (n, p) = (x.len(), x.first()?.len());
     let means: Vec<f64> = (0..p)
         .map(|j| x.iter().map(|row| row[j]).sum::<f64>() / n as f64)
@@ -134,10 +140,14 @@ pub fn fit(x: &[Vec<f64>], y: &[f64]) -> Option<Fit> {
     let mut result = Fit {
         coefficients,
         standard_errors: Vec::new(),
-        identifiable: identifiable(gram.clone()),
+        identifiable: Vec::new(),
         intercept,
         means,
     };
+    if !uncertainty {
+        return Some(result);
+    }
+    result.identifiable = identifiable(gram.clone());
 
     let hat = product(&inverse, &gram);
     let effective_parameters: f64 = (0..p).map(|i| hat[i][i]).sum();
@@ -162,7 +172,7 @@ pub fn holdout_r2(x: &[Vec<f64>], y: &[f64]) -> Option<f64> {
         let train = |i: &usize| i % FOLDS != fold;
         let train_x: Vec<Vec<f64>> = (0..x.len()).filter(train).map(|i| x[i].clone()).collect();
         let train_y: Vec<f64> = (0..y.len()).filter(train).map(|i| y[i]).collect();
-        let model = fit(&train_x, &train_y)?;
+        let model = fit_with(&train_x, &train_y, false)?;
         let baseline = train_y.iter().sum::<f64>() / train_y.len() as f64;
         for i in (0..x.len()).filter(|i| i % FOLDS == fold) {
             missed += (y[i] - model.predict(&x[i])).powi(2);
