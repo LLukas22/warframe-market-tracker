@@ -29,7 +29,7 @@ use crate::pipeline::Pipeline;
 use crate::store::{
     Meta, ParquetSink, PersistedSweep, RawPage, RawResponse, State, Store, Verified,
 };
-use crate::tracking::{PAGE_CAP, Tracker};
+use crate::tracking::Tracker;
 use crate::wfm::{self, Client, Weapon};
 
 const RECENT: usize = 50;
@@ -556,13 +556,16 @@ impl Engine {
         }
         // Null buyouts sort before expensive buyouts on descending pages. On popular
         // weapons they can occupy the entire cap, starving price analysis of good rolls.
-        let needs_buyouts = raw.pages.iter().any(|page| {
-            page.sort_by == "price_desc"
-                && wfm::parse_auctions(&page.body).is_ok_and(|(auctions, skipped)| {
-                    auctions.len() + skipped >= PAGE_CAP
-                        && auctions.iter().any(|a| a.buyout_price.is_none())
-                })
-        });
+        // Capped responses can contain only 98–99 entries. Only proven complete
+        // coverage lets us skip supplementation when descending pages contain null buyouts.
+        let coverage = crate::pipeline::parse_pages(&raw.pages)?.coverage;
+        let needs_buyouts = !coverage.is_complete()
+            && raw.pages.iter().any(|page| {
+                page.sort_by == "price_desc"
+                    && wfm::parse_auctions(&page.body).is_ok_and(|(auctions, _)| {
+                        auctions.iter().any(|a| a.buyout_price.is_none())
+                    })
+            });
         if fetch_error.is_none() && needs_buyouts {
             // The API separates direct sales from bidding auctions with buyouts.
             for policy in ["direct", "with"] {
@@ -1018,6 +1021,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracking::PAGE_CAP;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -1303,6 +1307,13 @@ mod tests {
 
     #[tokio::test]
     async fn capped_null_buyouts_fetch_direct_sales_without_claiming_full_coverage() -> Result<()> {
+        for page_size in [98, 99, PAGE_CAP] {
+            check_null_buyout_supplement(page_size).await?;
+        }
+        Ok(())
+    }
+
+    async fn check_null_buyout_supplement(page_size: usize) -> Result<()> {
         let root =
             std::env::temp_dir().join(format!("wfmt-direct-{}", crate::dataset::unique_id()));
         let store = Store::new(root.clone());
@@ -1317,7 +1328,11 @@ mod tests {
             &include_bytes!("../tests/fixtures/kulstar_auctions.json.gz")[..],
         )
         .read_to_string(&mut body)?;
-        let cheap: serde_json::Value = serde_json::from_str(&body)?;
+        let mut cheap: serde_json::Value = serde_json::from_str(&body)?;
+        cheap["payload"]["auctions"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(page_size);
         let mut bids = cheap.clone();
         for (i, auction) in bids["payload"]["auctions"]
             .as_array_mut()
@@ -1409,7 +1424,7 @@ mod tests {
             "a short direct-sale page cannot remove unseen bidding auctions"
         );
         assert!(!parsed.coverage.no_buyout);
-        assert_eq!(parsed.auctions.len(), 202);
+        assert_eq!(parsed.auctions.len(), page_size * 2 + 2);
         fs::remove_dir_all(root)?;
         Ok(())
     }

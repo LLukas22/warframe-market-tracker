@@ -768,3 +768,104 @@ fn feed_price_withdrawal_survives_restart_and_restoration() -> Result<()> {
     assert_eq!(stored[2]["buyout_price"], "700");
     Ok(())
 }
+
+#[test]
+fn older_edits_cannot_replace_prices_from_feeds_or_sweeps_after_restart() -> Result<()> {
+    let root = Temp::new();
+    let store = Store::new(root.0.clone());
+    let weapons = wfm::parse_weapons(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
+    let cutoff = "2026-10-22T00:00:00Z".parse()?;
+    let open_pipeline = || -> Result<Pipeline> {
+        Ok(Pipeline {
+            normalizer: Normalizer::new(cutoff),
+            registry: Registry::open(store.registry_path())?,
+            tracker: Tracker::open(store.seen_dir()),
+        })
+    };
+    let mut pipeline = open_pipeline()?;
+    let mut sink = ParquetSink::new(root.0.join("parquet"));
+    let start: chrono::DateTime<Utc> = "2026-11-01T10:00:00Z".parse()?;
+    let raw = |minutes, price: i64, bid: i64, updated: &str, feed| {
+        let mut auction = fixture();
+        auction["id"] = "watched".into();
+        auction["buyout_price"] = price.into();
+        auction["top_bid"] = bid.into();
+        auction["updated"] = updated.into();
+        auction["item"]["weapon_url_name"] = "kulstar".into();
+        let body = serde_json::json!({"payload":{"auctions":[auction]}}).to_string();
+        let sorts = if feed {
+            vec![wfmt_types::FEED_POPULAR]
+        } else {
+            vec!["price_asc", "price_desc"]
+        };
+        RawResponse::new(
+            start + TimeDelta::minutes(minutes),
+            if feed {
+                wfmt_types::FEED_POPULAR
+            } else {
+                "kulstar"
+            }
+            .into(),
+            "pc".into(),
+            sorts
+                .into_iter()
+                .map(|sort| RawPage {
+                    sort_by: sort.into(),
+                    buyout_policy: None,
+                    body: body.clone(),
+                })
+                .collect(),
+            vec![],
+        )
+    };
+    let latest = "2026-11-01T09:59:00Z";
+    let older = "2026-11-01T09:00:00Z";
+    pipeline.process(
+        &weapons[0],
+        &raw(0, 600i64, 100i64, latest, false),
+        &mut sink,
+    )?;
+    sink.flush()?;
+    drop(pipeline);
+    let mut pipeline = open_pipeline()?;
+
+    // A later fetch time does not make an older edit authoritative, in either source.
+    for (minutes, feed) in [(3, true), (6, false), (66, true)] {
+        let stale = raw(minutes, 1000, 50, older, feed);
+        let summary = if feed {
+            pipeline.process_feed(&weapons, &stale, &mut sink)?
+        } else {
+            pipeline.process(&weapons[0], &stale, &mut sink)?
+        };
+        assert_eq!(summary.auctions, 0);
+        assert_eq!(summary.gone, 0);
+        assert!(sink.auctions.is_empty());
+        let seen: std::collections::HashMap<String, wfmt_scraper::tracking::Seen> =
+            serde_json::from_slice(&pipeline.tracker.snapshot("kulstar")?)?;
+        assert_eq!(seen["watched"].buyout, Some(600));
+        assert_eq!(seen["watched"].updated, Some(latest.parse()?));
+        assert_eq!(seen["watched"].row_at, Some(start));
+    }
+    // Bids can change at the same edit time, and genuinely newer edits must still pass.
+    assert_eq!(
+        pipeline
+            .process_feed(&weapons, &raw(69, 600, 200, latest, true), &mut sink,)?
+            .auctions,
+        1
+    );
+    assert_eq!(sink.auctions.last().unwrap().top_bid, Some(200));
+    assert_eq!(
+        pipeline
+            .process(
+                &weapons[0],
+                &raw(72, 500, 200, "2026-11-01T11:11:00Z", false),
+                &mut sink,
+            )?
+            .auctions,
+        1
+    );
+    assert_eq!(sink.auctions.last().unwrap().buyout_price, Some(500));
+    sink.flush()?;
+    assert_eq!(rows(&root.0, "auctions"), 3);
+    Ok(())
+}

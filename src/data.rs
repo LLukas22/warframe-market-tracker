@@ -559,7 +559,12 @@ fn auction_price(a: &Auction) -> Option<i64> {
     price_of(a.buyout_price, a.top_bid, a.starting_price)
 }
 
-/// A map from dense indexes (auctions, rivens) to an optional price, for one chart bucket.
+/// Orders the copies of one riven: a relist is newer than the auction it replaced.
+fn recency(a: &Auction) -> (i64, i64, i64, &str) {
+    (a.created, a.first_seen, a.last_seen, &a.id)
+}
+
+/// A map from dense indexes (auctions, rivens) to an optional value, for one chart bucket.
 /// A vector with a list of the slots in use, so a bucket costs what it holds, not the size.
 struct BucketSlots {
     slots: Vec<i64>,
@@ -588,14 +593,6 @@ impl BucketSlots {
 
     fn set(&mut self, index: u32, price: Option<i64>) {
         *self.slot(index) = price.unwrap_or(Self::NONE);
-    }
-
-    /// Keeps the lower of the present price and `price`.
-    fn min(&mut self, index: u32, price: i64) {
-        let slot = self.slot(index);
-        if *slot == Self::EMPTY || *slot == Self::NONE || price < *slot {
-            *slot = price;
-        }
     }
 
     /// The entries in insertion order, leaving the map empty.
@@ -1177,20 +1174,39 @@ mod storage_tests {
             .observations
             .push(Observation::new(5000, unchanged, Some(100), true));
         inner.finish_load();
-        for (price_changed, owner_changed, expected) in [
-            (false, false, 61),
-            (true, false, 58),
-            (false, true, 58),
-            (true, true, 57),
-        ] {
-            let query = Query {
-                price_changed,
-                owner_changed,
-                ..all_time()
-            };
-            let result = inner.search(&query);
-            assert_eq!((result.total, result.gone_total), (expected, expected));
-            for gone in [false, true] {
+        // First every riven is listed again (its old auction was relisted, not sold), then
+        // every relist disappears too.
+        for gone in [false, true] {
+            if gone {
+                let relists: Vec<u32> = (0..inner.auctions.len() as u32)
+                    .filter(|&a| inner.auctions[a as usize].id.ends_with("-new"))
+                    .collect();
+                for a in relists {
+                    inner.auctions[a as usize].gone = Some((4000, "missing".into()));
+                    let price = auction_price(&inner.auctions[a as usize]);
+                    inner.gone.push(GoneEvent {
+                        t: 4000,
+                        auction: a,
+                        price,
+                        direct_sell: true,
+                    });
+                }
+                inner.finish_load();
+            }
+            for (price_changed, owner_changed, expected) in [
+                (false, false, 61),
+                (true, false, 58),
+                (false, true, 58),
+                (true, true, 57),
+            ] {
+                let query = Query {
+                    price_changed,
+                    owner_changed,
+                    ..all_time()
+                };
+                let result = inner.search(&query);
+                let totals = if gone { (0, expected) } else { (expected, 0) };
+                assert_eq!((result.total, result.gone_total), totals);
                 let first = inner.search_page(&query, 0, Some(gone));
                 let second = inner.search_page(&query, 50, Some(gone));
                 let rows: Vec<_> = if gone {
@@ -1199,6 +1215,7 @@ mod storage_tests {
                     first.listings.into_iter().chain(second.listings).collect()
                 };
                 assert_eq!(rows.len(), expected);
+                assert!(rows.iter().all(|l| l.auction_id.ends_with("-new")));
                 assert_eq!(
                     rows.iter()
                         .map(|l| &l.riven_id)
@@ -1210,18 +1227,14 @@ mod storage_tests {
                     assert!(rows.iter().all(|l| l.riven_id.starts_with("both")));
                 }
             }
+            let id = inner.search(&Query {
+                riven_id: Some("same".into()),
+                price_changed: true,
+                owner_changed: true,
+                ..all_time()
+            });
+            assert_eq!(id.total + id.gone_total, 1, "ID searches ignore filters");
         }
-        let id = inner.search(&Query {
-            riven_id: Some("same".into()),
-            price_changed: true,
-            owner_changed: true,
-            ..all_time()
-        });
-        assert_eq!(
-            (id.total, id.gone_total),
-            (1, 1),
-            "ID searches ignore filters"
-        );
 
         // A change within one auction is sufficient, and refresh rebuilds the cached flags.
         inner
@@ -1234,7 +1247,7 @@ mod storage_tests {
                     price_changed: true,
                     ..all_time()
                 })
-                .total,
+                .gone_total,
             59
         );
         inner.observations.pop();
@@ -1245,7 +1258,7 @@ mod storage_tests {
                     price_changed: true,
                     ..all_time()
                 })
-                .total,
+                .gone_total,
             58
         );
     }
@@ -1429,7 +1442,67 @@ mod storage_tests {
     }
 
     #[test]
-    fn history_uses_latest_price_per_copy_before_choosing_cheapest() {
+    fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
+        let mut inner = Inner::default();
+        let weapon = inner.intern_weapon("w", "W", "rifle");
+        inner.weapons[weapon as usize].last_scrape = 3000;
+        // Still current, though no longer seen (capped pages), and cheaper.
+        let old = add_auction(&mut inner, weapon, "old", 100, 1000);
+        let new = add_auction(&mut inner, weapon, "new", 300, 3000);
+        let riven = inner.auctions[old as usize].riven;
+        let new_riven = inner.auctions[new as usize].riven;
+        inner.riven_auctions[new_riven as usize].clear();
+        inner.auctions[new as usize].riven = riven;
+        inner.riven_auctions[riven as usize].push(new);
+        inner.auctions[old as usize].created = 500;
+        inner.auctions[new as usize].created = 2500;
+        inner.finish_load();
+        let query = Query {
+            weapon: Some("w".into()),
+            ..all_time()
+        };
+        let result = inner.search(&query);
+        assert_eq!(result.total, 1);
+        assert_eq!(result.listings[0].auction_id, "new");
+        assert_eq!(result.listings[0].copies, 2);
+        assert_eq!(result.history.last().unwrap().min, 300);
+        // The old copy doesn't stand in when the new one misses a filter.
+        let cheap = Query {
+            max_price: Some(200),
+            ..query.clone()
+        };
+        assert_eq!(inner.search(&cheap).total, 0);
+        let w = &inner.overview().weapons[0];
+        assert_eq!((w.listings, w.min_price), (1, Some(300)));
+
+        // Once the old auction is gone, it was relisted rather than sold.
+        inner.auctions[old as usize].gone = Some((2000, "missing".into()));
+        inner.gone.push(GoneEvent {
+            t: 2000,
+            auction: old,
+            price: Some(100),
+            direct_sell: true,
+        });
+        inner.finish_load();
+        let result = inner.search(&query);
+        assert_eq!((result.total, result.gone_total), (1, 0));
+        assert!(result.history.iter().all(|h| h.gone_count == 0));
+        // When the relist disappears too, it is the one shown as gone.
+        inner.auctions[new as usize].gone = Some((4000, "missing".into()));
+        inner.gone.push(GoneEvent {
+            t: 4000,
+            auction: new,
+            price: Some(300),
+            direct_sell: true,
+        });
+        inner.finish_load();
+        let result = inner.search(&query);
+        assert_eq!((result.total, result.gone_total), (0, 1));
+        assert_eq!(result.gone[0].auction_id, "new");
+    }
+
+    #[test]
+    fn history_uses_latest_price_of_the_newest_copy() {
         let mut inner = Inner::default();
         let weapon = inner.intern_weapon("w", "W", "rifle");
         let a = add_auction(&mut inner, weapon, "a", 100, 1000);
@@ -2320,6 +2393,32 @@ impl Inner {
         a.gone.as_ref().is_none_or(|(t, _)| a.last_seen > *t)
     }
 
+    fn newer(&self, a: u32, b: u32) -> bool {
+        recency(&self.auctions[a as usize]) > recency(&self.auctions[b as usize])
+    }
+
+    /// Each riven's newest current auction, or `u32::MAX`. A relist replaces the auction
+    /// before it, so only this copy stands for the riven, whatever the others ask.
+    fn newest_current(&self, rows: &[Row]) -> Vec<u32> {
+        let mut newest = vec![u32::MAX; self.rivens.len()];
+        for (index, r) in rows.iter().enumerate() {
+            if !r.has(Row::CURRENT) {
+                continue;
+            }
+            let slot = &mut newest[r.riven as usize];
+            if *slot == u32::MAX || self.newer(index as u32, *slot) {
+                *slot = index as u32;
+            }
+        }
+        newest
+    }
+
+    /// The auction disappeared but its riven is listed again in a newer one: relisted, not sold.
+    fn superseded(&self, newest: &[u32], auction: u32) -> bool {
+        let n = newest[self.auctions[auction as usize].riven as usize];
+        n != u32::MAX && n != auction && self.newer(n, auction)
+    }
+
     fn thumb(&self, slug: &str) -> Option<String> {
         let index = *self.weapon_index.get(slug)?;
         self.weapons[index as usize].thumb.clone()
@@ -2349,12 +2448,14 @@ impl Inner {
             .collect();
         assert!(class_names.len() <= 128, "class bitmask overflow");
         let mut classes = vec![0u128; self.attrs.len()];
-        for a in &self.auctions {
+        let newest = self.newest_current(&self.rows());
+        for (index, a) in self.auctions.iter().enumerate() {
             let class = 1u128 << weapon_class[a.weapon as usize];
             for attr in &a.attrs {
                 classes[attr.attr as usize] |= class;
             }
-            if !self.is_current(a) {
+            // One listing per riven: its newest current copy.
+            if newest[a.riven as usize] != index as u32 {
                 continue;
             }
             listings[a.weapon as usize] += 1;
@@ -2370,11 +2471,9 @@ impl Inner {
         }
         let week_ago = now_ms() - WEEK_MS;
         let mut gone_prices: Vec<Vec<i64>> = vec![Vec::new(); self.weapons.len()];
-        for g in self
-            .gone
-            .iter()
-            .filter(|g| g.t >= week_ago && self.gone_valid(g))
-        {
+        for g in self.gone.iter().filter(|g| {
+            g.t >= week_ago && self.gone_valid(g) && !self.superseded(&newest, g.auction)
+        }) {
             let a = &self.auctions[g.auction as usize];
             if let Some(p) = g.price.filter(|p| *p >= 10)
                 && !self.price_outlier(a.weapon, g.price)
@@ -2637,30 +2736,24 @@ impl Inner {
                 .collect(),
         };
 
-        // Current listings, one per riven: the cheapest copy. Indexed by riven rather than
-        // hashed: this visits every matching auction, ~100k for an all-weapon search.
+        // Current listings, one per riven: its newest copy, which must match by itself; an
+        // older copy it replaced never stands in, even when that one is cheaper or matches.
+        // Indexed by riven rather than hashed: this visits every auction, ~100k.
         let price = |i: u32| rows[i as usize].price().unwrap_or(0);
-        let mut best = vec![u32::MAX; self.rivens.len()];
-        let mut best_rivens = Vec::new();
-        for (index, (r, m)) in rows.iter().zip(&matching).enumerate() {
-            if !*m || !r.has(Row::CURRENT) || !Self::price_ok(q, r.price(), r.has(Row::DIRECT)) {
-                continue;
-            }
-            let slot = &mut best[r.riven as usize];
-            if *slot == u32::MAX {
-                best_rivens.push(r.riven);
-                *slot = index as u32;
-            } else if price(index as u32) < price(*slot) {
-                *slot = index as u32;
-            }
-        }
+        let newest = self.newest_current(&rows);
         // Invalid prices are hidden unless asked for. An id search shows everything, and the
         // charts below only count them for that one riven: they'd swamp any analysis.
         let id_search = q.riven_id.is_some();
         let show_outliers = q.include_outliers || id_search;
-        let (mut current, hidden): (Vec<u32>, Vec<u32>) = best_rivens
+        let (mut current, hidden): (Vec<u32>, Vec<u32>) = newest
             .iter()
-            .map(|&riven| best[riven as usize])
+            .copied()
+            .filter(|&i| {
+                i != u32::MAX && matching[i as usize] && {
+                    let r = &rows[i as usize];
+                    Self::price_ok(q, r.price(), r.has(Row::DIRECT))
+                }
+            })
             .partition(|&i| show_outliers || !rows[i as usize].outlier());
         let outliers_hidden = hidden.len();
         let total = current.len();
@@ -2713,7 +2806,8 @@ impl Inner {
         };
         let in_period = |t: i64| start.is_none_or(|s| t >= s) && end.is_none_or(|e| t < e);
 
-        // Disappeared listings (≈ sold), newest first, one per riven.
+        // Disappeared listings (≈ sold), newest first, one per riven. A relisted riven
+        // wasn't sold: its old auction stays out.
         let gone_events: Vec<&GoneEvent> = self
             .gone
             .iter()
@@ -2721,6 +2815,7 @@ impl Inner {
                 in_period(g.t)
                     && matching[g.auction as usize]
                     && self.gone_valid(g)
+                    && !self.superseded(&newest, g.auction)
                     && Self::price_ok(q, g.price, g.direct_sell)
             })
             .collect();
@@ -2767,7 +2862,7 @@ impl Inner {
         let span_start = observations.first().map(|o| o.t).or(start).unwrap_or(now);
         let bucket_hours = bucket_hours_for(end.unwrap_or(now).min(now) - span_start);
 
-        // Price history: per bucket, the latest price of every matching riven (cheapest copy),
+        // Price history: per bucket, the latest price of every matching riven (newest copy),
         // plus the last prices of rivens that disappeared in that bucket.
         let bucket = i64::from(bucket_hours) * 3_600_000;
         let bucket_of = |t: i64| t - t.rem_euclid(bucket);
@@ -2783,18 +2878,28 @@ impl Inner {
         let mut history = Vec::new();
         let mut current_bucket = None;
         // Keep every copy until the bucket closes; its latest observation can rise or
-        // cease to match the price filter. Only then choose the cheapest per riven.
+        // cease to match the price filter. Only then let the newest copy seen in the
+        // bucket speak for its riven: a relist replaces the old price, and if the new one
+        // falls outside the filter, the riven does too.
         // Indexed by auction and riven rather than hashed, since a long period visits
         // a million observations; `touched` lists the slots to read and reset.
         let mut prices = BucketSlots::new(self.auctions.len());
-        let mut cheapest = BucketSlots::new(self.rivens.len());
+        // Per riven, the position of its newest copy in `seen`.
+        let mut newest_seen = BucketSlots::new(self.rivens.len());
+        let mut seen: Vec<(u32, Option<i64>)> = Vec::new();
         let mut flush = |t: i64, prices: &mut BucketSlots| {
-            for (auction, price) in prices.drain() {
-                if let Some(price) = price {
-                    cheapest.min(rows[auction as usize].riven, price);
+            seen.clear();
+            seen.extend(prices.drain());
+            for (pos, &(auction, _)) in seen.iter().enumerate() {
+                let slot = newest_seen.slot(rows[auction as usize].riven);
+                if *slot == BucketSlots::EMPTY || self.newer(auction, seen[*slot as usize].0) {
+                    *slot = pos as i64;
                 }
             }
-            let mut v: Vec<i64> = cheapest.drain().filter_map(|(_, p)| p).collect();
+            let mut v: Vec<i64> = newest_seen
+                .drain()
+                .filter_map(|(_, pos)| seen[pos? as usize].1)
+                .collect();
             if v.is_empty() {
                 return;
             }
@@ -3001,7 +3106,7 @@ impl Inner {
             copies
                 .iter()
                 .map(|&i| &self.auctions[i as usize])
-                .max_by(|a, b| a.last_seen.cmp(&b.last_seen).then(a.id.cmp(&b.id)))?
+                .max_by(|a, b| recency(a).cmp(&recency(b)))?
         };
         let (similar, similar_total, comparisons_hidden) =
             self.similar_to(selected, include_legacy, include_unfit, include_loose);

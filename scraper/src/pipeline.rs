@@ -117,6 +117,9 @@ impl Pipeline {
             present,
         } = parse_pages(&raw.pages)?;
         coverage.incomplete |= !raw.complete;
+        // Preserve presence/coverage, but never publish an older edit as the latest state
+        // or let its stale price influence admission of new listings.
+        auctions.retain(|(auction, _)| !self.tracker.is_stale(&weapon.slug, auction));
         // Count the full response for coverage and presence first: discarding unpriced rows
         // must not turn a capped page into proof that missing auctions have disappeared.
         // Deduplication happens in parse_pages, so listings returned by several searches
@@ -196,7 +199,8 @@ impl Pipeline {
             let fresh: Vec<(Auction, String)> = listings
                 .into_iter()
                 .filter(|(a, _)| {
-                    (a.market_price().is_some() || self.tracker.contains(&slug, &a.id))
+                    !self.tracker.is_stale(&slug, a)
+                        && (a.market_price().is_some() || self.tracker.contains(&slug, &a.id))
                         && self.tracker.needs_row(&slug, a, raw.scraped_at)
                 })
                 .collect();

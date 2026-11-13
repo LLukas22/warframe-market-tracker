@@ -186,6 +186,15 @@ impl Tracker {
         self.weapon(weapon).contains_key(auction_id)
     }
 
+    /// An older API edit may arrive later through another search or a cached feed.
+    /// Equal timestamps remain eligible: bids can change without updating the edit time.
+    pub fn is_stale(&mut self, weapon: &str, auction: &Auction) -> bool {
+        self.weapon(weapon)
+            .get(&auction.id)
+            .and_then(|s| s.updated)
+            .is_some_and(|updated| auction.updated < updated)
+    }
+
     /// Whether a feed sighting is worth a row: the listing is new or edited, has a new bid, or
     /// hasn't had a row for a while. Sightings without a row are lost with their raw archive.
     pub fn needs_row(&mut self, weapon: &str, auction: &Auction, now: DateTime<Utc>) -> bool {
