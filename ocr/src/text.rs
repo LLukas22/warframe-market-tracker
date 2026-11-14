@@ -40,6 +40,10 @@ pub fn distance_within(pattern: &[char], text: &[char]) -> usize {
     row.into_iter().min().unwrap_or(pattern.len())
 }
 
+/// How much finding the name and covering the whole text each count in `phrase_score`.
+const FOUND_WEIGHT: f32 = 0.8;
+const COVERAGE_WEIGHT: f32 = 0.2;
+
 /// How well `name` explains `text`, in 0..=1. Finding the whole name in the text counts most;
 /// covering the rest of the text breaks ties, so "Critical Damage" beats "Damage" for
 /// "+57.6% Critical Damage", and stray icon characters only cost a little.
@@ -49,7 +53,7 @@ pub fn phrase_score(name: &[char], text: &[char]) -> f32 {
     }
     let found = 1.0 - distance_within(name, text) as f32 / name.len() as f32;
     let coverage = (name.len() as f32 / text.len() as f32).min(1.0);
-    found.max(0.0) * (0.8 + 0.2 * coverage)
+    found.max(0.0) * (FOUND_WEIGHT + COVERAGE_WEIGHT * coverage)
 }
 
 /// How well `name` matches the start of `text`, and how many characters of `text` it takes.

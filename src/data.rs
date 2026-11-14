@@ -21,9 +21,10 @@ use dioxus::prelude::ServerFnError;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
 use crate::api::{
-    AttrInfo, AttrView, CurseFilter, HistoryPoint, Listing, Overview, PricePoint, Query,
-    RivenAuction, RivenDetail, RivenScan, SearchResult, SimilarRiven, Sort, StatEffect,
-    StatEffects, WeaponInfo,
+    AttrInfo, AttrView, CurseFilter, EFFECT_MIN_RIVENS, EFFECT_MIN_STAT_RIVENS, HOUR_MS,
+    HistoryPoint, Listing, MIN_PRICE, Overview, PricePoint, Query, RivenAuction, RivenDetail,
+    RivenScan, SIMILAR_LIMIT, SearchResult, SimilarRiven, Sort, StatEffect, StatEffects, WEEK_MS,
+    WeaponInfo,
 };
 use crate::effects;
 use wfmt_scraper::identity::{IdAttr, IdInput, Registry};
@@ -31,7 +32,9 @@ use wfmt_scraper::riven::{self, AttrInput, RivenInput, WeaponClass};
 
 const RESCAN_EVERY: Duration = Duration::from_secs(5);
 const LISTING_PAGE_SIZE: usize = 50;
-const WEEK_MS: i64 = 7 * 86_400_000;
+/// Rows per batch when reading parquet files: big enough to amortize the per-batch work,
+/// small enough to keep memory flat.
+const READ_BATCH_SIZE: usize = 8192;
 
 // Prices are free text, and sellers park rivens at joke prices like 88888 or 666666. A price is
 // invalid when it's far above the weapon's normal high end. The floor protects real expensive
@@ -40,12 +43,11 @@ const OUTLIER_PERCENTILE: f64 = 0.9;
 const OUTLIER_FACTOR: i64 = 5;
 const OUTLIER_FLOOR: i64 = 5000;
 const OUTLIER_MIN_LISTINGS: usize = 5;
+/// The percentile never picks one of this many top prices, which could be jokes themselves.
+const OUTLIER_SKIP_TOP: usize = 2;
 
-// Below these there's too little to tell which stats move the price. The bar on explained
-// differences keeps out weapons where stats predict nothing, mostly those where only one end
-// of the price range has been seen.
-const EFFECT_MIN_RIVENS: usize = 30;
-const EFFECT_MIN_STAT_RIVENS: u32 = 5;
+// The bar on explained differences keeps out weapons where stats predict nothing, mostly
+// those where only one end of the price range has been seen. See `EFFECT_MIN_RIVENS` too.
 const EFFECT_MIN_EXPLAINED: f64 = 0.15;
 /// 95% interval of a normal distribution.
 const INTERVAL: f64 = 1.96;
@@ -58,7 +60,7 @@ fn price_limit(prices: &mut [i64]) -> Option<i64> {
     prices.sort_unstable();
     let index = ((prices.len() - 1) as f64 * OUTLIER_PERCENTILE).round() as usize;
     // On small weapons the percentile alone could land on a joke price itself.
-    let index = index.min(prices.len() - 3);
+    let index = index.min(prices.len() - 1 - OUTLIER_SKIP_TOP);
     Some(
         prices[index]
             .saturating_mul(OUTLIER_FACTOR)
@@ -1819,12 +1821,20 @@ mod storage_tests {
     }
 }
 
-/// Chart bucket width for a time span: the finest that keeps the chart at 100 points or fewer.
+/// Chart bucket widths, in hours, from an hour to a week.
+const BUCKET_HOURS: [u32; 7] = [1, 3, 6, 12, 24, 72, 168];
+/// The bucket width of empty charts.
+const DAY_BUCKET_HOURS: u32 = 24;
+const MAX_CHART_POINTS: i64 = 100;
+
+/// Chart bucket width for a time span: the finest that keeps the chart at `MAX_CHART_POINTS`
+/// points or fewer.
 fn bucket_hours_for(span_ms: i64) -> u32 {
-    [1, 3, 6, 12, 24, 72, 168]
+    let widest = BUCKET_HOURS[BUCKET_HOURS.len() - 1];
+    BUCKET_HOURS
         .into_iter()
-        .find(|h| span_ms <= 100 * i64::from(*h) * 3_600_000)
-        .unwrap_or(168)
+        .find(|h| span_ms <= MAX_CHART_POINTS * i64::from(*h) * HOUR_MS)
+        .unwrap_or(widest)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1906,7 +1916,7 @@ type LoadResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn read_batches(path: &Path) -> LoadResult<ParquetRecordBatchReader> {
     Ok(ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?
-        .with_batch_size(8192)
+        .with_batch_size(READ_BATCH_SIZE)
         .build()?)
 }
 
@@ -2446,7 +2456,10 @@ impl Inner {
                 }
             })
             .collect();
-        assert!(class_names.len() <= 128, "class bitmask overflow");
+        assert!(
+            class_names.len() <= u128::BITS as usize,
+            "class bitmask overflow"
+        );
         let mut classes = vec![0u128; self.attrs.len()];
         let newest = self.newest_current(&self.rows());
         for (index, a) in self.auctions.iter().enumerate() {
@@ -2460,7 +2473,7 @@ impl Inner {
             }
             listings[a.weapon as usize] += 1;
             let price = price_of(a.buyout_price, a.top_bid, a.starting_price);
-            if let Some(p) = price.filter(|p| *p >= 10)
+            if let Some(p) = price.filter(|p| *p >= MIN_PRICE)
                 && !self.price_outlier(a.weapon, price)
                 && a.direct_sell
                 && a.fit_ok
@@ -2475,7 +2488,7 @@ impl Inner {
             g.t >= week_ago && self.gone_valid(g) && !self.superseded(&newest, g.auction)
         }) {
             let a = &self.auctions[g.auction as usize];
-            if let Some(p) = g.price.filter(|p| *p >= 10)
+            if let Some(p) = g.price.filter(|p| *p >= MIN_PRICE)
                 && !self.price_outlier(a.weapon, g.price)
                 && g.direct_sell
                 && a.fit_ok
@@ -2708,7 +2721,7 @@ impl Inner {
                         outliers_hidden: 0,
                         price_limit: None,
                         history: Vec::new(),
-                        bucket_hours: 24,
+                        bucket_hours: DAY_BUCKET_HOURS,
                         server_time: now_ms(),
                     };
                 }
@@ -2845,7 +2858,7 @@ impl Inner {
                 outliers_hidden,
                 price_limit: weapon.and_then(|w| self.weapons[w as usize].price_limit),
                 history: Vec::new(),
-                bucket_hours: 24,
+                bucket_hours: DAY_BUCKET_HOURS,
                 server_time: now,
             };
         }
@@ -2864,7 +2877,7 @@ impl Inner {
 
         // Price history: per bucket, the latest price of every matching riven (newest copy),
         // plus the last prices of rivens that disappeared in that bucket.
-        let bucket = i64::from(bucket_hours) * 3_600_000;
+        let bucket = i64::from(bucket_hours) * HOUR_MS;
         let bucket_of = |t: i64| t - t.rem_euclid(bucket);
         let mut gone_by_bucket: HashMap<i64, HashMap<u32, i64>> = HashMap::default();
         for g in gone_events.iter().filter(|g| id_search || !gone_outlier(g)) {
@@ -2990,7 +3003,7 @@ impl Inner {
             .filter(|(r, _)| r.weapon == weapon)
             .map(|(_, a)| a);
         for a in auctions {
-            let Some(price) = a.buyout_price.filter(|p| *p >= 10) else {
+            let Some(price) = a.buyout_price.filter(|p| *p >= MIN_PRICE) else {
                 continue;
             };
             if !a.direct_sell
@@ -3187,7 +3200,7 @@ impl Inner {
         }
         let similar = matches
             .into_iter()
-            .take(10)
+            .take(SIMILAR_LIMIT)
             .map(|(a, score)| SimilarRiven {
                 listing: self.listing(a),
                 same_stats: score.missing.is_empty()

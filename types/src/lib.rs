@@ -29,8 +29,33 @@ pub const STATUS_FILE: &str = "scraper/status.json";
 pub const COMMAND_DIR: &str = "scraper/commands";
 pub const LOCK_FILE: &str = "scraper/lock";
 
+pub const SECOND_MS: i64 = 1000;
+pub const MINUTE_MS: i64 = 60 * SECOND_MS;
+pub const HOUR_MS: i64 = 60 * MINUTE_MS;
+pub const DAY_MS: i64 = 24 * HOUR_MS;
+pub const WEEK_MS: i64 = 7 * DAY_MS;
+
 /// The engine rewrites its status at least this often, so older status means it's not running.
-pub const HEARTBEAT_MS: i64 = 15_000;
+pub const HEARTBEAT_MS: i64 = 15 * SECOND_MS;
+
+/// The rules every riven follows, for checking scans and edits against.
+pub mod riven {
+    use std::ops::RangeInclusive;
+
+    /// How many positive stats a riven has.
+    pub const POSITIVES: RangeInclusive<usize> = 2..=3;
+    /// A riven has at most one negative stat (its curse).
+    pub const MAX_NEGATIVES: usize = 1;
+    pub const MAX_STATS: usize = *POSITIVES.end() + MAX_NEGATIVES;
+    /// A roll scales a stat's base value by a factor in this range.
+    pub const ROLL_MIN: f64 = 0.9;
+    pub const ROLL_MAX: f64 = 1.1;
+
+    /// Whether this many positive and negative stats make a possible riven.
+    pub fn valid_layout(positives: usize, negatives: usize) -> bool {
+        POSITIVES.contains(&positives) && negatives <= MAX_NEGATIVES
+    }
+}
 
 /// warframe.market's site-wide "most recent" listings. Feed ids name the raw archive, the fetch
 /// log entry and the `source` of the rows they produce.

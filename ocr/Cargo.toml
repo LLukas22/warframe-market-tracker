@@ -18,6 +18,7 @@ wasm = ["engine", "dep:wasm-bindgen"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+wfmt-types = { path = "../types" }
 # Its default `multithread` feature needs threads, which plain wasm32 doesn't have.
 pure-onnx-ocr = { version = "0.3.2", default-features = false, optional = true }
 # Same version pure-onnx-ocr uses; for cropping. Its decoders come with pure-onnx-ocr.

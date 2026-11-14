@@ -18,8 +18,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use clap::Args;
 use tokio::sync::watch;
 use wfmt_types::{
-    COMMAND_DIR, Command, CurrentFetch, FetchLog, LOCK_FILE, Phase, STATUS_FILE, ScraperStatus,
-    Settings, SweepProgress, SweepSummary, Trigger,
+    COMMAND_DIR, Command, CurrentFetch, FetchLog, HOUR_MS, LOCK_FILE, Phase, STATUS_FILE,
+    ScraperStatus, Settings, SweepProgress, SweepSummary, Trigger,
 };
 
 use crate::identity::Registry;
@@ -34,7 +34,14 @@ use crate::wfm::{self, Client, Weapon};
 
 const RECENT: usize = 50;
 const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
-const FEED_PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
+const FEED_PRUNE_INTERVAL: Duration = Duration::from_hours(1);
+/// How often the status is republished while maintenance blocks the main loop.
+const MAINTENANCE_STATUS_INTERVAL: Duration = Duration::from_secs(5);
+/// Wait after a failed weapon list download before trying again.
+const METADATA_RETRY_DELAY: TimeDelta = TimeDelta::minutes(10);
+/// Scheduled sweeps skip weapons fetched within this share of the sweep interval, by a manual
+/// sweep for example.
+const SWEEP_FRESH_SHARE: f64 = 0.5;
 
 #[derive(Args, Clone, Debug)]
 pub struct EngineArgs {
@@ -111,7 +118,7 @@ impl EngineArgs {
 }
 
 fn hours(h: f64) -> TimeDelta {
-    TimeDelta::milliseconds((h * 3_600_000.0) as i64)
+    TimeDelta::milliseconds((h * HOUR_MS as f64) as i64)
 }
 
 fn ms(t: DateTime<Utc>) -> i64 {
@@ -421,7 +428,7 @@ impl Engine {
 
     fn start_scheduled(&mut self) {
         let now = Utc::now();
-        let fresh = now - hours(self.args.sweep_interval_hours / 2.0);
+        let fresh = now - hours(self.args.sweep_interval_hours * SWEEP_FRESH_SHARE);
         let mut due: Vec<(Option<DateTime<Utc>>, String)> = self
             .weapons
             .iter()
@@ -767,16 +774,11 @@ impl Engine {
                             }
                             break;
                         }
-                        _ = tokio::time::sleep(Duration::from_secs(5)) => self.publish(),
+                        _ = tokio::time::sleep(MAINTENANCE_STATUS_INTERVAL) => self.publish(),
                     }
                 }
                 next_maintenance = Instant::now()
-                    + Duration::from_secs(
-                        self.args
-                            .storage
-                            .maintenance_interval_hours
-                            .saturating_mul(3600),
-                    );
+                    + Duration::from_hours(self.args.storage.maintenance_interval_hours);
                 self.set_phase(if self.state.sweep.is_some() {
                     Phase::Scraping
                 } else {
@@ -806,8 +808,7 @@ impl Engine {
                 || sweep_due
                 || !deferred.is_empty()
                 || self.weapons.is_empty();
-            let retry_metadata =
-                metadata_failed_at.is_none_or(|t| now - t > TimeDelta::minutes(10));
+            let retry_metadata = metadata_failed_at.is_none_or(|t| now - t > METADATA_RETRY_DELAY);
             if needs_weapons && self.metadata_due(now) && retry_metadata {
                 self.set_phase(Phase::Metadata);
                 tokio::select! {

@@ -6,6 +6,7 @@
 //! mastery rank, with the reroll count to its right.
 
 use serde::{Deserialize, Serialize};
+use wfmt_types::riven as rules;
 
 use crate::text::key;
 use crate::vocab::{Unit, Vocabulary, Weapon};
@@ -73,6 +74,19 @@ const MIN_CONFIDENCE: f32 = 0.5;
 const MIN_ATTRIBUTE_SCORE: f32 = 0.6;
 const MIN_WEAPON_SCORE: f32 = 0.6;
 const MIN_NAME_SCORE: f32 = 0.7;
+/// Lines whose centers are closer than this share of the shorter line's height are on one row.
+const SAME_ROW: f32 = 0.5;
+/// Weapon names tried at the start of the name text, best first; weaker ones aren't tried.
+const WEAPON_CANDIDATES: usize = 8;
+const MIN_WEAPON_CANDIDATE_SCORE: f32 = 0.5;
+/// How much the weapon and the riven name each count when choosing between readings.
+const WEAPON_WEIGHT: f32 = 0.6;
+const NAME_WEIGHT: f32 = 0.4;
+// Where an unread reroll count can be, in line heights: from just right of the MR label to the
+// mirror of the label's left edge, padded. Narrower areas can't hold one.
+const REROLL_GAP: f32 = 0.3;
+const REROLL_PADDING: f32 = 0.5;
+const MIN_REROLL_WIDTH: f32 = 1.5;
 /// Rivens can require mastery rank 8 to 16.
 const MASTERY_RANKS: std::ops::RangeInclusive<u32> = 8..=16;
 const MASTERY_LABELS: &[&str] = &["段位", "mastery", "mr"];
@@ -174,7 +188,8 @@ fn rows(mut lines: Vec<Line>) -> Vec<Row> {
             Some(row)
                 if {
                     let last = row.lines.last().unwrap();
-                    (line.center_y() - last.center_y()).abs() < 0.5 * line.height.min(last.height)
+                    (line.center_y() - last.center_y()).abs()
+                        < SAME_ROW * line.height.min(last.height)
                 } =>
             {
                 row.lines.push(line)
@@ -292,16 +307,18 @@ struct NameRead<'v> {
 fn read_name<'v>(vocab: &'v Vocabulary, text: &str) -> NameRead<'v> {
     let text = key(text);
     let mut best: Option<(f32, NameRead<'v>)> = None;
-    for (weapon, weapon_name, weapon_score, len) in
-        vocab.weapons_at_start(&text).into_iter().take(8)
+    for (weapon, weapon_name, weapon_score, len) in vocab
+        .weapons_at_start(&text)
+        .into_iter()
+        .take(WEAPON_CANDIDATES)
     {
-        if weapon_score < 0.5 {
+        if weapon_score < MIN_WEAPON_CANDIDATE_SCORE {
             break;
         }
         let rest: String = text[len..].iter().collect();
         let name = vocab.riven_name(&rest);
         let name_score = name.as_ref().map_or(0.0, |n| n.score);
-        let total = 0.6 * weapon_score + 0.4 * name_score;
+        let total = WEAPON_WEIGHT * weapon_score + NAME_WEIGHT * name_score;
         if best.as_ref().is_none_or(|(b, _)| total > *b) {
             best = Some((
                 total,
@@ -442,15 +459,17 @@ pub(crate) fn parse_with_layout(
             } else {
                 // Without a count the label is centered; with one it moves left to make room.
                 let label = &row.lines[0];
-                let x = label.x + label.width + 0.3 * height;
-                let right = 2.0 * center - label.x + 0.5 * height;
+                let x = label.x + label.width + REROLL_GAP * height;
+                let right = 2.0 * center - label.x + REROLL_PADDING * height;
                 let shifted = center - label.center_x() > height;
-                reroll_area = (shifted && right - x >= 1.5 * height).then_some(RerollArea {
-                    x,
-                    y: label.y - 0.5 * height,
-                    width: right - x,
-                    height: label.height + height,
-                });
+                let padding = REROLL_PADDING * height;
+                reroll_area =
+                    (shifted && right - x >= MIN_REROLL_WIDTH * height).then_some(RerollArea {
+                        x,
+                        y: label.y - padding,
+                        width: right - x,
+                        height: label.height + 2.0 * padding,
+                    });
             }
             mastery_found = true;
             break;
@@ -515,9 +534,12 @@ pub(crate) fn parse_with_layout(
 
     let positives = riven.attributes.iter().filter(|a| a.positive).count();
     let negatives = riven.attributes.len() - positives;
-    if !(2..=3).contains(&positives) || negatives > 1 {
+    if !rules::valid_layout(positives, negatives) {
         riven.warnings.push(format!(
-            "{positives} positive and {negatives} negative stats; rivens have 2-3 and 0-1."
+            "{positives} positive and {negatives} negative stats; rivens have {}-{} and 0-{}.",
+            rules::POSITIVES.start(),
+            rules::POSITIVES.end(),
+            rules::MAX_NEGATIVES,
         ));
     }
     if let Some(syllables) = syllables {

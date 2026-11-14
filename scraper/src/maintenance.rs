@@ -12,7 +12,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::{DatasetLock, Transaction, durable_write, unique_id};
+use crate::dataset::{DatasetLock, PARQUET_ZSTD_LEVEL, Transaction, durable_write, unique_id};
 
 #[derive(Args, Clone, Debug)]
 pub struct MaintenanceArgs {
@@ -48,6 +48,13 @@ pub struct RetentionState {
 /// the data is reprocessed or replaced, so they are ready to be published.
 pub const COMPACTION_STATE: &str = "storage/compaction.json";
 
+const MIB: u64 = 1024 * 1024;
+// Compacted files are read in batches and written in bounded row groups, so memory use stays
+// flat however big a day gets.
+const COMPACT_BATCH_ROWS: usize = 8192;
+const ROW_GROUP_MAX_ROWS: usize = 64 * 1024;
+const ROW_GROUP_MAX_BYTES: usize = 64 * MIB as usize;
+
 #[derive(Serialize, Deserialize)]
 struct CompactionState {
     compacted_before: NaiveDate,
@@ -82,7 +89,7 @@ pub fn maintain(root: &Path, now: DateTime<Utc>, args: &MaintenanceArgs) -> Resu
     let mut report = Report::default();
     let target = args
         .compact_target_mb
-        .checked_mul(1024 * 1024)
+        .checked_mul(MIB)
         .context("compaction target is too large")?;
     let parquet = root.join("parquet");
     // Keep today's append-only parts untouched. Group by schema as well as date so older
@@ -188,9 +195,9 @@ fn compact_group(
             expected_rows += builder.metadata().file_metadata().num_rows();
             if writer.is_none() {
                 let props = WriterProperties::builder()
-                    .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
-                    .set_max_row_group_row_count(Some(65_536))
-                    .set_max_row_group_bytes(Some(64 * 1024 * 1024))
+                    .set_compression(Compression::ZSTD(ZstdLevel::try_new(PARQUET_ZSTD_LEVEL)?))
+                    .set_max_row_group_row_count(Some(ROW_GROUP_MAX_ROWS))
+                    .set_max_row_group_bytes(Some(ROW_GROUP_MAX_BYTES))
                     .build();
                 writer = Some(ArrowWriter::try_new(
                     File::create(&stage)?,
@@ -198,8 +205,7 @@ fn compact_group(
                     Some(props),
                 )?);
             }
-            // Memory use follows batches and row groups, rather than the size of the day.
-            for batch in builder.with_batch_size(8192).build()? {
+            for batch in builder.with_batch_size(COMPACT_BATCH_ROWS).build()? {
                 writer.as_mut().unwrap().write(&batch?)?;
             }
             tx.delete(bundle[i].clone());

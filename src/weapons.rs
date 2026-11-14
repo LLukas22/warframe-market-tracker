@@ -29,6 +29,11 @@ const GROUPS: &[&str] = &[
     "sentinel",
 ];
 
+/// Suggestions the weapon picker lists.
+const PICKER_RESULTS: usize = 12;
+/// Weapons the start page's grid shows before "show all".
+const GRID_COLLAPSED: usize = 24;
+
 /// Lower is better; `None` means no match.
 fn match_rank(w: &WeaponInfo, needle: &str) -> Option<u8> {
     let name = w.name.to_lowercase();
@@ -92,7 +97,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
     let matches: Vec<WeaponInfo> = if needle.is_empty() {
         let mut top: Vec<WeaponInfo> = weapons.iter().filter(|w| w.listings > 0).cloned().collect();
         top.sort_by_key(|w| std::cmp::Reverse(w.median_price));
-        top.truncate(12);
+        top.truncate(PICKER_RESULTS);
         top
     } else {
         let mut ranked: Vec<(u8, &WeaponInfo)> = weapons
@@ -106,7 +111,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
         });
         ranked
             .into_iter()
-            .take(12)
+            .take(PICKER_RESULTS)
             .map(|(_, w)| w.clone())
             .collect()
     };
@@ -383,7 +388,7 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
     }
     let total = list.len();
     if !show_all() {
-        list.truncate(24);
+        list.truncate(GRID_COLLAPSED);
     }
 
     rsx! {
@@ -461,7 +466,7 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                 }
             }
         }
-        if total > 24 {
+        if total > GRID_COLLAPSED {
             button {
                 class: "show-all",
                 onclick: move |_| show_all.toggle(),

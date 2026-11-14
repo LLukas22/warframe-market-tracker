@@ -15,10 +15,10 @@
 //! Display conversion: percentages show `100v`, faction damage shows `×(1 + v)`,
 //! a few attributes (punch through, range, combo duration, initial combo) show `v` as-is.
 
+use wfmt_types::riven::{ROLL_MAX, ROLL_MIN};
+
 pub const DISPOSITION: f64 = 1.2;
 pub const MAX_RANK: u8 = 8;
-const ROLL_MIN: f64 = 0.9;
-const ROLL_MAX: f64 = 1.1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WeaponClass {

@@ -6612,6 +6612,7 @@ dependencies = [
  "serde_json",
  "wasm-bindgen",
  "wfmt-scraper",
+ "wfmt-types",
 ]
 
 [[package]]

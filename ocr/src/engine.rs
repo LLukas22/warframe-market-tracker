@@ -88,7 +88,11 @@ fn decode(image: &[u8]) -> Result<DynamicImage, ScanError> {
     image::load_from_memory(image).map_err(|e| ScanError(format!("reading the image: {e}")))
 }
 
-/// The area, cropped and scaled up 3x on a margin, so the detector sees the digits as text.
+/// The reroll area is scaled up this much, and put on a margin of this many pixels.
+const REROLL_SCALE: u32 = 3;
+const REROLL_MARGIN: u32 = 32;
+
+/// The area, cropped and scaled up on a margin, so the detector sees the digits as text.
 fn enlarged(image: &DynamicImage, area: &RerollArea) -> DynamicImage {
     let clamp = |v: f32, max: u32| (v.max(0.0) as u32).min(max);
     let x = clamp(area.x, image.width());
@@ -96,9 +100,17 @@ fn enlarged(image: &DynamicImage, area: &RerollArea) -> DynamicImage {
     let width = clamp(area.width, image.width() - x).max(1);
     let height = clamp(area.height, image.height() - y).max(1);
     let crop = image.crop_imm(x, y, width, height);
-    let scaled = crop.resize(width * 3, height * 3, FilterType::CatmullRom);
-    let mut canvas = DynamicImage::new_rgb8(scaled.width() + 64, scaled.height() + 64);
-    image::imageops::overlay(&mut canvas, &scaled, 32, 32);
+    let scaled = crop.resize(
+        width * REROLL_SCALE,
+        height * REROLL_SCALE,
+        FilterType::CatmullRom,
+    );
+    let mut canvas = DynamicImage::new_rgb8(
+        scaled.width() + 2 * REROLL_MARGIN,
+        scaled.height() + 2 * REROLL_MARGIN,
+    );
+    let margin = i64::from(REROLL_MARGIN);
+    image::imageops::overlay(&mut canvas, &scaled, margin, margin);
     canvas
 }
 

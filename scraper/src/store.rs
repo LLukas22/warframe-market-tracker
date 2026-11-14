@@ -35,7 +35,7 @@ use parquet::basic::{Compression as ParquetCompression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::{DatasetLock, Transaction, unique_id};
+use crate::dataset::{DatasetLock, PARQUET_ZSTD_LEVEL, Transaction, unique_id};
 use crate::normalize::{AttributeRow, AuctionRow};
 use crate::tracking::GoneRow;
 
@@ -425,7 +425,9 @@ fn write_parquet(path: &Path, batch: &RecordBatch) -> Result<()> {
     fs::create_dir_all(path.parent().unwrap())?;
     let tmp = path.with_extension("tmp");
     let props = WriterProperties::builder()
-        .set_compression(ParquetCompression::ZSTD(ZstdLevel::try_new(3)?))
+        .set_compression(ParquetCompression::ZSTD(ZstdLevel::try_new(
+            PARQUET_ZSTD_LEVEL,
+        )?))
         .build();
     let mut writer = ArrowWriter::try_new(File::create(&tmp)?, batch.schema(), Some(props))?;
     writer.write(batch)?;

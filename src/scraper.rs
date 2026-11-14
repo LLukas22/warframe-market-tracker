@@ -1,5 +1,7 @@
 use dioxus::prelude::*;
-use wfmt_types::{FetchLog, Phase, ScraperStatus, SweepSummary};
+use wfmt_types::{
+    DAY_MS, FetchLog, HOUR_MS, MINUTE_MS, Phase, SECOND_MS, ScraperStatus, SweepSummary,
+};
 
 use crate::api::{self, HubStatus, ScraperSnapshot};
 use crate::ui::{format_datetime, sleep_ms};
@@ -507,6 +509,9 @@ fn ScraperCard(
     }
 }
 
+/// Fetches the "recent fetches" list shows.
+const RECENT_FETCHES_SHOWN: usize = 20;
+
 /// Closed by default so the page stays calm; failures are counted on the label.
 #[component]
 fn RecentFetches(entries: Vec<FetchLog>, now: i64) -> Element {
@@ -518,7 +523,7 @@ fn RecentFetches(entries: Vec<FetchLog>, now: i64) -> Element {
                 if failed > 0 { span { class: "error", " · {failed} failed" } }
             }
             ul {
-                for entry in entries.iter().take(20) {
+                for entry in entries.iter().take(RECENT_FETCHES_SHOWN) {
                     li { key: "{entry.t}-{entry.weapon}",
                         span { "{weapon_name(&entry.weapon)}" }
                         if entry.error.is_some() {
@@ -556,12 +561,15 @@ fn weapon_name(slug: &str) -> String {
 }
 
 fn duration(ms: i64) -> String {
-    let seconds = ms.max(0) / 1000;
-    match seconds {
-        0..60 => format!("{seconds}s"),
-        60..3600 => format!("{}m", seconds / 60),
-        3600..86400 => format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60),
-        _ => format!("{}d {}h", seconds / 86400, seconds % 86400 / 3600),
+    let ms = ms.max(0);
+    if ms < MINUTE_MS {
+        format!("{}s", ms / SECOND_MS)
+    } else if ms < HOUR_MS {
+        format!("{}m", ms / MINUTE_MS)
+    } else if ms < DAY_MS {
+        format!("{}h {:02}m", ms / HOUR_MS, ms % HOUR_MS / MINUTE_MS)
+    } else {
+        format!("{}d {}h", ms / DAY_MS, ms % DAY_MS / HOUR_MS)
     }
 }
 

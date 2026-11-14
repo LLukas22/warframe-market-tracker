@@ -57,7 +57,11 @@ pub struct Query {
     pub period: Period,
 }
 
-pub const DAY_MS: i64 = 86_400_000;
+pub use wfmt_types::{DAY_MS, HOUR_MS, WEEK_MS};
+
+/// Asking prices below this aren't real offers (a 1p starting bid, say), so price statistics
+/// and the default search leave them out.
+pub const MIN_PRICE: i64 = 10;
 
 /// Days are UTC, like every date the app shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -82,7 +86,7 @@ impl Period {
     pub fn bounds(self, now: i64) -> (Option<i64>, Option<i64>) {
         match self {
             Period::Today => (Some(now.saturating_sub(now.rem_euclid(DAY_MS))), None),
-            Period::Week => (Some(now.saturating_sub(7 * DAY_MS)), None),
+            Period::Week => (Some(now.saturating_sub(WEEK_MS)), None),
             Period::Month => (Some(now.saturating_sub(30 * DAY_MS)), None),
             Period::All => (None, None),
             Period::Custom { from, to } => (from, to.map(|t| t.saturating_add(DAY_MS))),
@@ -131,7 +135,7 @@ impl Default for Query {
             price_changed: false,
             owner_changed: false,
             min_quality: 0.0,
-            min_price: Some(10),
+            min_price: Some(MIN_PRICE),
             max_price: None,
             sort: Sort::PriceAsc,
             period: Period::Week,
@@ -313,6 +317,9 @@ pub struct SimilarRiven {
     pub roll_distance: Option<f64>,
 }
 
+/// How many of the closest similar rivens a riven's page gets.
+pub const SIMILAR_LIMIT: usize = 10;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RivenDetail {
     pub listing: Listing,
@@ -472,6 +479,11 @@ pub struct StatEffect {
     pub certain: bool,
 }
 
+/// Below this many verified rivens there's too little to tell which stats move the price.
+pub const EFFECT_MIN_RIVENS: usize = 30;
+/// Stats on fewer rivens than this are left out of the estimate.
+pub const EFFECT_MIN_STAT_RIVENS: u32 = 5;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StatEffects {
     /// Rivens the estimate is based on.
@@ -572,10 +584,11 @@ fn is_multiplier(slug: &str) -> bool {
 }
 
 /// The values a stat could have had on this riven: worst roll to best, or for a negative,
-/// mildest to harshest. A roll scales the stat's base value by 0.9 to 1.1, and `quality`
-/// says where in that range this one landed, so the range follows from the listed value.
+/// mildest to harshest. A roll scales the stat's base value by `ROLL_MIN` to `ROLL_MAX`, and
+/// `quality` says where in that range this one landed, so the range follows from the listed value.
 pub fn roll_range(slug: &str, value: f64, quality: f64) -> (f64, f64) {
-    let roll = 0.9 + 0.2 * quality.clamp(0.0, 1.0);
+    use wfmt_types::riven::{ROLL_MAX, ROLL_MIN};
+    let roll = ROLL_MIN + (ROLL_MAX - ROLL_MIN) * quality.clamp(0.0, 1.0);
     let at = |w: f64| {
         if is_multiplier(slug) && value > 0.0 {
             1.0 + (value - 1.0) * w / roll
@@ -583,13 +596,19 @@ pub fn roll_range(slug: &str, value: f64, quality: f64) -> (f64, f64) {
             value * w / roll
         }
     };
-    (at(0.9), at(1.1))
+    (at(ROLL_MIN), at(ROLL_MAX))
 }
+
+/// Riven ids are this many hex digits (see the scraper's identity registry).
+pub const RIVEN_ID_LEN: usize = 16;
+/// Shorter prefixes match too many rivens to be worth searching for.
+const MIN_RIVEN_ID_PREFIX: usize = 6;
 
 /// Whether a search box input looks like a riven id (or a prefix of one).
 pub fn looks_like_riven_id(text: &str) -> bool {
     let t = text.trim();
-    (6..=16).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit())
+    (MIN_RIVEN_ID_PREFIX..=RIVEN_ID_LEN).contains(&t.len())
+        && t.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Cheap enough to poll: what the header shows, and when to fetch market data again.

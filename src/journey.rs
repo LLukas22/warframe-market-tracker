@@ -1,11 +1,32 @@
 //! One riven's observations: separate price series and seller intervals per auction.
 use crate::api::{self, RivenAuction};
+use crate::chart::{INITIAL_WIDTH, RESIZE_THRESHOLD};
 use crate::ui::{Route, format_date, format_datetime, format_plat};
 use dioxus::prelude::*;
 
 const COLORS: [&str; 6] = [
     "#b48cff", "#5fd39b", "#f0b85a", "#72baff", "#ff7a7a", "#e897db",
 ];
+
+// Chart geometry, in CSS pixels: the plot spans `LEFT..width - RIGHT` and
+// `TOP..TOP + PLOT_HEIGHT`, with the date labels below it.
+const MIN_WIDTH: f64 = 280.0;
+const HEIGHT: f64 = 240.0;
+const LEFT: f64 = 58.0;
+const RIGHT: f64 = 18.0;
+const TOP: f64 = 18.0;
+const PLOT_HEIGHT: f64 = 190.0;
+/// Gap between the y axis labels and the plot.
+const Y_LABEL_GAP: f64 = 8.0;
+/// Shifts a label down by about half its height, to center it on its grid line.
+const LABEL_BASELINE: f64 = 4.0;
+const DATE_LABEL_Y: f64 = HEIGHT - 8.0;
+const POINT_RADIUS: f64 = 3.0;
+const FOCUSED_POINT_RADIUS: f64 = 6.0;
+/// Invisible radius around each point that takes taps and hovers.
+const HIT_RADIUS: f64 = 11.0;
+/// Listings shown in the sightings list before "show all".
+const COLLAPSED_SIGHTINGS: usize = 4;
 
 fn bounds(auctions: &[RivenAuction]) -> Option<(i64, i64)> {
     Some((
@@ -63,7 +84,7 @@ pub fn RivenJourney(id: String, selected_auction: String) -> Element {
 
 #[component]
 fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: String) -> Element {
-    let mut width = use_signal(|| 900.0_f64);
+    let mut width = use_signal(|| INITIAL_WIDTH);
     let mut focus = use_signal(|| None::<(usize, usize)>);
     let mut show_all = use_signal(|| false);
     let Some((first, last)) = bounds(&auctions) else {
@@ -78,13 +99,14 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
     let color = |a: &RivenAuction| {
         COLORS[sellers.iter().position(|s| *s == a.owner_name).unwrap_or(0) % COLORS.len()]
     };
-    let w = width().max(280.0);
+    let w = width().max(MIN_WIDTH);
     let span = (last - first).max(1) as f64;
+    let (plot_left, plot_right) = (LEFT, w - RIGHT);
     let x = |t| {
         if first == last {
-            (w + 42.0) / 2.0
+            (plot_left + plot_right) / 2.0
         } else {
-            58.0 + (t - first) as f64 / span * (w - 76.0)
+            plot_left + (t - first) as f64 / span * (plot_right - plot_left)
         }
     };
     let max_price = auctions
@@ -94,7 +116,7 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
         .max()
         .unwrap_or(0);
     let (max, step) = crate::chart::nice_axis(max_price as f64);
-    let y = |p| 18.0 + (1.0 - p as f64 / max) * 190.0;
+    let y = |p| TOP + (1.0 - p as f64 / max) * PLOT_HEIGHT;
     let ticks: Vec<_> = (0..)
         .map(|i| i as f64 * step)
         .take_while(|v| *v <= max)
@@ -107,7 +129,7 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
     let displayed = if show_all() {
         auctions.len()
     } else {
-        auctions.len().min(4)
+        auctions.len().min(COLLAPSED_SIGHTINGS)
     };
     rsx! {
         section { class: "journey",
@@ -119,19 +141,19 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
             div { class: "section-head", h2 { "Price history" } span { class: "muted small", "one line per listing" } }
             div { class: "chart journey-chart",
                 onresize: move |event| { if let Ok(size) = event.get_content_box_size() {
-                    if size.width >= 280.0 && (size.width - width()).abs() > 0.5 { width.set(size.width); }
+                    if size.width >= MIN_WIDTH && (size.width - width()).abs() > RESIZE_THRESHOLD { width.set(size.width); }
                 } },
                 if max_price > 0 {
-                    svg { view_box: "0 0 {w} 240", role: "img", "aria-label": "Observed price history, with a separate series for each listing",
+                    svg { view_box: "0 0 {w} {HEIGHT}", role: "img", "aria-label": "Observed price history, with a separate series for each listing",
                         for v in ticks {
-                            line { class: "grid", x1: "58", x2: "{w - 18.0}", y1: "{y(v as i64)}", y2: "{y(v as i64)}" }
-                            text { class: "axis", x: "50", y: "{y(v as i64) + 4.0}", text_anchor: "end", "{format_plat(v as i64)}" }
+                            line { class: "grid", x1: "{plot_left}", x2: "{plot_right}", y1: "{y(v as i64)}", y2: "{y(v as i64)}" }
+                            text { class: "axis", x: "{plot_left - Y_LABEL_GAP}", y: "{y(v as i64) + LABEL_BASELINE}", text_anchor: "end", "{format_plat(v as i64)}" }
                         }
                         for (ai, a) in auctions.iter().enumerate() {
                             path { d: "{price_path(a, x, y)}", fill: "none", stroke: "{color(a)}", stroke_width: "2", vector_effect: "non-scaling-stroke" }
                             for (pi, p) in a.points.iter().enumerate().filter(|(_, p)| p.price.is_some_and(|p| p > 0)) {
-                                circle { cx: "{x(p.t)}", cy: "{y(p.price.unwrap())}", r: if focus() == Some((ai, pi)) { "6" } else { "3" }, fill: "{color(a)}" }
-                                circle { class: "journey-hit", cx: "{x(p.t)}", cy: "{y(p.price.unwrap())}", r: "11", fill: "transparent",
+                                circle { cx: "{x(p.t)}", cy: "{y(p.price.unwrap())}", r: if focus() == Some((ai, pi)) { FOCUSED_POINT_RADIUS } else { POINT_RADIUS }, fill: "{color(a)}" }
+                                circle { class: "journey-hit", cx: "{x(p.t)}", cy: "{y(p.price.unwrap())}", r: HIT_RADIUS, fill: "transparent",
                                     tabindex: "0", role: "button", "aria-label": "{format_datetime(p.t)} UTC, {p.price.unwrap()} platinum, seller {a.owner_name}",
                                     onmouseenter: move |_| focus.set(Some((ai, pi))),
                                     onfocus: move |_| focus.set(Some((ai, pi))),
@@ -140,8 +162,8 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
                                 }
                             }
                         }
-                        text { class: "axis", x: "58", y: "232", "{format_date(first)}" }
-                        if last != first { text { class: "axis", x: "{w - 18.0}", y: "232", text_anchor: "end", "{format_date(last)}" } }
+                        text { class: "axis", x: "{plot_left}", y: "{DATE_LABEL_Y}", "{format_date(first)}" }
+                        if last != first { text { class: "axis", x: "{plot_right}", y: "{DATE_LABEL_Y}", text_anchor: "end", "{format_date(last)}" } }
                     }
                 } else { p { class: "empty-state", "No usable price observations yet." } }
                 div { class: "journey-readout", aria_live: "polite",
@@ -178,7 +200,7 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
                     }
                 }
             }
-            if auctions.len() > 4 { button { class: "link-button", onclick: move |_| show_all.toggle(),
+            if auctions.len() > COLLAPSED_SIGHTINGS { button { class: "link-button", onclick: move |_| show_all.toggle(),
                 if show_all() { "Show recent listings" } else { "Show all {auctions.len()} listings" }
             } }
         }

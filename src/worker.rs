@@ -34,14 +34,18 @@ fn parse_switch(value: &str) -> Result<bool> {
     }
 }
 
+/// Taking the lock is retried for about a second before giving up.
+const LOCK_ATTEMPTS: u32 = 10;
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(100);
+
 /// Takes the engine lock, or `None` if another server holds it. The status endpoints hold the
 /// lock for an instant on every poll, so one failed attempt doesn't mean anything.
 pub async fn lock(dir: &Path) -> Result<Option<Lock>> {
-    for _ in 0..10 {
+    for _ in 0..LOCK_ATTEMPTS {
         if let Some(lock) = engine::try_lock(dir)? {
             return Ok(Some(lock));
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(LOCK_RETRY_DELAY).await;
     }
     Ok(None)
 }

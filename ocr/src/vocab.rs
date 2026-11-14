@@ -10,6 +10,9 @@ use serde::Deserialize;
 
 use crate::text::{self, key};
 
+/// Fewer letters than this can't be told apart from a stray word.
+const MIN_NAME_LETTERS: usize = 4;
+
 /// In-game wording that differs from warframe.market's attribute names.
 const ALIASES: &[(&str, &str)] = &[
     // Seen on Chinese cards.
@@ -300,7 +303,7 @@ impl Vocabulary {
             .filter(char::is_ascii_alphabetic)
             .map(|c| c.to_ascii_lowercase())
             .collect();
-        if observed.len() < 4 {
+        if observed.len() < MIN_NAME_LETTERS {
             return None;
         }
 

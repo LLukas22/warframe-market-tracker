@@ -1,29 +1,36 @@
 use dioxus::prelude::*;
 
 use crate::api::{
-    self, AttrInfo, CurseFilter, DAY_MS, Listing, LiveStats, Overview, Period, Query, SearchResult,
-    Sort, attribute_name, format_value,
+    self, AttrInfo, CurseFilter, DAY_MS, HOUR_MS, Listing, LiveStats, Overview, Period, Query,
+    SIMILAR_LIMIT, SearchResult, Sort, attribute_name, format_value,
 };
 use crate::chart::{PriceChart, StatEffectsPanel};
 use crate::weapons::{WeaponGrid, WeaponHeader, WeaponImage, WeaponPicker};
+use wfmt_types::{MINUTE_MS, SECOND_MS, riven};
 
 const CSS: Asset = asset!("/assets/main.css");
 
 /// `YYYY-MM-DD` (UTC) from unix ms.
 pub fn format_date(ms: i64) -> String {
-    let (y, m, d) = civil_from_days(ms.div_euclid(86_400_000));
+    let (y, m, d) = civil_from_days(ms.div_euclid(DAY_MS));
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `HH:MM` (UTC) from unix ms.
+pub fn format_time(ms: i64) -> String {
+    let time = ms.rem_euclid(DAY_MS);
+    format!("{:02}:{:02}", time / HOUR_MS, time % HOUR_MS / MINUTE_MS)
 }
 
 /// `YYYY-MM-DD HH:MM` (UTC) from unix ms.
 pub fn format_datetime(ms: i64) -> String {
-    let secs = ms.div_euclid(1000).rem_euclid(86_400);
-    format!(
-        "{} {:02}:{:02}",
-        format_date(ms),
-        secs / 3600,
-        secs % 3600 / 60
-    )
+    format!("{} {}", format_date(ms), format_time(ms))
+}
+
+/// `MM-DD HH:MM` (UTC) from unix ms.
+pub fn format_short_datetime(ms: i64) -> String {
+    let (_, m, d) = civil_from_days(ms.div_euclid(DAY_MS));
+    format!("{m:02}-{d:02} {}", format_time(ms))
 }
 
 /// Unix ms of the UTC midnight starting a `YYYY-MM-DD` date, as date inputs give it.
@@ -59,8 +66,11 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
+/// From here on prices are shortened to thousands, `12.5k`.
+const PLAT_IN_THOUSANDS: i64 = 10_000;
+
 pub fn format_plat(p: i64) -> String {
-    if p >= 10_000 {
+    if p >= PLAT_IN_THOUSANDS {
         format!("{:.1}k", p as f64 / 1000.0)
     } else {
         format!("{p}")
@@ -68,11 +78,13 @@ pub fn format_plat(p: i64) -> String {
 }
 
 pub fn format_age(now: i64, then: i64) -> String {
-    let mins = (now - then).max(0) / 60_000;
-    match mins {
-        0..60 => format!("{mins}m"),
-        60..1440 => format!("{}h", mins / 60),
-        _ => format!("{}d", mins / 1440),
+    let age = (now - then).max(0);
+    if age < HOUR_MS {
+        format!("{}m", age / MINUTE_MS)
+    } else if age < DAY_MS {
+        format!("{}h", age / HOUR_MS)
+    } else {
+        format!("{}d", age / DAY_MS)
     }
 }
 
@@ -87,7 +99,7 @@ pub async fn sleep_ms(ms: u32) {
 }
 
 /// How often the header checks for new scraped data.
-const LIVE_POLL_MS: u32 = 5000;
+const LIVE_POLL_MS: u32 = 5 * SECOND_MS as u32;
 
 #[derive(Clone, Debug, PartialEq, Routable)]
 pub(crate) enum Route {
@@ -115,7 +127,9 @@ const VIEW_CACHE_SIZE: usize = 12;
 /// How long a cached answer is used without asking the server, while the data version is
 /// unchanged. Ages like "seen 5m ago" are relative to the answer's server time, so this also
 /// bounds how far those lag.
-const FRESH_MS: f64 = 60_000.0;
+const FRESH_MS: f64 = MINUTE_MS as f64;
+/// How often a request waits to see whether the same one, already under way, has answered.
+const IN_FLIGHT_POLL_MS: u32 = 20;
 
 /// Milliseconds on the browser's clock. Only compared with itself; on the server, where the
 /// cache only carries the embedded first answers, everything counts as fresh.
@@ -255,7 +269,7 @@ impl ViewCache {
             if !self.in_flight.peek().contains(&flight) {
                 break;
             }
-            sleep_ms(20).await;
+            sleep_ms(IN_FLIGHT_POLL_MS).await;
         }
         let version = *self.version.peek();
         let mut in_flight = self.in_flight;
@@ -737,13 +751,13 @@ fn SimilarRivens(
                 }
             }
             if updating { p { role: "status", "Updating comparisons…" } }
-            if similar_total > similar.len().min(10) {
-                p { class: "muted small", "Showing the {similar.len().min(10)} closest of {similar_total}." }
+            if similar_total > similar.len() {
+                p { class: "muted small", "Showing the {similar.len()} closest of {similar_total}." }
             }
             if similar.is_empty() {
                 p { "No matching rivens in the stored history with these settings yet." }
             }
-            for matched in similar.iter().take(10) {
+            for matched in similar.iter() {
                 article { key: "{matched.listing.riven_id}", class: "similar-match",
                     div { class: "match-reason",
                         span { class: "match-label", "{match_label(matched)}" }
@@ -760,7 +774,7 @@ fn SimilarRivens(
                     }
                 }
             }
-            if !include_loose() && similar_total < 10 {
+            if !include_loose() && similar_total < SIMILAR_LIMIT {
                 button { class: "link-button", onclick: move |_| include_loose.set(true),
                     "Broaden to one shared positive stat"
                 }
@@ -1182,7 +1196,7 @@ fn Filters(
                         }
                     }
                 }
-                if q.positives.len() < 3 {
+                if q.positives.len() < *riven::POSITIVES.end() {
                     select {
                         aria_label: "Add a positive stat",
                         value: "",
@@ -1212,8 +1226,10 @@ fn Filters(
                         let curse = match v.as_str() {
                             "none" => CurseFilter::None,
                             "required" => CurseFilter::Required,
-                            s if s.starts_with("attr:") => CurseFilter::Attr(s[5..].to_owned()),
-                            _ => CurseFilter::Any,
+                            s => match s.strip_prefix("attr:") {
+                                Some(slug) => CurseFilter::Attr(slug.to_owned()),
+                                None => CurseFilter::Any,
+                            },
                         };
                         query.with_mut(|q| q.curse = curse);
                     },
@@ -1710,12 +1726,17 @@ fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) ->
     }
 }
 
+/// Enough of a riven id to tell rivens apart in a list.
+const SHORT_RIVEN_ID_LEN: usize = 8;
+/// How long the copy button shows that it copied.
+const COPIED_NOTICE_MS: u32 = 1500;
+
 /// A riven id with a copy button. Clicks don't bubble up to the listing row.
 #[component]
 pub(crate) fn RivenId(id: String, short: bool) -> Element {
     let mut copied = use_signal(|| false);
     let shown = if short {
-        id.chars().take(8).collect()
+        id.chars().take(SHORT_RIVEN_ID_LEN).collect()
     } else {
         id.clone()
     };
@@ -1734,7 +1755,7 @@ pub(crate) fn RivenId(id: String, short: bool) -> Element {
                     document::eval(&script);
                     copied.set(true);
                     spawn(async move {
-                        sleep_ms(1500).await;
+                        sleep_ms(COPIED_NOTICE_MS).await;
                         copied.set(false);
                     });
                 },

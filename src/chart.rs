@@ -2,10 +2,14 @@
 
 use dioxus::prelude::*;
 
-use crate::api::{self, HistoryPoint, StatEffect, attribute_name};
-use crate::ui::{format_date, format_datetime, format_plat};
+use crate::api::{
+    self, DAY_MS, EFFECT_MIN_RIVENS, EFFECT_MIN_STAT_RIVENS, HOUR_MS, HistoryPoint, StatEffect,
+    attribute_name,
+};
+use crate::ui::{format_date, format_datetime, format_plat, format_short_datetime, format_time};
 
-const INITIAL_WIDTH: f64 = 900.0;
+/// Charts are drawn at this width until they've been measured.
+pub(crate) const INITIAL_WIDTH: f64 = 900.0;
 
 thread_local! {
     /// The price chart's last measured width, shared by every chart instance.
@@ -16,11 +20,18 @@ const LEFT: f64 = 56.0;
 const RIGHT: f64 = 16.0;
 const TOP: f64 = 12.0;
 const BOTTOM: f64 = 28.0;
+/// Room each time label on the x axis needs, and how many labels there may be.
+const X_LABEL_WIDTH: f64 = 120.0;
+const X_LABELS: std::ops::RangeInclusive<f64> = 2.0..=6.0;
+/// The y axis aims for about this many steps.
+const Y_STEPS: f64 = 4.0;
+/// Resizes smaller than this are measurement noise, not worth a redraw.
+pub(crate) const RESIZE_THRESHOLD: f64 = 0.5;
 
 /// Rounds `max` up to a "nice" axis maximum and returns (max, step).
 pub(crate) fn nice_axis(max: f64) -> (f64, f64) {
     let max = max.max(1.0);
-    let raw = max / 4.0;
+    let raw = max / Y_STEPS;
     let mag = 10f64.powf(raw.log10().floor());
     let step = [1.0, 2.0, 2.5, 5.0, 10.0]
         .into_iter()
@@ -43,7 +54,7 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
         return rsx! { div { class: "chart empty", "No prices recorded for this search in this period." } };
     }
 
-    let bucket_ms = i64::from(bucket_hours.max(1)) * 3_600_000;
+    let bucket_ms = i64::from(bucket_hours.max(1)) * HOUR_MS;
     let t0 = points.first().unwrap().t;
     let t1 = points.last().unwrap().t.max(t0 + bucket_ms);
     let top = points
@@ -54,12 +65,12 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
     let (y_max, y_step) = nice_axis(top as f64);
 
     // Hourly buckets need times; a chart within one day needs nothing else.
-    let hourly = bucket_hours < 24;
-    let one_day = t1 - t0 < api::DAY_MS;
+    let hourly = i64::from(bucket_hours) * HOUR_MS < DAY_MS;
+    let one_day = t1 - t0 < DAY_MS;
     let axis_label = move |t: i64| match (hourly, one_day) {
         (false, _) => format_date(t),
-        (true, true) => format_datetime(t)[11..].to_owned(),
-        (true, false) => format_datetime(t)[5..].to_owned(),
+        (true, true) => format_time(t),
+        (true, false) => format_short_datetime(t),
     };
     let tooltip_label = move |t: i64| {
         if hourly {
@@ -101,7 +112,9 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
     // labelling them by index would crowd the labels wherever data is dense.
     let t_last = points.last().unwrap().t;
     let x_ticks: Vec<i64> = {
-        let capacity = ((w - LEFT - RIGHT) / 120.0).floor().clamp(2.0, 6.0) as i64;
+        let capacity = ((w - LEFT - RIGHT) / X_LABEL_WIDTH)
+            .floor()
+            .clamp(*X_LABELS.start(), *X_LABELS.end()) as i64;
         let buckets = (t_last - t0) / bucket_ms + 1;
         let n = buckets.min(capacity).max(1);
         let mut ticks: Vec<i64> = (0..n)
@@ -148,7 +161,7 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
         div { class: "chart",
             onresize: move |event| {
                 if let Ok(size) = event.get_content_box_size() {
-                    if size.width > LEFT + RIGHT && (size.width - width()).abs() > 0.5 {
+                    if size.width > LEFT + RIGHT && (size.width - width()).abs() > RESIZE_THRESHOLD {
                         LAST_WIDTH.set(size.width);
                         width.set(size.width);
                     }
@@ -274,8 +287,8 @@ pub fn StatEffectsPanel(weapon: String) -> Element {
                 h2 { "Which stats are wanted" }
             }
             div { class: "effects-empty",
-                if (data.rivens as usize) < 30 {
-                    "Not enough verified listings yet: {data.rivens} of the 30 needed."
+                if (data.rivens as usize) < EFFECT_MIN_RIVENS {
+                    "Not enough verified listings yet: {data.rivens} of the {EFFECT_MIN_RIVENS} needed."
                 } else {
                     "No clear pattern yet. The {data.rivens} verified listings cost {price_range}, and their stats don't predict those prices. This often means only one end of the price range has been seen so far."
                 }
@@ -289,15 +302,15 @@ pub fn StatEffectsPanel(weapon: String) -> Element {
         .iter()
         .chain(&data.negative)
         .filter(|s| s.certain)
-        .map(|s| s.effect.ln_1p().abs() * 1.25)
-        .fold(2f64.ln(), f64::max);
+        .map(|s| s.effect.ln_1p().abs() * EFFECT_SCALE_HEADROOM)
+        .fold(MIN_EFFECT_SCALE, f64::max);
 
     rsx! {
         div { class: "section-head",
             h2 { "Which stats are wanted" }
             span {
                 class: "muted small",
-                title: "From asking prices, so these are associations rather than proven effects. Bars show the model's uncertainty. Stats on fewer than 5 rivens aren't shown.",
+                title: "From asking prices, so these are associations rather than proven effects. Bars show the model's uncertainty. Stats on fewer than {EFFECT_MIN_STAT_RIVENS} rivens aren't shown.",
                 "{data.rivens} rivens · {price_range}"
             }
         }
@@ -357,6 +370,11 @@ fn EffectGroup(title: String, stats: Vec<StatEffect>, scale: f64) -> Element {
         }
     }
 }
+
+/// Room past the largest certain effect, so its bar doesn't end at the edge.
+const EFFECT_SCALE_HEADROOM: f64 = 1.25;
+/// The scale always reaches at least a doubling and a halving of the price.
+const MIN_EFFECT_SCALE: f64 = std::f64::consts::LN_2;
 
 #[component]
 fn EffectRow(stat: StatEffect, scale: f64) -> Element {

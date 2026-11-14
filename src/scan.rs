@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::api::{Overview, RivenScan, ScanAttr, attribute_name};
 use crate::ui::Route;
+use wfmt_types::riven;
 
 /// What the last scan read, so the page it opens can show what to double-check.
 #[derive(Clone, Debug, PartialEq)]
@@ -298,10 +299,10 @@ pub fn ScanNotice(target: String, matched: bool) -> Element {
     }
 }
 
-/// Positive and negative stats a riven can have: 2 or 3 positives, at most one negative.
+/// Whether the stats add up to a possible riven (see `wfmt_types::riven`).
 pub fn valid_layout(attributes: &[ScanAttr]) -> bool {
     let positives = attributes.iter().filter(|a| a.positive).count();
-    (2..=3).contains(&positives) && attributes.len() - positives <= 1
+    riven::valid_layout(positives, attributes.len() - positives)
 }
 
 /// What follows a stat's number on the riven card.
@@ -500,7 +501,7 @@ pub fn ScanEditor(scan: RivenScan, onchange: EventHandler<RivenScan>) -> Element
                         }
                     }
                 }
-                if scan.attributes.len() < 4 {
+                if scan.attributes.len() < riven::MAX_STATS {
                     button {
                         class: "link-button",
                         onclick: {
@@ -512,7 +513,7 @@ pub fn ScanEditor(scan: RivenScan, onchange: EventHandler<RivenScan>) -> Element
                             move |_| {
                                 if let Some(slug) = unused.clone() {
                                     edit(Box::new(move |s| {
-                                        let positive = s.attributes.iter().filter(|a| a.positive).count() < 3;
+                                        let positive = s.attributes.iter().filter(|a| a.positive).count() < *riven::POSITIVES.end();
                                         s.attributes.push(ScanAttr { slug, value: 0.0, positive });
                                     }));
                                 }

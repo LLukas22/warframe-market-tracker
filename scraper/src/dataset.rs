@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 
 const JOURNAL: &str = "storage/transaction.json";
 
+/// Zstd level for every parquet file the scraper writes: fast, and most of the gain.
+pub const PARQUET_ZSTD_LEVEL: i32 = 3;
+
 pub fn unique_id() -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     format!(
