@@ -1,8 +1,6 @@
-//! Scraper status and control messages, shared by the scraper engine and the web UI.
-//!
-//! The engine publishes [`ScraperStatus`] as JSON at [`STATUS_FILE`] and picks up
-//! [`Command`]s dropped as JSON files into [`COMMAND_DIR`]. Files outlive the engine, so the
-//! UI still has something to show while it restarts. All paths are relative to the data directory, all times are unix ms.
+//! Names and messages shared by the crates and the web UI: warframe.market's vocabulary, the
+//! riven attributes, and the scraper's [`ScraperStatus`] and [`Command`]s, which the server
+//! passes between its engine and the scraper page. All times are unix ms.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +23,7 @@ pub const USER_AGENT: &str = concat!(
     ")"
 );
 
-pub const STATUS_FILE: &str = "scraper/status.json";
-pub const COMMAND_DIR: &str = "scraper/commands";
+/// Held by the server whose scraper runs on a data directory, relative to it: one per directory.
 pub const LOCK_FILE: &str = "scraper/lock";
 
 pub const SECOND_MS: i64 = 1000;
@@ -35,7 +32,7 @@ pub const HOUR_MS: i64 = 60 * MINUTE_MS;
 pub const DAY_MS: i64 = 24 * HOUR_MS;
 pub const WEEK_MS: i64 = 7 * DAY_MS;
 
-/// The engine rewrites its status at least this often, so older status means it's not running.
+/// The engine republishes its status at least this often, so the times it shows stay current.
 pub const HEARTBEAT_MS: i64 = 15 * SECOND_MS;
 
 /// The rules every riven follows, for checking scans and edits against.

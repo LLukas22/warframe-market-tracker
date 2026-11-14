@@ -10,16 +10,15 @@
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, TimeDelta, Utc};
 use clap::Args;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use wfmt_types::{
-    COMMAND_DIR, Command, CurrentFetch, Feed, FetchLog, HOUR_MS, LOCK_FILE, Phase, STATUS_FILE,
-    ScraperStatus, Settings, SortBy, SweepProgress, SweepSummary, Trigger,
+    Command, CurrentFetch, Feed, FetchLog, HOUR_MS, LOCK_FILE, Phase, ScraperStatus, Settings,
+    SortBy, SweepProgress, SweepSummary, Trigger,
 };
 
 use crate::archive::{Meta, PersistedSweep, RawPage, RawResponse, State, Store, Verified};
@@ -153,84 +152,63 @@ pub fn try_lock(data_dir: &Path) -> Result<Option<Lock>> {
     }
 }
 
-/// Queues a command for whichever engine runs on this data directory.
-pub fn send_command(data_dir: &Path, command: &Command) -> Result<()> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let dir = data_dir.join(COMMAND_DIR);
-    fs::create_dir_all(&dir)?;
-    let name = format!(
-        "{}-{}-{}",
-        Utc::now().timestamp_millis(),
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let tmp = dir.join(format!("{name}.tmp"));
-    fs::write(&tmp, serde_json::to_vec(command)?)?;
-    fs::rename(tmp, dir.join(format!("{name}.json")))?;
-    Ok(())
+/// The server's side of a running engine: send it commands, stop it, and read its status. Made
+/// together with the engine's side by [`handle`].
+pub struct Handle {
+    commands: mpsc::UnboundedSender<Command>,
+    shutdown: watch::Sender<bool>,
+    status: watch::Receiver<Option<ScraperStatus>>,
 }
 
-// Polled by the engine itself: no task can outlive it and consume a successor's commands.
-struct Commands {
-    dir: PathBuf,
-    pending: VecDeque<Command>,
-    poll: tokio::time::Interval,
+/// The engine's side of a [`Handle`], given to [`Engine::run`].
+pub struct Steering {
+    commands: mpsc::UnboundedReceiver<Command>,
+    shutdown: watch::Receiver<bool>,
+    status: watch::Sender<Option<ScraperStatus>>,
 }
 
-impl Commands {
-    fn new(dir: PathBuf) -> Self {
-        let mut poll = tokio::time::interval(Duration::from_secs(1));
-        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        Self {
-            dir,
-            pending: VecDeque::new(),
-            poll,
-        }
+/// A handle and the steering it controls.
+pub fn handle() -> (Handle, Steering) {
+    let (commands_tx, commands) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown) = watch::channel(false);
+    let (status_tx, status) = watch::channel(None);
+    (
+        Handle {
+            commands: commands_tx,
+            shutdown: shutdown_tx,
+            status,
+        },
+        Steering {
+            commands,
+            shutdown,
+            status: status_tx,
+        },
+    )
+}
+
+impl Handle {
+    /// Whether the engine is still running (it hasn't stopped or failed).
+    pub fn is_running(&self) -> bool {
+        !self.commands.is_closed()
     }
 
-    fn try_recv(&mut self) -> Option<Command> {
-        self.pending.pop_front()
+    /// Passes `command` to the engine, which handles it at its next chance.
+    pub fn send(&self, command: Command) -> Result<()> {
+        self.commands
+            .send(command)
+            .map_err(|_| anyhow::anyhow!("the scraper isn't running"))
     }
 
-    async fn recv(&mut self) -> Option<Command> {
-        loop {
-            if let Some(command) = self.try_recv() {
-                return Some(command);
-            }
-            self.poll.tick().await;
-            self.pending.extend(take_commands(&self.dir));
-        }
+    /// Asks the engine to stop after saving its progress.
+    pub fn stop(&self) {
+        // Nothing to tell an engine that has stopped already.
+        let _ = self.shutdown.send(true);
     }
-}
 
-fn take_commands(data_dir: &Path) -> Vec<Command> {
-    let Ok(entries) = fs::read_dir(data_dir.join(COMMAND_DIR)) else {
-        return Vec::new();
-    };
-    let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
-    files.sort();
-    files
-        .into_iter()
-        .filter_map(|path| {
-            let command = fs::read(&path)
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok());
-            let _ = fs::remove_file(&path);
-            if command.is_none() {
-                tracing::warn!(path = %path.display(), "ignoring unreadable command");
-            }
-            command
-        })
-        .collect()
-}
-
-pub fn read_status(data_dir: &Path) -> Option<ScraperStatus> {
-    let bytes = fs::read(data_dir.join(STATUS_FILE)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    /// What the engine last reported, also after it stopped. `None` before its first report.
+    pub fn status(&self) -> Option<ScraperStatus> {
+        self.status.borrow().clone()
+    }
 }
 
 struct FetchResult {
@@ -273,6 +251,8 @@ pub struct Engine {
     weapons: Vec<Weapon>,
     since_flush: usize,
     status: ScraperStatus,
+    /// Where `status` goes; connected to a [`Handle`] by [`Engine::run`].
+    status_out: watch::Sender<Option<ScraperStatus>>,
     /// What `status.error` is about: a feed, a weapon or a step.
     error_source: Option<String>,
 }
@@ -298,6 +278,7 @@ impl Engine {
             },
             weapons: Vec::new(),
             since_flush: 0,
+            status_out: watch::channel(None).0,
             error_source: None,
             status: ScraperStatus {
                 pid: std::process::id(),
@@ -343,20 +324,11 @@ impl Engine {
         self.status.updated_at = ms(now);
         self.status.requests = self.client.requests();
         self.status.sweep = self.state.sweep.as_ref().map(|s| s.progress.clone());
-        self.status.next_sweep_at = Some(ms(self.next_sweep_at()));
+        // A sweep that's overdue (or has never run) is due now, not at the earliest time there is.
+        self.status.next_sweep_at = Some(ms(self.next_sweep_at().max(now)));
         self.status.last_sweep = self.state.last_sweep.clone();
         self.status.settings.weapons = self.weapons.len();
-        let path = self.data_dir.join(STATUS_FILE);
-        let write = || -> Result<()> {
-            fs::create_dir_all(path.parent().unwrap())?;
-            let tmp = path.with_extension("tmp");
-            fs::write(&tmp, serde_json::to_vec(&self.status)?)?;
-            fs::rename(tmp, &path)?;
-            Ok(())
-        };
-        if let Err(e) = write() {
-            tracing::warn!(error = %e, "failed to write scraper status");
-        }
+        self.status_out.send_replace(Some(self.status.clone()));
     }
 
     fn set_phase(&mut self, phase: Phase) {
@@ -772,15 +744,14 @@ impl Engine {
         }
     }
 
-    /// Runs until `shutdown` fires.
-    pub async fn run(mut self, shutdown: watch::Receiver<bool>) -> Result<()> {
+    /// Runs until its [`Handle`] stops it, taking its commands and reporting its status there.
+    pub async fn run(mut self, steering: Steering) -> Result<()> {
+        self.status_out = steering.status;
         let mut inbox = Inbox {
-            commands: Commands::new(self.data_dir.clone()),
+            commands: steering.commands,
             deferred: VecDeque::new(),
-            shutdown,
+            shutdown: steering.shutdown,
         };
-        // Drop stale commands from before this engine started.
-        take_commands(&self.data_dir);
         if let Some(sweep) = &self.state.sweep {
             tracing::info!(remaining = sweep.queue.len(), "resuming sweep");
             self.status.phase = Phase::Scraping;
@@ -815,7 +786,7 @@ impl Engine {
             schedule.next_feed_prune = Instant::now() + FEED_PRUNE_INTERVAL;
             self.prune_feeds();
         }
-        while let Some(command) = inbox.commands.try_recv() {
+        while let Ok(command) = inbox.commands.try_recv() {
             inbox.deferred.push_back(command);
         }
         let now = Utc::now();
@@ -1060,7 +1031,7 @@ enum Next {
 
 /// What the running engine listens to.
 struct Inbox {
-    commands: Commands,
+    commands: mpsc::UnboundedReceiver<Command>,
     /// Commands taken while busy, handled at the next chance.
     deferred: VecDeque<Command>,
     shutdown: watch::Receiver<bool>,
@@ -1154,27 +1125,6 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    #[tokio::test]
-    async fn dropped_command_poll_cannot_consume_a_successors_commands() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().to_path_buf();
-        let mut old = Commands::new(root.clone());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(10), old.recv())
-                .await
-                .is_err()
-        );
-        drop(old);
-        send_command(&root, &Command::Cancel)?;
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        let mut next = Commands::new(root.clone());
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), next.recv()).await?,
-            Some(Command::Cancel)
-        );
-        Ok(())
-    }
-
     fn options(no_raw: bool) -> EngineArgs {
         EngineArgs {
             storage: MaintenanceArgs {
@@ -1263,6 +1213,21 @@ mod tests {
         assert_eq!(seen.len(), PAGE_CAP);
         Ok(())
     }
+
+    #[test]
+    fn a_first_sweep_is_shown_as_due_now() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+        Store::new(root.clone())
+            .save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
+        let before = ms(Utc::now());
+        let mut engine = Engine::new(root, "2026-10-22T00:00:00Z".parse()?, options(false))?;
+        engine.publish();
+        let due = engine.status.next_sweep_at.unwrap();
+        assert!(due >= before && due <= ms(Utc::now()), "{due}");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn running_engine_prunes_expired_feed_archives() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -1289,15 +1254,23 @@ mod tests {
         )?;
         // Nothing listens here: the cleanup must not depend on the API being reachable.
         engine.client.set_api("http://127.0.0.1:1".into());
-        let (stop, shutdown) = watch::channel(false);
-        let running = tokio::spawn(engine.run(shutdown));
+        let (handle, steering) = handle();
+        let running = tokio::spawn(engine.run(steering));
         let deadline = Instant::now() + Duration::from_secs(10);
         while !store.raw_files()?.is_empty() {
             assert!(Instant::now() < deadline, "archive was not pruned");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        stop.send(true)?;
+        assert!(handle.is_running());
+        assert!(
+            handle.status().is_some(),
+            "the engine reports as soon as it runs"
+        );
+        handle.stop();
         running.await??;
+        assert!(!handle.is_running());
+        assert_eq!(handle.status().unwrap().phase, Phase::Stopped);
+        assert!(handle.send(Command::ScrapeAll).is_err());
         Ok(())
     }
 
@@ -1317,7 +1290,7 @@ mod tests {
         engine
             .client
             .set_api(format!("http://{}", listener.local_addr()?));
-        let (stop, shutdown) = watch::channel(false);
+        let (handle, steering) = handle();
         let server = std::thread::spawn(move || -> Result<Vec<String>> {
             let deadline = Instant::now() + Duration::from_secs(15);
             let mut paths = Vec::new();
@@ -1361,10 +1334,10 @@ mod tests {
                     body.len()
                 )?;
             }
-            stop.send(true)?;
+            handle.stop();
             Ok(paths)
         });
-        tokio::time::timeout(Duration::from_secs(20), engine.run(shutdown)).await??;
+        tokio::time::timeout(Duration::from_secs(20), engine.run(steering)).await??;
         let paths = server.join().unwrap()?;
         assert_eq!(paths[0], "/v1/auctions");
         assert!(paths[1].contains("/search?") && paths[1].contains("price_asc"));

@@ -3,6 +3,9 @@ services:
     image: ghcr.io/llukas22/warframe-market-tracker:main
     restart: unless-stopped
     init: true
+    # On stop, the scraper saves its progress first. That's quick, unless it's compacting,
+    # which finishes the step it's on. Docker's default of 10 seconds can cut that short.
+    stop_grace_period: 1m
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       WFMT_ADMIN_TOKEN: ${ADMIN_TOKEN:-}

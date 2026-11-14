@@ -83,12 +83,8 @@ pub async fn riven_history(id: String) -> Result<Vec<RivenAuction>, ServerFnErro
 pub async fn live_stats() -> Result<LiveStats, ServerFnError> {
     let app = crate::app::get();
     let (auctions, version) = app.query(|store| store.live()).await?;
-    let dir = &app.data_dir;
-    let running = wfmt_scraper::engine::try_lock(dir)
-        .map_err(ServerFnError::new)?
-        .is_none();
     let scraping =
-        running && wfmt_scraper::engine::read_status(dir).is_some_and(|s| s.sweep.is_some());
+        app.scraper.is_running() && app.scraper.status().is_some_and(|s| s.sweep.is_some());
     Ok(LiveStats {
         auctions,
         version,
@@ -99,13 +95,9 @@ pub async fn live_stats() -> Result<LiveStats, ServerFnError> {
 #[get("/api/scraper")]
 pub async fn scraper_status() -> Result<ScraperSnapshot, ServerFnError> {
     let app = crate::app::get();
-    let dir = &app.data_dir;
-    let running = wfmt_scraper::engine::try_lock(dir)
-        .map_err(ServerFnError::new)?
-        .is_none();
     Ok(ScraperSnapshot {
-        status: wfmt_scraper::engine::read_status(dir),
-        running,
+        status: app.scraper.status(),
+        running: app.scraper.is_running(),
         admin: app.admin.enabled(),
         disabled: !app.scraper.enabled(),
         hub: app.hub.status(),
@@ -125,19 +117,12 @@ pub async fn scraper_control(cancel: bool, token: String) -> Result<(), ServerFn
             "Scraping is turned off on this server. Set WFMT_ENABLE_SCRAPER=true to turn it on.",
         ));
     }
-    let dir = &app.data_dir;
-    if wfmt_scraper::engine::try_lock(dir)
-        .map_err(ServerFnError::new)?
-        .is_some()
-    {
-        return Err(ServerFnError::new("The scraper isn't running right now."));
-    }
     let command = if cancel {
         wfmt_types::Command::Cancel
     } else {
         wfmt_types::Command::ScrapeAll
     };
-    wfmt_scraper::engine::send_command(dir, &command).map_err(ServerFnError::new)
+    app.scraper.send(command).map_err(ServerFnError::new)
 }
 
 /// Uploads every finished day that isn't on the Hub yet, or when pulling, downloads the new

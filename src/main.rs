@@ -44,6 +44,7 @@ fn main() {
     // Runs again when the router is hot-reloaded in development, so everything here only
     // starts what isn't running yet.
     dioxus::serve(move || async move {
+        app.stop_on_signal();
         transfer::recover(app.data_dir.clone()).await?;
         app.scraper.start(&app.data_dir).await?;
         app.hub.start(app.data_dir.clone());

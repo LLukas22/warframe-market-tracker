@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow};
 use dioxus::prelude::ServerFnError;
@@ -26,6 +27,8 @@ pub struct App {
     pub transfers: Transfers,
     /// The screenshot scanner's files.
     pub ocr_dir: PathBuf,
+    /// [`App::stop_on_signal`] is listening.
+    listening: AtomicBool,
 }
 
 static APP: OnceLock<App> = OnceLock::new();
@@ -41,6 +44,7 @@ pub fn init(config: Config) -> Result<&'static App> {
         transfers: Transfers::default(),
         ocr_dir: config.ocr_dir,
         data_dir: config.data_dir,
+        listening: AtomicBool::new(false),
     };
     APP.set(app)
         .map_err(|_| anyhow!("the app is already set up"))?;
@@ -72,5 +76,46 @@ impl App {
     /// whatever this couldn't answer.
     pub fn try_now<T>(&self, f: impl FnOnce(&Data) -> T) -> Option<T> {
         self.store.try_read().map(|data| f(&data))
+    }
+
+    /// When the server is asked to stop (SIGTERM, as from `docker stop`, or Ctrl-C), stops the
+    /// scraper so it saves its progress and publishes the rows it holds, then exits. Asked
+    /// again, it exits right away. Hub transfers and imports are left to their own recovery:
+    /// both commit atomically, so stopping midway costs only the work in progress.
+    pub fn stop_on_signal(&'static self) {
+        if self.listening.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tokio::spawn(async move {
+            stop_requested().await;
+            tracing::info!("stopping the server");
+            tokio::select! {
+                () = self.scraper.stop() => tracing::info!("scraper stopped, exiting"),
+                () = stop_requested() => tracing::warn!("asked again, exiting right away"),
+            }
+            std::process::exit(0);
+        });
+    }
+}
+
+/// Waits for SIGTERM or Ctrl-C.
+async fn stop_requested() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = terminate.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+                return;
+            }
+            Err(error) => tracing::warn!("can't listen for SIGTERM: {error}"),
+        }
+    }
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::warn!("can't listen for Ctrl-C: {error}");
+        std::future::pending::<()>().await;
     }
 }

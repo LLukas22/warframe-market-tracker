@@ -291,7 +291,7 @@ fn apply_ready(root: &Path) -> Result<()> {
 
 /// Run once before the scraper starts: finishes an interrupted import and removes leftovers.
 pub async fn recover(root: PathBuf) -> Result<()> {
-    let Some(lock) = worker::lock(&root).await? else {
+    let Some(lock) = worker::lock(&root)? else {
         return Ok(());
     };
     tokio::task::spawn_blocking(move || {
@@ -317,7 +317,7 @@ async fn build_export(app: &App) -> Result<File> {
     let root = app.data_dir.clone();
     app.scraper.stop().await;
     let result = async {
-        let Some(lock) = worker::lock(&root).await? else {
+        let Some(lock) = worker::lock(&root)? else {
             bail!(OTHER_SERVER);
         };
         let root = root.clone();
@@ -398,7 +398,7 @@ async fn swap(app: &'static App, stage: PathBuf) -> Result<String> {
     let root = app.data_dir.clone();
     app.scraper.stop().await;
     let result = async {
-        let Some(lock) = worker::lock(&root).await? else {
+        let Some(lock) = worker::lock(&root)? else {
             bail!(OTHER_SERVER);
         };
         let root = root.clone();

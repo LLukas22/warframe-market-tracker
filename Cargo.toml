@@ -61,7 +61,7 @@ tracing.workspace = true
 
 # Server only
 tower-http = { version = "0.6", features = ["compression-gzip"], optional = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "fs", "time", "io-util"], optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "fs", "time", "io-util", "signal"], optional = true }
 reqwest = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
