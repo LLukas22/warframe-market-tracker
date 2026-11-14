@@ -36,6 +36,16 @@ jobs:
       - run: cargo clippy -p wfmt-ocr --all-targets --features engine
       - run: cargo clippy -p warframe-market-tracker --target wasm32-unknown-unknown
       - run: cargo clippy -p wfmt-ocr --features wasm --target wasm32-unknown-unknown
+      - run: cargo clippy -p wfmt-scraper --features reprocess --bins
+
+  # The oldest Rust the workspace says it builds with (`rust-version` in Cargo.toml).
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --features server
 
   test:
     runs-on: ubuntu-24.04

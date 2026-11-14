@@ -1,0 +1,33 @@
+---
+source: store/tests/snapshots.rs
+expression: data.riven_history(&listing.riven_id)
+---
+[
+  {
+    "auction_id": "6ade1acd1ad76900935408f9",
+    "owner_name": "player14",
+    "created": 1792940749000,
+    "first_seen": 1793491200000,
+    "last_seen": 1793620800000,
+    "gone_at": null,
+    "gone_reason": null,
+    "points": [
+      {
+        "t": 1793491200000,
+        "price": 10
+      },
+      {
+        "t": 1793534400000,
+        "price": 10
+      },
+      {
+        "t": 1793577600000,
+        "price": 10
+      },
+      {
+        "t": 1793620800000,
+        "price": 10
+      }
+    ]
+  }
+]

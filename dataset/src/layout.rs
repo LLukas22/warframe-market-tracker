@@ -80,16 +80,9 @@ impl FromStr for Table {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("not one of the dataset's tables")]
 pub struct UnknownTable;
-
-impl Display for UnknownTable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("not one of the dataset's tables")
-    }
-}
-
-impl std::error::Error for UnknownTable {}
 
 #[cfg(test)]
 mod tests {

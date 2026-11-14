@@ -66,6 +66,7 @@ impl Data {
         id: &str,
         auction_id: Option<&str>,
         comparisons: Comparisons,
+        now: i64,
     ) -> Option<RivenDetail> {
         let riven = *self.riven_index.get(id)?;
         let copies = &self.riven_auctions[riven];
@@ -88,7 +89,7 @@ impl Data {
             similar,
             similar_total,
             comparisons_hidden,
-            server_time: now_ms(),
+            server_time: now,
         })
     }
 
@@ -189,6 +190,7 @@ impl Data {
     pub(super) fn scanned_auction(
         &self,
         scan: &RivenScan,
+        now: i64,
     ) -> Option<(Auction, Option<riven::Fit>)> {
         let weapon = *self.weapon_index.get(scan.weapon.as_deref()?)?;
         let w = &self.weapons[weapon];
@@ -232,7 +234,6 @@ impl Data {
             .filter(|a| a.positive)
             .filter_map(|a| a.quality)
             .collect();
-        let now = now_ms();
         let auction = Auction {
             id: String::new(),
             weapon,
@@ -265,8 +266,8 @@ impl Data {
     /// The id of the stored riven a scan shows, if it has been listed before. Matches the way
     /// listings are identified, except that polarity isn't read from screenshots.
     /// `registry` is the riven registry, see `wfmt_dataset::layout::REGISTRY`.
-    pub fn scan_match(&self, scan: &RivenScan, registry: &Path) -> Option<String> {
-        let (auction, fit) = self.scanned_auction(scan)?;
+    pub fn scan_match(&self, scan: &RivenScan, registry: &Path, now: i64) -> Option<String> {
+        let (auction, fit) = self.scanned_auction(scan, now)?;
         let fit = fit?;
         let attrs: Vec<IdAttr> = scan
             .attributes
@@ -303,8 +304,9 @@ impl Data {
         &self,
         scan: &RivenScan,
         comparisons: Comparisons,
+        now: i64,
     ) -> Option<RivenDetail> {
-        let (auction, fit) = self.scanned_auction(scan)?;
+        let (auction, fit) = self.scanned_auction(scan, now)?;
         let (similar, similar_total, comparisons_hidden) = self.similar_to(&auction, comparisons);
         let w = &self.weapons[auction.weapon];
         let listing = Listing {
@@ -358,7 +360,7 @@ impl Data {
             similar,
             similar_total,
             comparisons_hidden,
-            server_time: now_ms(),
+            server_time: now,
         })
     }
 

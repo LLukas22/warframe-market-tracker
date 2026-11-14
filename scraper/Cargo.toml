@@ -1,9 +1,12 @@
 [package]
 name = "wfmt-scraper"
-version = "0.1.0"
-edition = "2024"
 description = "The server's background scraper: fetches warframe.market riven auctions, normalizes the rolls and stores them as parquet."
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 wfmt-types.workspace = true
@@ -18,12 +21,23 @@ parquet.workspace = true
 reqwest = { workspace = true, features = ["json", "gzip"] }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 tracing.workspace = true
 
+# Logging for the `reprocess` tool.
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[features]
+# The `reprocess` tool, see src/bin/reprocess.rs.
+reprocess = ["dep:tracing-subscriber"]
+
+[[bin]]
+name = "reprocess"
+required-features = ["reprocess"]
+
 [dev-dependencies]
 tempfile.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints]
 workspace = true

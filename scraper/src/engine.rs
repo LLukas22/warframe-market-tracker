@@ -218,24 +218,16 @@ struct FetchResult {
 }
 
 /// Why a fetch failed, which decides what the engine does next.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum FetchError {
     /// warframe.market failed or sent something unusable. Logged, and retried later.
+    #[error("{0:#}")]
     Remote(anyhow::Error),
     /// Archiving or processing a response failed. Fatal: the engine stops without advancing
     /// its state, and a restart replays the raw journal.
+    #[error("{0:#}")]
     Storage(anyhow::Error),
 }
-
-impl std::fmt::Display for FetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Remote(e) | Self::Storage(e) => write!(f, "{e:#}"),
-        }
-    }
-}
-
-impl std::error::Error for FetchError {}
 
 type FetchOutcome = std::result::Result<FetchResult, FetchError>;
 

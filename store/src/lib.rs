@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{
     Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError,
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use arrow::array::{
@@ -71,20 +71,12 @@ struct Memo {
     search: Mutex<Vec<(u64, Instant, Query, SearchResult)>>,
 }
 
-/// Tests can pin the clock, so answers on the real dataset compare across runs.
+/// The current time, for tests. The queries take theirs as `now` (unix ms), from the caller,
+/// so their answers depend only on the data and what was asked.
 #[cfg(test)]
-static FROZEN_NOW: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-
 fn now_ms() -> i64 {
-    #[cfg(test)]
-    {
-        let frozen = FROZEN_NOW.load(Ordering::Relaxed);
-        if frozen != 0 {
-            return frozen;
-        }
-    }
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or_default()
 }
@@ -505,9 +497,6 @@ mod query;
 use ids::{AttrId, AuctionId, Id, RivenId, Table, WeaponId};
 
 use load::{Catalog, apply_catalog, gone_files, part_files};
-
-#[cfg(test)]
-mod bench;
 
 #[cfg(test)]
 mod golden;

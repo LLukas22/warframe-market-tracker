@@ -1,5 +1,5 @@
 //! Rebuilds a stopped server's dataset from its raw archive, without touching the API:
-//! `cargo run -p wfmt-scraper --release --example reprocess -- --replace`
+//! `cargo run -p wfmt-scraper --release --features reprocess --bin reprocess -- --replace`
 
 use std::path::PathBuf;
 

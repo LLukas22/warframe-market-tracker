@@ -254,26 +254,17 @@ pub struct Fit {
     pub attributes: Vec<AttrFit>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Why listed values don't fit the stat model.
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum FitError {
+    #[error("invalid layout {positives}+/{negatives}-")]
     Layout { positives: usize, negatives: usize },
+    #[error("unknown attribute {0}")]
     UnknownAttribute(String),
+    #[error("attribute {0} cannot roll on this weapon class")]
     NotForClass(String),
+    #[error("values do not match any rank/disposition")]
     NoFit,
-}
-
-impl std::fmt::Display for FitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Layout {
-                positives,
-                negatives,
-            } => write!(f, "invalid layout {positives}+/{negatives}-"),
-            Self::UnknownAttribute(s) => write!(f, "unknown attribute {s}"),
-            Self::NotForClass(s) => write!(f, "attribute {s} cannot roll on this weapon class"),
-            Self::NoFit => write!(f, "values do not match any rank/disposition"),
-        }
-    }
 }
 
 /// Magnitude of the modifier `v` in formula units, plus the rounding slack in the same units.

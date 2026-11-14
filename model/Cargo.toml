@@ -1,12 +1,16 @@
 [package]
 name = "wfmt-model"
-version = "0.1.0"
-edition = "2024"
 description = "The riven stat model: fits listed attribute values to a rank, a roll and a disposition."
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 wfmt-types.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

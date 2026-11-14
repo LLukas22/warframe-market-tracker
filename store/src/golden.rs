@@ -10,6 +10,9 @@ use std::io::Write;
 use super::*;
 use wfmt_api::Period;
 
+/// A fixed clock: periods slide with time, and the two runs being compared happen apart.
+const NOW: i64 = 1_794_600_000_000;
+
 #[test]
 #[ignore = "writes answers on the real dataset for comparison"]
 fn dump_answers() {
@@ -17,8 +20,6 @@ fn dump_answers() {
         eprintln!("set WFMT_GOLDEN to the output file");
         return;
     };
-    // A fixed clock: periods slide with time, and the two runs being compared happen apart.
-    FROZEN_NOW.store(1_794_600_000_000, Ordering::Relaxed);
     let store = Store::new(std::env::var_os("WFMT_DATA_DIR").map_or_else(
         || Path::new(env!("CARGO_MANIFEST_DIR")).join("../data"),
         PathBuf::from,
@@ -33,7 +34,7 @@ fn dump_answers() {
         writeln!(file, "{name}\t{value}").unwrap();
     };
 
-    let overview = inner.overview();
+    let overview = inner.overview(NOW);
     write("overview", serde_json::to_value(&overview).unwrap());
     let mut weapons: Vec<_> = overview.weapons.iter().filter(|w| w.listings > 0).collect();
     weapons.sort_by_key(|w| std::cmp::Reverse(w.listings));
@@ -90,13 +91,13 @@ fn dump_answers() {
     for (n, q) in queries.iter().enumerate() {
         write(
             &format!("search {n}"),
-            serde_json::to_value(inner.search(q)).unwrap(),
+            serde_json::to_value(inner.search(q, NOW)).unwrap(),
         );
         for offset in [50, 100, 1000] {
             for gone in [false, true] {
                 write(
                     &format!("page {n} {offset} {gone}"),
-                    serde_json::to_value(inner.search_page(q, offset, Some(gone))).unwrap(),
+                    serde_json::to_value(inner.search_page(q, offset, Some(gone), NOW)).unwrap(),
                 );
             }
         }
@@ -109,7 +110,7 @@ fn dump_answers() {
         );
     }
 
-    let listings = inner.search(&Query::default()).listings;
+    let listings = inner.search(&Query::default(), NOW).listings;
     for l in listings.iter().take(20) {
         for options in [false, true] {
             write(
@@ -122,6 +123,7 @@ fn dump_answers() {
                         unfit: options,
                         loose: options,
                     },
+                    NOW,
                 ))
                 .unwrap(),
             );
@@ -136,7 +138,7 @@ fn dump_answers() {
         };
         write(
             &format!("id {}", l.riven_id),
-            serde_json::to_value(inner.search(&q)).unwrap(),
+            serde_json::to_value(inner.search(&q, NOW)).unwrap(),
         );
     }
 }

@@ -1,12 +1,16 @@
 [package]
 name = "wfmt-types"
-version = "0.1.0"
-edition = "2024"
-description = "Scraper status and control types, and constants, shared by the scraper, the OCR and the web UI."
-license = "MIT"
+description = "Names shared by every crate and the web UI: warframe.market's vocabulary, the riven attributes, and the scraper's status and commands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -126,16 +126,9 @@ pub struct Vocabulary {
     suffixes: Vec<(Vec<char>, Vec<String>)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub struct VocabularyError(String);
-
-impl std::fmt::Display for VocabularyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for VocabularyError {}
 
 fn names_and_keys(i18n: HashMap<String, Names>, extra: &[&str]) -> (Vec<String>, Vec<Vec<char>>) {
     let mut names: Vec<String> = i18n.into_values().map(|n| n.name).collect();

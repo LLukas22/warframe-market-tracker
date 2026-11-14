@@ -5,16 +5,21 @@ use dioxus::prelude::*;
 
 pub use wfmt_api::*;
 
+#[cfg(feature = "server")]
+use crate::app::now_ms;
+
 #[get("/api/overview")]
 pub async fn overview() -> Result<Overview, ServerFnError> {
-    crate::app::get().query(|store| store.overview_memo()).await
+    crate::app::get()
+        .query(|store| store.overview_memo(now_ms()))
+        .await
 }
 
 #[post("/api/search")]
 pub async fn search(query: Query) -> Result<SearchResult, ServerFnError> {
     query.period.validate().map_err(ServerFnError::new)?;
     crate::app::get()
-        .query(move |store| store.search_memo(&query))
+        .query(move |store| store.search_memo(&query, now_ms()))
         .await
 }
 
@@ -27,7 +32,7 @@ pub async fn listing_page(
 ) -> Result<SearchResult, ServerFnError> {
     query.period.validate().map_err(ServerFnError::new)?;
     crate::app::get()
-        .query(move |store| store.search_page(&query, offset, Some(gone)))
+        .query(move |store| store.search_page(&query, offset, Some(gone), now_ms()))
         .await
 }
 
@@ -38,7 +43,7 @@ pub async fn riven_detail(
     comparisons: Comparisons,
 ) -> Result<Option<RivenDetail>, ServerFnError> {
     crate::app::get()
-        .query(move |store| store.riven_detail(&id, auction_id.as_deref(), comparisons))
+        .query(move |store| store.riven_detail(&id, auction_id.as_deref(), comparisons, now_ms()))
         .await
 }
 
@@ -49,7 +54,7 @@ pub async fn scan_match(scan: RivenScan) -> Result<Option<String>, ServerFnError
         .data_dir
         .join(wfmt_dataset::layout::REGISTRY);
     crate::app::get()
-        .query(move |store| store.scan_match(&scan, &registry))
+        .query(move |store| store.scan_match(&scan, &registry, now_ms()))
         .await
 }
 
@@ -61,7 +66,7 @@ pub async fn scanned_detail(
     comparisons: Comparisons,
 ) -> Result<Option<RivenDetail>, ServerFnError> {
     crate::app::get()
-        .query(move |store| store.scanned_detail(&scan, comparisons))
+        .query(move |store| store.scanned_detail(&scan, comparisons, now_ms()))
         .await
 }
 
@@ -101,10 +106,7 @@ pub async fn scraper_status() -> Result<ScraperSnapshot, ServerFnError> {
         admin: app.admin.enabled(),
         disabled: !app.scraper.enabled(),
         hub: app.hub.status(),
-        server_time: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64,
+        server_time: now_ms(),
     })
 }
 
@@ -155,10 +157,10 @@ pub mod seed {
     }
 
     seeds! {
-        fn overview() -> Overview = |store| store.overview_memo();
-        fn search(query: &Query) -> SearchResult = |store| store.search_memo(query);
+        fn overview() -> Overview = |store| store.overview_memo(crate::app::now_ms());
+        fn search(query: &Query) -> SearchResult = |store| store.search_memo(query, crate::app::now_ms());
         fn stat_effects(weapon: &str) -> StatEffects = |store| store.stat_effects(weapon);
         fn riven_detail(id: &str, auction: Option<&str>) -> Option<RivenDetail> =
-            |store| store.riven_detail(id, auction, super::Comparisons::default());
+            |store| store.riven_detail(id, auction, super::Comparisons::default(), crate::app::now_ms());
     }
 }

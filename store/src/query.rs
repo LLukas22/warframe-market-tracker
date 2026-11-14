@@ -167,7 +167,7 @@ impl Data {
         (self.auctions.len() as u32, self.version)
     }
 
-    pub fn overview(&self) -> Overview {
+    pub fn overview(&self, now: i64) -> Overview {
         let mut listings = self.weapons.same_ids(0u32);
         // Sane current prices per weapon, for the median/cheapest shown in the weapon list.
         let mut prices = self.weapons.same_ids(Vec::new());
@@ -197,7 +197,7 @@ impl Data {
                 prices[a.weapon].push(p);
             }
         }
-        let week_ago = now_ms() - WEEK_MS;
+        let week_ago = now - WEEK_MS;
         let mut gone_prices = self.weapons.same_ids(Vec::new());
         for g in self.gone.iter().filter(|g| {
             g.t >= week_ago && self.gone_valid(g) && !self.superseded(&newest, g.auction)
@@ -362,12 +362,12 @@ impl Data {
         }
     }
 
-    pub fn search(&self, q: &Query) -> SearchResult {
-        self.search_page(q, 0, None)
+    pub fn search(&self, q: &Query, now: i64) -> SearchResult {
+        self.search_page(q, 0, None, now)
     }
 
     /// `overview`, reused while the data and the memo are fresh (see `Memo`).
-    pub fn overview_memo(&self) -> Overview {
+    pub fn overview_memo(&self, now: i64) -> Overview {
         // A memo is only ever replaced whole, so one left by a panic is still consistent.
         let mut memo = self
             .memo
@@ -380,15 +380,15 @@ impl Data {
         {
             return overview.clone();
         }
-        let overview = self.overview();
+        let overview = self.overview(now);
         *memo = Some((self.version, Instant::now(), overview.clone()));
         overview
     }
 
     /// `search`, reused for the all-weapon searches (see `Memo`).
-    pub fn search_memo(&self, q: &Query) -> SearchResult {
+    pub fn search_memo(&self, q: &Query, now: i64) -> SearchResult {
         if q.weapon.is_some() || q.riven_id.is_some() {
-            return self.search(q);
+            return self.search(q, now);
         }
         let mut memo = self
             .memo
@@ -399,14 +399,20 @@ impl Data {
         if let Some((_, _, _, result)) = memo.iter().find(|(_, _, query, _)| query == q) {
             return result.clone();
         }
-        let result = self.search(q);
+        let result = self.search(q, now);
         memo.insert(0, (self.version, Instant::now(), q.clone(), result.clone()));
         memo.truncate(SEARCH_MEMO_SIZE);
         result
     }
 
     /// `None` includes both first pages and history; subsequent pages fetch only one tab.
-    pub fn search_page(&self, q: &Query, offset: usize, gone_tab: Option<bool>) -> SearchResult {
+    pub fn search_page(
+        &self,
+        q: &Query,
+        offset: usize,
+        gone_tab: Option<bool>,
+        now: i64,
+    ) -> SearchResult {
         // An id search shows everything about that riven, whatever the other filters say.
         let id_query;
         let q = match &q.riven_id {
@@ -436,7 +442,7 @@ impl Data {
                         price_limit: None,
                         history: Vec::new(),
                         bucket_hours: DAY_BUCKET_HOURS,
-                        server_time: now_ms(),
+                        server_time: now,
                     };
                 }
             },
@@ -526,7 +532,6 @@ impl Data {
 
         // The period limits the chart and the disappeared listings; current listings are current.
         // An id search shows the riven's whole past.
-        let now = now_ms();
         let (start, end) = if id_search {
             (None, None)
         } else {

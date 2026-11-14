@@ -1,0 +1,713 @@
+---
+source: store/tests/snapshots.rs
+expression: "data.riven_detail(&listing.riven_id, None, comparisons, NOW)"
+---
+{
+  "listing": {
+    "auction_id": "6ade1acd1ad76900935408f9",
+    "riven_id": "8630308081adf49e",
+    "price_outlier": false,
+    "price_limit": 5000,
+    "copies": 1,
+    "sellers": 1,
+    "gone_at": null,
+    "gone_reason": null,
+    "last_seen": 1793620800000,
+    "unconfirmed": false,
+    "weapon_slug": "kulstar",
+    "weapon_name": "Kulstar",
+    "riven_name": "zetinok",
+    "price": 10,
+    "buyout_price": 10,
+    "starting_price": 10,
+    "top_bid": null,
+    "direct_sell": true,
+    "rank": 0,
+    "re_rolls": 0,
+    "mastery_level": 8,
+    "polarity": "madurai",
+    "legacy_stats": false,
+    "fit_ok": true,
+    "mean_quality": 0.0732323232323234,
+    "owner_name": "player14",
+    "owner_reputation": 7,
+    "created": 1792940749000,
+    "first_seen": 1793491200000,
+    "attributes": [
+      {
+        "slug": "recoil",
+        "positive": true,
+        "value": -13.8,
+        "value_rank8": -124.2,
+        "quality": 0.1464646464646468
+      },
+      {
+        "slug": "punch_through",
+        "positive": true,
+        "value": 0.4,
+        "value_rank8": 3.6,
+        "quality": 0.0
+      },
+      {
+        "slug": "ammo_maximum",
+        "positive": false,
+        "value": -5.8,
+        "value_rank8": -52.199999999999996,
+        "quality": 0.3821548821548819
+      }
+    ]
+  },
+  "similar": [
+    {
+      "listing": {
+        "auction_id": "6addd4e2a793d7007ebf6109",
+        "riven_id": "d3aa84a894681fa8",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "zeti-igninok",
+        "price": 10,
+        "buyout_price": 10,
+        "starting_price": 10,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 0,
+        "re_rolls": 0,
+        "mastery_level": 16,
+        "polarity": "vazarin",
+        "legacy_stats": true,
+        "fit_ok": true,
+        "mean_quality": 0.5826210826210824,
+        "owner_name": "player12",
+        "owner_reputation": 37,
+        "created": 1792922850000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "heat_damage",
+            "positive": true,
+            "value": 10.1,
+            "value_rank8": 83.90769230769232,
+            "quality": 0.6794871794871785
+          },
+          {
+            "slug": "punch_through",
+            "positive": true,
+            "value": 0.28,
+            "value_rank8": 2.3261538461538467,
+            "quality": 0.28632478632478686
+          },
+          {
+            "slug": "recoil",
+            "positive": true,
+            "value": -10.3,
+            "value_rank8": -85.56923076923078,
+            "quality": 0.7820512820512818
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 2,
+      "missing_positives": [],
+      "added_positives": [
+        "heat_damage"
+      ],
+      "same_negative": false,
+      "roll_distance": 0.460955710955711
+    },
+    {
+      "listing": {
+        "auction_id": "68e205ac36a60d0048290138",
+        "riven_id": "76b52dbcb1832f25",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "visinok",
+        "price": 15,
+        "buyout_price": 15,
+        "starting_price": 15,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 0,
+        "re_rolls": 0,
+        "mastery_level": 13,
+        "polarity": "vazarin",
+        "legacy_stats": true,
+        "fit_ok": true,
+        "mean_quality": 0.7203412859150552,
+        "owner_name": "player36",
+        "owner_reputation": 28,
+        "created": 1759643052000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "punch_through",
+            "positive": true,
+            "value": 0.5,
+            "value_rank8": 4.153846153846154,
+            "quality": 0.6800051800051791
+          },
+          {
+            "slug": "base_damage_/_melee_damage",
+            "positive": true,
+            "value": 41.3,
+            "value_rank8": 343.10769230769233,
+            "quality": 0.7606773918249313
+          },
+          {
+            "slug": "ammo_maximum",
+            "positive": false,
+            "value": -6.0,
+            "value_rank8": -49.846153846153854,
+            "quality": 0.16200466200466107
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 1,
+      "missing_positives": [
+        "recoil"
+      ],
+      "added_positives": [
+        "base_damage_/_melee_damage"
+      ],
+      "same_negative": true,
+      "roll_distance": 0.4500777000777
+    },
+    {
+      "listing": {
+        "auction_id": "6ac1284727b8c002e6779fef",
+        "riven_id": "d71cd83fdae09dd6",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "toximag",
+        "price": 10,
+        "buyout_price": 10,
+        "starting_price": 10,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 0,
+        "re_rolls": 0,
+        "mastery_level": 10,
+        "polarity": "vazarin",
+        "legacy_stats": true,
+        "fit_ok": true,
+        "mean_quality": 0.5505050505050497,
+        "owner_name": "player10",
+        "owner_reputation": 121,
+        "created": 1791043655000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "recoil",
+            "positive": true,
+            "value": -16.0,
+            "value_rank8": -132.92307692307693,
+            "quality": 0.47280497280497197
+          },
+          {
+            "slug": "toxin_damage",
+            "positive": true,
+            "value": 16.5,
+            "value_rank8": 137.0769230769231,
+            "quality": 0.6282051282051274
+          },
+          {
+            "slug": "magazine_capacity",
+            "positive": false,
+            "value": -3.2,
+            "value_rank8": -26.58461538461539,
+            "quality": 0.0
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 1,
+      "missing_positives": [
+        "punch_through"
+      ],
+      "added_positives": [
+        "toxin_damage"
+      ],
+      "same_negative": false,
+      "roll_distance": 0.32634032634032517
+    },
+    {
+      "listing": {
+        "auction_id": "6a653c0624cd40054d0c1f12",
+        "riven_id": "6bc1d591ca05ab67",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "lexiton",
+        "price": 15,
+        "buyout_price": 15,
+        "starting_price": 15,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 0,
+        "re_rolls": 0,
+        "mastery_level": 15,
+        "polarity": "vazarin",
+        "legacy_stats": true,
+        "fit_ok": true,
+        "mean_quality": 0.6891351673846233,
+        "owner_name": "player38",
+        "owner_reputation": 23,
+        "created": 1785019398000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "impact_damage",
+            "positive": true,
+            "value": 22.3,
+            "value_rank8": 185.2615384615385,
+            "quality": 0.6982651547640676
+          },
+          {
+            "slug": "punch_through",
+            "positive": true,
+            "value": 0.5,
+            "value_rank8": 4.153846153846154,
+            "quality": 0.6800051800051791
+          },
+          {
+            "slug": "fire_rate_/_attack_speed",
+            "positive": false,
+            "value": -5.7,
+            "value_rank8": -47.353846153846156,
+            "quality": 0.8360294324149744
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 1,
+      "missing_positives": [
+        "recoil"
+      ],
+      "added_positives": [
+        "impact_damage"
+      ],
+      "same_negative": false,
+      "roll_distance": 0.6800051800051791
+    },
+    {
+      "listing": {
+        "auction_id": "6ae2f7f0675913008c5b1f53",
+        "riven_id": "bfd044120a9785de",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "zetitron",
+        "price": 18,
+        "buyout_price": 18,
+        "starting_price": 18,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 0,
+        "re_rolls": 0,
+        "mastery_level": 16,
+        "polarity": "naramon",
+        "legacy_stats": false,
+        "fit_ok": true,
+        "mean_quality": 0.5084175084175109,
+        "owner_name": "player52",
+        "owner_reputation": 51,
+        "created": 1793259504000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "damage_vs_corpus",
+            "positive": true,
+            "value": 1.06,
+            "value_rank8": 1.5400000000000005,
+            "quality": 0.5505050505050549
+          },
+          {
+            "slug": "recoil",
+            "positive": true,
+            "value": -11.8,
+            "value_rank8": -106.2,
+            "quality": 0.46632996632996676
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 1,
+      "missing_positives": [
+        "punch_through"
+      ],
+      "added_positives": [
+        "damage_vs_corpus"
+      ],
+      "same_negative": false,
+      "roll_distance": 0.31986531986531996
+    },
+    {
+      "listing": {
+        "auction_id": "6ae1d4c0fd356c0046413845",
+        "riven_id": "3b020f2356505131",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "lexicon",
+        "price": 10,
+        "buyout_price": 10,
+        "starting_price": 10,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 0,
+        "re_rolls": 0,
+        "mastery_level": 15,
+        "polarity": "vazarin",
+        "legacy_stats": false,
+        "fit_ok": true,
+        "mean_quality": 0.7752525252525275,
+        "owner_name": "player19",
+        "owner_reputation": 3,
+        "created": 1793184960000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "damage_vs_grineer",
+            "positive": true,
+            "value": 1.06,
+            "value_rank8": 1.5400000000000005,
+            "quality": 0.5505050505050549
+          },
+          {
+            "slug": "punch_through",
+            "positive": true,
+            "value": 0.4,
+            "value_rank8": 3.6,
+            "quality": 1.0
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 1,
+      "missing_positives": [
+        "recoil"
+      ],
+      "added_positives": [
+        "damage_vs_grineer"
+      ],
+      "same_negative": false,
+      "roll_distance": 1.0
+    },
+    {
+      "listing": {
+        "auction_id": "6ae924084c7d58003800eede",
+        "riven_id": "19dbe4da444820f7",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "toxi-lexidra",
+        "price": 5,
+        "buyout_price": 5,
+        "starting_price": 5,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 8,
+        "re_rolls": 0,
+        "mastery_level": 13,
+        "polarity": "madurai",
+        "legacy_stats": false,
+        "fit_ok": true,
+        "mean_quality": 0.3839638388946727,
+        "owner_name": "player3",
+        "owner_reputation": 0,
+        "created": 1793664008000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "punch_through",
+            "positive": true,
+            "value": 2.3,
+            "value_rank8": 2.3,
+            "quality": 0.23251028806584353
+          },
+          {
+            "slug": "fire_rate_/_attack_speed",
+            "positive": true,
+            "value": 61.0,
+            "value_rank8": 61.0,
+            "quality": 0.03666517923545996
+          },
+          {
+            "slug": "toxin_damage",
+            "positive": true,
+            "value": 87.2,
+            "value_rank8": 87.2,
+            "quality": 0.8827160493827149
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 1,
+      "missing_positives": [
+        "recoil"
+      ],
+      "added_positives": [
+        "fire_rate_/_attack_speed",
+        "toxin_damage"
+      ],
+      "same_negative": false,
+      "roll_distance": 0.23251028806584353
+    },
+    {
+      "listing": {
+        "auction_id": "69694ffb24b7900007a22d0a",
+        "riven_id": "f29f9bebc06c62cd",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "arma-lexido",
+        "price": 20,
+        "buyout_price": 20,
+        "starting_price": 20,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 0,
+        "re_rolls": 0,
+        "mastery_level": 10,
+        "polarity": "naramon",
+        "legacy_stats": true,
+        "fit_ok": true,
+        "mean_quality": 0.4916222391469917,
+        "owner_name": "player56",
+        "owner_reputation": 8,
+        "created": 1768509435000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "magazine_capacity",
+            "positive": true,
+            "value": 5.5,
+            "value_rank8": 45.69230769230769,
+            "quality": 0.5774308200050774
+          },
+          {
+            "slug": "cold_damage",
+            "positive": true,
+            "value": 9.3,
+            "value_rank8": 77.26153846153848,
+            "quality": 0.2692307692307693
+          },
+          {
+            "slug": "punch_through",
+            "positive": true,
+            "value": 0.3,
+            "value_rank8": 2.4923076923076923,
+            "quality": 0.6282051282051285
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 1,
+      "missing_positives": [
+        "recoil"
+      ],
+      "added_positives": [
+        "cold_damage",
+        "magazine_capacity"
+      ],
+      "same_negative": false,
+      "roll_distance": 0.6282051282051285
+    },
+    {
+      "listing": {
+        "auction_id": "6ae8fd70f3f5ca0023702472",
+        "riven_id": "76d7d6970344949d",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "lexi-decibin",
+        "price": 5,
+        "buyout_price": 5,
+        "starting_price": 5,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 8,
+        "re_rolls": 0,
+        "mastery_level": 11,
+        "polarity": "vazarin",
+        "legacy_stats": false,
+        "fit_ok": true,
+        "mean_quality": 0.8093673564887353,
+        "owner_name": "player2",
+        "owner_reputation": 5,
+        "created": 1793654128000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "status_duration",
+            "positive": true,
+            "value": 95.4,
+            "value_rank8": 95.4,
+            "quality": 0.8005300530053009
+          },
+          {
+            "slug": "punch_through",
+            "positive": true,
+            "value": 2.6,
+            "value_rank8": 2.6,
+            "quality": 0.8497942386831283
+          },
+          {
+            "slug": "ammo_maximum",
+            "positive": true,
+            "value": 85.5,
+            "value_rank8": 85.5,
+            "quality": 0.7777777777777765
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 1,
+      "missing_positives": [
+        "recoil"
+      ],
+      "added_positives": [
+        "status_duration",
+        "ammo_maximum"
+      ],
+      "same_negative": false,
+      "roll_distance": 0.8497942386831283
+    },
+    {
+      "listing": {
+        "auction_id": "6adc732ea793d7004693716d",
+        "riven_id": "398ee415c737493a",
+        "price_outlier": false,
+        "price_limit": 5000,
+        "copies": 1,
+        "sellers": 1,
+        "gone_at": null,
+        "gone_reason": null,
+        "last_seen": 1793620800000,
+        "unconfirmed": false,
+        "weapon_slug": "kulstar",
+        "weapon_name": "Kulstar",
+        "riven_name": "lexi-critades",
+        "price": 30,
+        "buyout_price": 30,
+        "starting_price": 30,
+        "top_bid": null,
+        "direct_sell": true,
+        "rank": 0,
+        "re_rolls": 0,
+        "mastery_level": 9,
+        "polarity": "naramon",
+        "legacy_stats": false,
+        "fit_ok": true,
+        "mean_quality": 0.41132624002829893,
+        "owner_name": "player81",
+        "owner_reputation": 3,
+        "created": 1792832302000,
+        "first_seen": 1793491200000,
+        "attributes": [
+          {
+            "slug": "critical_chance",
+            "positive": true,
+            "value": 13.9,
+            "value_rank8": 125.10000000000001,
+            "quality": 0.13351867408029622
+          },
+          {
+            "slug": "status_duration",
+            "positive": true,
+            "value": 9.2,
+            "value_rank8": 82.8,
+            "quality": 0.10046004600460065
+          },
+          {
+            "slug": "punch_through",
+            "positive": true,
+            "value": 0.3,
+            "value_rank8": 2.6999999999999997,
+            "quality": 1.0
+          }
+        ]
+      },
+      "same_stats": false,
+      "shared_positives": 1,
+      "missing_positives": [
+        "recoil"
+      ],
+      "added_positives": [
+        "status_duration",
+        "critical_chance"
+      ],
+      "same_negative": false,
+      "roll_distance": 1.0
+    }
+  ],
+  "similar_total": 16,
+  "comparisons_hidden": 0,
+  "server_time": 1793664000000
+}

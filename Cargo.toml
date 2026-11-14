@@ -1,13 +1,24 @@
 [package]
 name = "warframe-market-tracker"
-version = "0.1.0"
-edition = "2024"
 description = "Web app for browsing warframe.market riven auctions, which it scrapes in the background."
-license = "MIT"
-repository = "https://github.com/LLukas22/warframe-market-tracker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [workspace]
 members = ["api", "dataset", "model", "ocr", "scraper", "store", "types"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# The lowest the locked dependencies allow.
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/LLukas22/warframe-market-tracker"
+publish = false
 
 # Versions shared by the crates. Members add the features they need.
 [workspace.dependencies]
@@ -26,6 +37,7 @@ reqwest = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+thiserror = "2"
 tokio = "1"
 tracing = "0.1"
 # Must match the installed wasm-bindgen CLI (`wasm-bindgen --version`), dx refuses mismatches.

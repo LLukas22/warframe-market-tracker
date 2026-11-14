@@ -1,0 +1,13 @@
+---
+source: store/tests/snapshots.rs
+expression: "data.stat_effects(\"kulstar\")"
+---
+{
+  "rivens": 47,
+  "low_price": 10,
+  "high_price": 49,
+  "explained": 0.10177953912104187,
+  "positive": [],
+  "negative": [],
+  "rare_stats": 21
+}

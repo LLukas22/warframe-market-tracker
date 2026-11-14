@@ -97,24 +97,15 @@ pub use market::{Feed, RivenType, SortBy, Unit, WeaponClass, WeaponGroup};
 /// Names warframe.market uses, as enums. They serialize to warframe.market's own spelling, which
 /// is also how archives and parquet files store them.
 pub mod market {
-    use std::fmt;
-
     use serde::{Deserialize, Serialize};
 
     /// A name none of an enum's variants has.
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+    #[error("unknown {kind}: {name:?}")]
     pub struct UnknownName {
         pub kind: &'static str,
         pub name: String,
     }
-
-    impl fmt::Display for UnknownName {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "unknown {}: {:?}", self.kind, self.name)
-        }
-    }
-
-    impl std::error::Error for UnknownName {}
 
     /// warframe.market's site-wide listings. Their ids name the raw archive, the fetch log
     /// entry and the `source` of the rows they produce, where weapon searches put a weapon.

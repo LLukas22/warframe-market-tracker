@@ -1,9 +1,12 @@
 [package]
 name = "wfmt-ocr"
-version = "0.1.0"
-edition = "2024"
 description = "Reads riven mods from in-game screenshots: PaddleOCR (pure-onnx-ocr) plus a riven card parser. Builds for the browser."
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["rlib", "cdylib"]
@@ -18,6 +21,7 @@ wasm = ["engine", "dep:wasm-bindgen"]
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 wfmt-types.workspace = true
 # Its default `multithread` feature needs threads, which plain wasm32 doesn't have.
 pure-onnx-ocr = { version = "0.3.2", default-features = false, optional = true }

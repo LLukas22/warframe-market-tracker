@@ -8,16 +8,9 @@ use serde::Serialize;
 use crate::parse::{Line, RerollArea, ScannedRiven, parse_with_layout, rerolls_in};
 use crate::vocab::Vocabulary;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub struct ScanError(String);
-
-impl std::fmt::Display for ScanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ScanError {}
 
 /// What a scan found: the riven, plus the raw lines for showing or debugging.
 #[derive(Clone, Debug, Serialize)]

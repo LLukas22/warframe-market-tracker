@@ -1,9 +1,12 @@
 [package]
 name = "wfmt-store"
-version = "0.1.0"
-edition = "2024"
 description = "The server's read model: the dataset in memory, indexed to answer the web UI's searches and riven pages."
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 wfmt-types.workspace = true
@@ -20,6 +23,10 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Benchmarks on the real dataset, see benches/queries.rs.
+divan = "0.1"
+# Snapshots of the query answers, see tests/snapshots.rs.
+insta = { version = "1", features = ["json"] }
 # Tests write their data the way the scraper does.
 wfmt-scraper.workspace = true
 chrono.workspace = true
@@ -28,3 +35,7 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "queries"
+harness = false

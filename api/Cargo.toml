@@ -1,9 +1,12 @@
 [package]
 name = "wfmt-api"
-version = "0.1.0"
-edition = "2024"
 description = "Queries and answers exchanged by the web UI and its server, shared so both build from one definition."
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 wfmt-types.workspace = true

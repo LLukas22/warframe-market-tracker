@@ -51,6 +51,11 @@ pub fn init(config: Config) -> Result<&'static App> {
     Ok(get())
 }
 
+/// The current time in unix ms, which the queries take as `now`.
+pub fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 pub fn get() -> &'static App {
     APP.get()
         .expect("main sets the app up before anything is served")

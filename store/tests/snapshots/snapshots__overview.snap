@@ -1,0 +1,180 @@
+---
+source: store/tests/snapshots.rs
+expression: data.overview(NOW)
+---
+{
+  "weapons": [
+    {
+      "slug": "kulstar",
+      "name": "Kulstar",
+      "class": "pistol",
+      "group": "unknown",
+      "has_image": false,
+      "listings": 99,
+      "median_price": 15,
+      "min_price": 10,
+      "gone_7d": 0,
+      "gone_median_7d": null,
+      "last_scrape": 1793620800000
+    }
+  ],
+  "attributes": [
+    {
+      "slug": "ammo_maximum",
+      "name": "Ammo Maximum",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "cold_damage",
+      "name": "Cold",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "critical_chance",
+      "name": "Critical Chance",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "critical_damage",
+      "name": "Critical Damage",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "base_damage_/_melee_damage",
+      "name": "Damage",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "damage_vs_corpus",
+      "name": "Damage to Corpus",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "damage_vs_grineer",
+      "name": "Damage to Grineer",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "damage_vs_infested",
+      "name": "Damage to Infested",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "electric_damage",
+      "name": "Electricity",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "fire_rate_/_attack_speed",
+      "name": "Fire Rate / Attack Speed",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "heat_damage",
+      "name": "Heat",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "impact_damage",
+      "name": "Impact",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "magazine_capacity",
+      "name": "Magazine Capacity",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "multishot",
+      "name": "Multishot",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "projectile_speed",
+      "name": "Projectile Speed",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "punch_through",
+      "name": "Punch Through",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "reload_speed",
+      "name": "Reload Speed",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "status_chance",
+      "name": "Status Chance",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "status_duration",
+      "name": "Status Duration",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "toxin_damage",
+      "name": "Toxin",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "recoil",
+      "name": "Weapon Recoil",
+      "classes": [
+        "pistol"
+      ]
+    },
+    {
+      "slug": "zoom",
+      "name": "Zoom",
+      "classes": [
+        "pistol"
+      ]
+    }
+  ],
+  "auctions": 100,
+  "observations": 399,
+  "last_scrape": 1793620800000
+}

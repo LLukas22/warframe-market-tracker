@@ -1,0 +1,64 @@
+---
+source: store/tests/snapshots.rs
+expression: "data.riven_detail(&listing.riven_id, None, comparisons, NOW)"
+---
+{
+  "listing": {
+    "auction_id": "6ade1acd1ad76900935408f9",
+    "riven_id": "8630308081adf49e",
+    "price_outlier": false,
+    "price_limit": 5000,
+    "copies": 1,
+    "sellers": 1,
+    "gone_at": null,
+    "gone_reason": null,
+    "last_seen": 1793620800000,
+    "unconfirmed": false,
+    "weapon_slug": "kulstar",
+    "weapon_name": "Kulstar",
+    "riven_name": "zetinok",
+    "price": 10,
+    "buyout_price": 10,
+    "starting_price": 10,
+    "top_bid": null,
+    "direct_sell": true,
+    "rank": 0,
+    "re_rolls": 0,
+    "mastery_level": 8,
+    "polarity": "madurai",
+    "legacy_stats": false,
+    "fit_ok": true,
+    "mean_quality": 0.0732323232323234,
+    "owner_name": "player14",
+    "owner_reputation": 7,
+    "created": 1792940749000,
+    "first_seen": 1793491200000,
+    "attributes": [
+      {
+        "slug": "recoil",
+        "positive": true,
+        "value": -13.8,
+        "value_rank8": -124.2,
+        "quality": 0.1464646464646468
+      },
+      {
+        "slug": "punch_through",
+        "positive": true,
+        "value": 0.4,
+        "value_rank8": 3.6,
+        "quality": 0.0
+      },
+      {
+        "slug": "ammo_maximum",
+        "positive": false,
+        "value": -5.8,
+        "value_rank8": -52.199999999999996,
+        "quality": 0.3821548821548819
+      }
+    ]
+  },
+  "similar": [],
+  "similar_total": 0,
+  "comparisons_hidden": 1,
+  "server_time": 1793664000000
+}

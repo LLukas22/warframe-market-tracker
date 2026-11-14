@@ -148,7 +148,7 @@ fn comparisons_rank_stats_then_normalized_rolls_and_ignore_price_and_rank() {
     );
     inner.auctions[incompatible].attrs.remove(0);
     let detail = inner
-        .riven_detail("source", None, Comparisons::default())
+        .riven_detail("source", None, Comparisons::default(), now_ms())
         .unwrap();
     let ids: Vec<_> = detail
         .similar
@@ -170,7 +170,7 @@ fn comparisons_rank_stats_then_normalized_rolls_and_ignore_price_and_rank() {
     inner.auctions[source].fit_ok = false;
     assert!(
         inner
-            .riven_detail("source", None, Comparisons::default())
+            .riven_detail("source", None, Comparisons::default(), now_ms())
             .unwrap()
             .similar
             .iter()
@@ -217,7 +217,7 @@ fn partial_matches_rank_overlap_before_curse_quality_and_recency() {
     inner.auctions[unrelated].attrs[0].positive = false;
     inner.auctions[unrelated].attrs[1].attr = heat;
     let normal = inner
-        .riven_detail("source", None, Comparisons::default())
+        .riven_detail("source", None, Comparisons::default(), now_ms())
         .unwrap();
     let ids = |result: &RivenDetail| {
         result
@@ -243,6 +243,7 @@ fn partial_matches_rank_overlap_before_curse_quality_and_recency() {
                 unfit: false,
                 loose: true,
             },
+            now_ms(),
         )
         .unwrap();
     assert_eq!(
@@ -252,7 +253,7 @@ fn partial_matches_rank_overlap_before_curse_quality_and_recency() {
     assert_eq!(broad.similar.last().unwrap().shared_positives, 1);
     // The reverse comparison also admits supersets, even with unavailable quality.
     let reverse = inner
-        .riven_detail("subset", None, Comparisons::default())
+        .riven_detail("subset", None, Comparisons::default(), now_ms())
         .unwrap();
     let superset = reverse
         .similar
@@ -294,7 +295,7 @@ fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() 
     let unfit = comparison_auction(&mut inner, weapon, "unfit", Some(0.5), None, 1000);
     inner.auctions[unfit].fit_ok = false;
     let result = inner
-        .riven_detail("source", None, Comparisons::default())
+        .riven_detail("source", None, Comparisons::default(), now_ms())
         .unwrap();
     assert_eq!(result.similar_total, 1);
     assert_eq!(result.comparisons_hidden, 2);
@@ -310,7 +311,8 @@ fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() 
                     legacy: true,
                     unfit: true,
                     loose: false,
-                }
+                },
+                now_ms()
             )
             .unwrap()
             .similar_total,
@@ -318,22 +320,22 @@ fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() 
     );
     assert!(
         inner
-            .riven_detail("missing", None, Comparisons::default())
+            .riven_detail("missing", None, Comparisons::default(), now_ms())
             .is_none()
     );
     assert!(
         inner
-            .riven_detail("source", Some("old"), Comparisons::default())
+            .riven_detail("source", Some("old"), Comparisons::default(), now_ms())
             .is_none()
     );
     assert!(
         inner
-            .riven_detail("source", Some("missing"), Comparisons::default())
+            .riven_detail("source", Some("missing"), Comparisons::default(), now_ms())
             .is_none()
     );
     assert_eq!(
         inner
-            .riven_detail("old", None, Comparisons::default())
+            .riven_detail("old", None, Comparisons::default(), now_ms())
             .unwrap()
             .listing
             .auction_id,
@@ -341,7 +343,7 @@ fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() 
     );
     assert_eq!(
         inner
-            .riven_detail("old", Some("old"), Comparisons::default())
+            .riven_detail("old", Some("old"), Comparisons::default(), now_ms())
             .unwrap()
             .listing
             .auction_id,
@@ -356,7 +358,8 @@ fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() 
                     legacy: true,
                     unfit: true,
                     loose: false,
-                }
+                },
+                now_ms()
             )
             .unwrap()
             .similar
@@ -393,7 +396,7 @@ fn comparisons_are_bounded_with_deterministic_recency_ties() {
     comparison_auction(&mut inner, weapon, "source", Some(0.5), None, 1000);
     assert!(
         inner
-            .riven_detail("source", None, Comparisons::default())
+            .riven_detail("source", None, Comparisons::default(), now_ms())
             .unwrap()
             .similar
             .is_empty()
@@ -409,7 +412,7 @@ fn comparisons_are_bounded_with_deterministic_recency_ties() {
         );
     }
     let result = inner
-        .riven_detail("source", None, Comparisons::default())
+        .riven_detail("source", None, Comparisons::default(), now_ms())
         .unwrap();
     assert_eq!(result.similar_total, 25);
     assert_eq!(result.similar.len(), 10);
@@ -422,6 +425,7 @@ fn comparisons_are_bounded_with_deterministic_recency_ties() {
                 unfit: false,
                 loose: true,
             },
+            now_ms(),
         )
         .unwrap();
     assert_eq!(broad.similar.len(), 10);
@@ -429,7 +433,7 @@ fn comparisons_are_bounded_with_deterministic_recency_ties() {
     assert_eq!(result.similar[0].listing.auction_id, "match-24");
     inner.auctions.iter_mut().last().unwrap().last_seen = 2023;
     let result = inner
-        .riven_detail("source", None, Comparisons::default())
+        .riven_detail("source", None, Comparisons::default(), now_ms())
         .unwrap();
     assert_eq!(result.similar[0].listing.auction_id, "match-23");
 }
@@ -635,11 +639,11 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
                 owner_changed,
                 ..all_time()
             };
-            let result = inner.search(&query);
+            let result = inner.search(&query, now_ms());
             let totals = if gone { (0, expected) } else { (expected, 0) };
             assert_eq!((result.total, result.gone_total), totals);
-            let first = inner.search_page(&query, 0, Some(gone));
-            let second = inner.search_page(&query, 50, Some(gone));
+            let first = inner.search_page(&query, 0, Some(gone), now_ms());
+            let second = inner.search_page(&query, 50, Some(gone), now_ms());
             let rows: Vec<_> = if gone {
                 first.gone.into_iter().chain(second.gone).collect()
             } else {
@@ -658,12 +662,15 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
                 assert!(rows.iter().all(|l| l.riven_id.starts_with("both")));
             }
         }
-        let id = inner.search(&Query {
-            riven_id: Some("same".into()),
-            price_changed: true,
-            owner_changed: true,
-            ..all_time()
-        });
+        let id = inner.search(
+            &Query {
+                riven_id: Some("same".into()),
+                price_changed: true,
+                owner_changed: true,
+                ..all_time()
+            },
+            now_ms(),
+        );
         assert_eq!(id.total + id.gone_total, 1, "ID searches ignore filters");
     }
 
@@ -674,10 +681,13 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
     inner.finish_load();
     assert_eq!(
         inner
-            .search(&Query {
-                price_changed: true,
-                ..all_time()
-            })
+            .search(
+                &Query {
+                    price_changed: true,
+                    ..all_time()
+                },
+                now_ms()
+            )
             .gone_total,
         59
     );
@@ -685,10 +695,13 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
     inner.finish_load();
     assert_eq!(
         inner
-            .search(&Query {
-                price_changed: true,
-                ..all_time()
-            })
+            .search(
+                &Query {
+                    price_changed: true,
+                    ..all_time()
+                },
+                now_ms()
+            )
             .gone_total,
         58
     );
@@ -717,10 +730,13 @@ fn period_limits_chart_and_gone_listings_but_not_current_ones() {
     }
     inner.finish_load();
     let search = |period| {
-        inner.search(&Query {
-            period,
-            ..all_time()
-        })
+        inner.search(
+            &Query {
+                period,
+                ..all_time()
+            },
+            now_ms(),
+        )
     };
 
     let all = search(Period::All);
@@ -769,11 +785,14 @@ fn period_limits_chart_and_gone_listings_but_not_current_ones() {
 
     // An id search shows the riven's whole past whatever the period.
     let id = inner.auctions[old].riven;
-    let found = inner.search(&Query {
-        riven_id: Some(inner.rivens[id].clone()),
-        period: Period::Today,
-        ..all_time()
-    });
+    let found = inner.search(
+        &Query {
+            riven_id: Some(inner.rivens[id].clone()),
+            period: Period::Today,
+            ..all_time()
+        },
+        now_ms(),
+    );
     assert_eq!(found.gone_total, 1);
 }
 
@@ -820,13 +839,13 @@ fn listing_pages_reach_every_match_beyond_the_old_caps() {
             sort,
             ..all_time()
         };
-        let first = inner.search(&query);
+        let first = inner.search(&query, now_ms());
         assert_eq!((first.total, first.gone_total), (237, 113));
         assert_eq!((first.listings.len(), first.gone.len()), (50, 50));
         for (gone, expected) in [(false, 237), (true, 113)] {
             let mut ids = HashSet::default();
             for offset in (0..expected).step_by(LISTING_PAGE_SIZE) {
-                let page = inner.search_page(&query, offset, Some(gone));
+                let page = inner.search_page(&query, offset, Some(gone), now_ms());
                 assert!(page.history.is_empty());
                 let rows = if gone {
                     assert!(page.listings.is_empty());
@@ -842,7 +861,7 @@ fn listing_pages_reach_every_match_beyond_the_old_caps() {
                 }
             }
             assert_eq!(ids.len(), expected);
-            let end = inner.search_page(&query, expected, Some(gone));
+            let end = inner.search_page(&query, expected, Some(gone), now_ms());
             assert!(end.listings.is_empty() && end.gone.is_empty());
         }
         let filtered = inner.search_page(
@@ -852,6 +871,7 @@ fn listing_pages_reach_every_match_beyond_the_old_caps() {
             },
             0,
             Some(false),
+            now_ms(),
         );
         assert_eq!(filtered.total, 0);
     }
@@ -868,7 +888,7 @@ fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
         weapon: Some("w".into()),
         ..all_time()
     };
-    let result = inner.search(&query);
+    let result = inner.search(&query, now_ms());
     assert_eq!(result.total, 1);
     assert!(result.listings[0].unconfirmed);
     assert_eq!(result.listings[0].last_seen, 1000);
@@ -878,7 +898,7 @@ fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
     });
     // As after `load_gone`: every load ends with `finish_load`.
     inner.finish_load();
-    assert_eq!(inner.search(&query).total, 0);
+    assert_eq!(inner.search(&query, now_ms()).total, 0);
 }
 
 #[test]
@@ -901,7 +921,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
         weapon: Some("w".into()),
         ..all_time()
     };
-    let result = inner.search(&query);
+    let result = inner.search(&query, now_ms());
     assert_eq!(result.total, 1);
     assert_eq!(result.listings[0].auction_id, "new");
     assert_eq!(result.listings[0].copies, 2);
@@ -911,8 +931,8 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
         max_price: Some(200),
         ..query.clone()
     };
-    assert_eq!(inner.search(&cheap).total, 0);
-    let w = &inner.overview().weapons[0];
+    assert_eq!(inner.search(&cheap, now_ms()).total, 0);
+    let w = &inner.overview(now_ms()).weapons[0];
     assert_eq!((w.listings, w.min_price), (1, Some(300)));
 
     // Once the old auction is gone, it was relisted rather than sold.
@@ -927,7 +947,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
         direct_sell: true,
     });
     inner.finish_load();
-    let result = inner.search(&query);
+    let result = inner.search(&query, now_ms());
     assert_eq!((result.total, result.gone_total), (1, 0));
     assert!(result.history.iter().all(|h| h.gone_count == 0));
     // When the relist disappears too, it is the one shown as gone.
@@ -942,7 +962,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
         direct_sell: true,
     });
     inner.finish_load();
-    let result = inner.search(&query);
+    let result = inner.search(&query, now_ms());
     assert_eq!((result.total, result.gone_total), (0, 1));
     assert_eq!(result.gone[0].auction_id, "new");
 }
@@ -962,7 +982,7 @@ fn history_uses_latest_price_of_the_newest_copy() {
         weapon: Some("w".into()),
         ..all_time()
     };
-    let history = inner.search(&query).history;
+    let history = inner.search(&query, now_ms()).history;
     assert_eq!(history.len(), 1);
     assert_eq!((history[0].count, history[0].min), (1, 150));
     // An earlier matching price must not survive a later out-of-range price.
@@ -970,7 +990,7 @@ fn history_uses_latest_price_of_the_newest_copy() {
         max_price: Some(175),
         ..query
     };
-    assert_eq!(inner.search(&filtered).history[0].min, 150);
+    assert_eq!(inner.search(&filtered, now_ms()).history[0].min, 150);
 }
 
 #[test]
@@ -1009,7 +1029,7 @@ fn invalid_prices_stay_out_of_listings_charts_and_medians() {
         ..all_time()
     };
 
-    let result = inner.search(&query);
+    let result = inner.search(&query, now_ms());
     assert_eq!(result.total, 9);
     assert_eq!(result.outliers_hidden, 1);
     assert_eq!(result.price_limit, Some(5000));
@@ -1020,15 +1040,18 @@ fn invalid_prices_stay_out_of_listings_charts_and_medians() {
             .iter()
             .all(|p| p.p75 == 100 && p.gone_count == 0)
     );
-    let info = &inner.overview().weapons[0];
+    let info = &inner.overview(now_ms()).weapons[0];
     assert_eq!((info.median_price, info.gone_7d), (Some(100), 0));
 
     // Asking for them adds flagged listings, but the analysis stays clean.
-    let shown = inner.search(&Query {
-        include_outliers: true,
-        sort: Sort::PriceDesc,
-        ..query.clone()
-    });
+    let shown = inner.search(
+        &Query {
+            include_outliers: true,
+            sort: Sort::PriceDesc,
+            ..query.clone()
+        },
+        now_ms(),
+    );
     assert_eq!((shown.total, shown.outliers_hidden), (10, 0));
     assert!(shown.listings[0].price_outlier && !shown.listings[1].price_outlier);
     assert_eq!(shown.gone.len(), 1);
@@ -1044,10 +1067,13 @@ fn invalid_prices_stay_out_of_listings_charts_and_medians() {
 fn riven_id_search_shows_an_invalid_price_with_its_chart() {
     let inner = store_with_outlier();
     let id = inner.auctions[inner.auction_index["joke"]].riven;
-    let result = inner.search(&Query {
-        riven_id: Some(inner.rivens[id].clone()),
-        ..all_time()
-    });
+    let result = inner.search(
+        &Query {
+            riven_id: Some(inner.rivens[id].clone()),
+            ..all_time()
+        },
+        now_ms(),
+    );
     assert_eq!(result.total, 1);
     assert!(result.listings[0].price_outlier);
     assert_eq!(result.history.last().map(|p| p.median), Some(66666));

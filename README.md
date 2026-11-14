@@ -29,3 +29,10 @@ A Cargo workspace. The web app (Dioxus, at the root) is a thin layer over librar
 | `scraper/` (`wfmt-scraper`) | The warframe.market client and the engine that turns its responses into dataset rows. |
 | `store/` (`wfmt-store`) | The server's read model: the dataset in memory, answering searches and riven pages. |
 | `ocr/` (`wfmt-ocr`) | Reads rivens from screenshots, in the browser. |
+
+## Development
+
+- `cargo test --workspace --features server` runs the tests. `store/tests/snapshots.rs` compares the answers to every kind of query with the snapshots in `store/tests/snapshots/`; after an intended change, review and accept the new ones with [`cargo insta review`](https://insta.rs).
+- `cargo bench -p wfmt-store --bench queries` times the queries on the real dataset in `./data` (or `WFMT_DATA_DIR`).
+- `WFMT_GOLDEN=out.jsonl cargo test --release -p wfmt-store golden -- --ignored` writes the answers to many queries on the real dataset, to diff two versions of the code.
+- `cargo run -p wfmt-scraper --release --features reprocess --bin reprocess -- --replace` rebuilds a stopped server's dataset from its raw archive.
