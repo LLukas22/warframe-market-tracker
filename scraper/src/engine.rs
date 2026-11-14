@@ -17,8 +17,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use clap::Args;
 use tokio::sync::{mpsc, watch};
 use wfmt_types::{
-    Command, CurrentFetch, Feed, FetchLog, HOUR_MS, LOCK_FILE, Phase, ScraperStatus, Settings,
-    SortBy, SweepProgress, SweepSummary, Trigger,
+    Command, CurrentFetch, Feed, FetchLog, HOUR_MS, LOCK_FILE, MaintenanceSummary, Phase,
+    ScraperStatus, Settings, SortBy, SweepProgress, SweepSummary, Trigger,
 };
 
 use crate::archive::{Meta, PersistedSweep, RawPage, RawResponse, State, Store, Verified};
@@ -35,6 +35,8 @@ const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
 const FEED_PRUNE_INTERVAL: Duration = Duration::from_hours(1);
 /// How often the status is republished while maintenance blocks the main loop.
 const MAINTENANCE_STATUS_INTERVAL: Duration = Duration::from_secs(5);
+/// What `status.error` names when maintenance fails.
+const MAINTENANCE: &str = "storage maintenance";
 /// Wait after a failed weapon list download before trying again.
 const METADATA_RETRY_DELAY: TimeDelta = TimeDelta::minutes(10);
 /// Scheduled sweeps skip weapons fetched within this share of the sweep interval, by a manual
@@ -288,8 +290,10 @@ impl Engine {
                     sort_by: args.sort_by.clone(),
                     verify_missing: args.verify_missing,
                     weapons: 0,
+                    maintenance_interval_hours: args.storage.maintenance_interval_hours,
                 },
                 error: None,
+                last_maintenance: None,
             },
             state,
             data_dir,
@@ -467,6 +471,8 @@ impl Engine {
                 }
             }
             Command::Cancel => self.finish_sweep(true)?,
+            // Taken out at the start of each step, see `Engine::step`.
+            Command::Maintain => {}
         }
         Ok(())
     }
@@ -768,8 +774,19 @@ impl Engine {
     /// One turn of the main loop: the most urgent of maintenance, the weapon list, commands,
     /// a feed poll, the next weapon of a sweep, or waiting.
     async fn step(&mut self, inbox: &mut Inbox, schedule: &mut Schedule) -> Result<Next> {
-        if Instant::now() >= schedule.next_maintenance {
-            self.maintain().await?;
+        while let Ok(command) = inbox.commands.try_recv() {
+            inbox.deferred.push_back(command);
+        }
+        // Asked for maintenance goes first, like maintenance that's due; a sweep carries on
+        // after it. Asking twice runs it once.
+        let asked = inbox.take(&Command::Maintain);
+        if asked || Instant::now() >= schedule.next_maintenance {
+            let trigger = if asked {
+                Trigger::Manual
+            } else {
+                Trigger::Schedule
+            };
+            self.maintain(trigger).await?;
             schedule.next_maintenance =
                 Instant::now() + Duration::from_hours(self.args.storage.maintenance_interval_hours);
             return Ok(Next::Continue);
@@ -777,9 +794,6 @@ impl Engine {
         if self.args.feed_raw_retention_hours > 0 && Instant::now() >= schedule.next_feed_prune {
             schedule.next_feed_prune = Instant::now() + FEED_PRUNE_INTERVAL;
             self.prune_feeds();
-        }
-        while let Ok(command) = inbox.commands.try_recv() {
-            inbox.deferred.push_back(command);
         }
         let now = Utc::now();
         let sweep_due = self.state.sweep.is_none() && now >= self.next_sweep_at();
@@ -823,7 +837,7 @@ impl Engine {
 
     /// Runs storage maintenance, publishing the status meanwhile. Commands stay queued, and
     /// shutdown waits for the local transaction to finish safely.
-    async fn maintain(&mut self) -> Result<()> {
+    async fn maintain(&mut self, trigger: Trigger) -> Result<()> {
         self.sink.flush()?;
         self.set_phase(Phase::Maintenance);
         let dir = self.data_dir.clone();
@@ -836,10 +850,30 @@ impl Engine {
                 _ = tokio::time::sleep(MAINTENANCE_STATUS_INTERVAL) => self.publish(),
             }
         };
-        if let Err(e) = result {
-            tracing::error!(error = %e, "storage maintenance failed");
-            self.set_error("storage maintenance", e);
+        let mut summary = MaintenanceSummary {
+            finished_at: ms(Utc::now()),
+            trigger,
+            merged: 0,
+            written: 0,
+            raw_deleted: 0,
+            failed: false,
+        };
+        match result {
+            Ok(report) => {
+                summary.merged = report.compacted_inputs;
+                summary.written = report.compacted_outputs;
+                summary.raw_deleted = report.raw_deleted;
+                if self.error_source.as_deref() == Some(MAINTENANCE) {
+                    self.clear_error();
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "storage maintenance failed");
+                summary.failed = true;
+                self.set_error(MAINTENANCE, e);
+            }
         }
+        self.status.last_maintenance = Some(summary);
         self.set_phase(self.working_phase());
         Ok(())
     }
@@ -1036,6 +1070,13 @@ enum Interrupt {
 }
 
 impl Inbox {
+    /// Takes every waiting `command` out of the queue, and says whether there was one.
+    fn take(&mut self, command: &Command) -> bool {
+        let before = self.deferred.len();
+        self.deferred.retain(|c| c != command);
+        self.deferred.len() != before
+    }
+
     /// Runs `work` until it's done, or until a cancel or shutdown abandons it. Other commands
     /// that arrive meanwhile are kept for later.
     async fn interruptible<T>(
@@ -1263,6 +1304,51 @@ mod tests {
         assert!(!handle.is_running());
         assert_eq!(handle.status().unwrap().phase, Phase::Stopped);
         assert!(handle.send(Command::ScrapeAll).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn maintenance_runs_when_asked_for() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+        let mut args = options(false);
+        args.recent_interval_secs = 0;
+        args.popular_interval_secs = 0;
+        Store::new(root.clone())
+            .save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
+        let mut engine = Engine::new(root, "2026-10-22T00:00:00Z".parse()?, args)?;
+        // Idle: the weapon list is fresh and no sweep is due.
+        engine.meta.checked_at = Some(Utc::now());
+        engine.state.last_sweep_started = Some(Utc::now());
+        engine.client.set_api("http://127.0.0.1:1".into());
+        let (handle, steering) = handle();
+        let running = tokio::spawn(engine.run(steering));
+        let last = |trigger: Trigger| {
+            let handle = &handle;
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let status = handle.status();
+                    if let Some(last) = status.and_then(|s| s.last_maintenance)
+                        && last.trigger == trigger
+                    {
+                        return last;
+                    }
+                    assert!(Instant::now() < deadline, "no {trigger:?} maintenance");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        // The first pass is due at once; the next only hours later, unless asked for.
+        let scheduled = last(Trigger::Schedule).await;
+        assert!(!scheduled.failed);
+        handle.send(Command::Maintain)?;
+        handle.send(Command::Maintain)?;
+        let asked = last(Trigger::Manual).await;
+        assert!(!asked.failed);
+        assert!(asked.finished_at >= scheduled.finished_at);
+        handle.stop();
+        running.await??;
         Ok(())
     }
 

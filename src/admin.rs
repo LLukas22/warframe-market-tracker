@@ -1,5 +1,6 @@
 //! The admin token (`WFMT_ADMIN_TOKEN`) guarding everything that changes what the server does or
-//! holds: starting or cancelling a scrape, exporting and uploading. Without it these stay off.
+//! holds: starting or cancelling a scrape, running storage maintenance, exporting and uploading.
+//! Without it these stay off.
 
 use std::time::Duration;
 

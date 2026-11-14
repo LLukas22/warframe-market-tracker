@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use wfmt_types::{
-    DAY_MS, FetchLog, HOUR_MS, MINUTE_MS, Phase, SECOND_MS, ScraperStatus, SweepSummary,
+    DAY_MS, FetchLog, HOUR_MS, MINUTE_MS, MaintenanceSummary, Phase, SECOND_MS, ScraperStatus,
+    SweepSummary, Trigger,
 };
 
 use crate::api::{self, HubStatus, ScraperSnapshot};
@@ -94,11 +95,19 @@ pub fn ScraperPanel() -> Element {
             if let Some(error) = control_error() {
                 p { class: "error small", role: "alert", "{error}" }
             }
+            if let Some(value) = snapshot().filter(|s| !s.disabled && s.status.is_some()) {
+                StorageCard {
+                    snapshot: value,
+                    admin,
+                    token: token(),
+                    connected: connection_error().is_none(),
+                }
+            }
             if admin {
                 DataTransfer { token: token() }
             } else if snapshot().is_some() {
                 p { class: "muted small",
-                    "Set an admin token on the server to start or cancel scrapes and to export or upload data."
+                    "Set an admin token on the server to start or cancel scrapes, run maintenance, and export or upload data."
                 }
             }
             if let Some(value) = snapshot().filter(|s| admin || s.hub.dataset.is_some() || s.hub.error.is_some()) {
@@ -355,6 +364,117 @@ fn HubCard(hub: HubStatus, now: i64, admin: bool, token: String) -> Element {
                 }
             }
         }
+    }
+}
+
+/// Storage maintenance: when it last ran and what it did, and a button to run it now.
+#[component]
+fn StorageCard(snapshot: ScraperSnapshot, admin: bool, token: String, connected: bool) -> Element {
+    // The server time a pass was asked for at, until a pass finishes after it.
+    let mut asked_at = use_signal(|| None::<i64>);
+    let mut request_error = use_signal(|| None::<String>);
+    let mut sending = use_signal(|| false);
+    let Some(status) = snapshot.status.as_ref() else {
+        return rsx! {};
+    };
+    let now = snapshot.server_time;
+    let last = status.last_maintenance.as_ref();
+    let online = connected && snapshot.running && status.phase != Phase::Stopped;
+    let running = online && status.phase == Phase::Maintenance;
+    let queued = online
+        && !running
+        && (sending() || asked_at().is_some_and(|at| last.is_none_or(|l| l.finished_at < at)));
+    let no_token = token.is_empty();
+    let label = if running {
+        "Compacting…"
+    } else if queued {
+        "Queued…"
+    } else {
+        "Compact now"
+    };
+    let interval = status.settings.maintenance_interval_hours;
+    let run = move |_| {
+        let token = token.clone();
+        sending.set(true);
+        request_error.set(None);
+        spawn(async move {
+            match api::scraper_maintain(token).await {
+                Ok(at) => asked_at.set(Some(at)),
+                Err(error) => request_error.set(Some(error_message(error))),
+            }
+            sending.set(false);
+        });
+    };
+
+    rsx! {
+        section { class: "scraper-card",
+            div { class: "scraper-now",
+                span { class: if running { "scraper-dot busy" } else if online { "scraper-dot online" } else { "scraper-dot" } }
+                strong { "Storage" }
+                if admin {
+                    button {
+                        class: "scraper-action",
+                        disabled: no_token || !online || running || queued,
+                        title: if no_token { NEEDS_TOKEN },
+                        onclick: run,
+                        "{label}"
+                    }
+                }
+            }
+            dl {
+                div {
+                    dt { "Last maintenance" }
+                    dd {
+                        title: last.map_or(String::new(), |l| format!("{} UTC", format_datetime(l.finished_at))),
+                        {last.map_or("—".into(), |l| last_maintenance(l, now))}
+                    }
+                }
+                div {
+                    dt { "Result" }
+                    dd { {last.map_or("—".into(), maintenance_result)} }
+                }
+            }
+            if let Some(error) = request_error() {
+                p { class: "error small", role: "alert", "{error}" }
+            } else {
+                p { class: "muted small",
+                    "Every {interval}h, each finished UTC day is compacted into one sorted file per table, and raw archives past their retention are deleted. The Hugging Face upload picks up newly compacted days within the hour."
+                }
+            }
+        }
+    }
+}
+
+fn last_maintenance(last: &MaintenanceSummary, now: i64) -> String {
+    let by = match last.trigger {
+        Trigger::Manual => " · asked for",
+        _ => "",
+    };
+    format!("{} ago{by}", duration(now - last.finished_at))
+}
+
+fn maintenance_result(last: &MaintenanceSummary) -> String {
+    if last.failed {
+        return "Failed, see the error above".into();
+    }
+    let mut parts = Vec::new();
+    if last.merged > 0 {
+        parts.push(format!(
+            "{} files compacted into {}",
+            count(last.merged as u64),
+            count(last.written as u64)
+        ));
+    }
+    if last.raw_deleted > 0 {
+        parts.push(format!(
+            "{} raw archives deleted",
+            count(last.raw_deleted as u64)
+        ));
+    }
+    if parts.is_empty() {
+        "Nothing to do".into()
+    } else {
+        parts.join(" · ")
     }
 }
 
@@ -635,8 +755,10 @@ mod tests {
                     sort_by: vec![wfmt_types::SortBy::PriceAsc, wfmt_types::SortBy::PriceDesc],
                     verify_missing: 0,
                     weapons: 100,
+                    maintenance_interval_hours: 6,
                 },
                 error: None,
+                last_maintenance: None,
             }),
         }
     }
@@ -757,6 +879,58 @@ mod tests {
         pulling.hub.pull = true;
         let html = render(pulling, true, None);
         assert!(html.contains("downloads its data from Hugging Face"));
+    }
+
+    fn render_storage(snapshot: ScraperSnapshot, admin: bool, token: &str) -> String {
+        #[derive(Clone, PartialEq, Props)]
+        struct TestProps {
+            snapshot: ScraperSnapshot,
+            admin: bool,
+            token: String,
+        }
+        fn test_card(props: TestProps) -> Element {
+            rsx! { StorageCard { snapshot: props.snapshot, admin: props.admin, token: props.token, connected: true } }
+        }
+        let mut dom = VirtualDom::new_with_props(
+            test_card,
+            TestProps {
+                snapshot,
+                admin,
+                token: token.into(),
+            },
+        );
+        dom.rebuild_in_place();
+        dioxus::ssr::render(&dom)
+    }
+
+    #[test]
+    fn storage_card_runs_maintenance_only_with_the_admin_token() {
+        let mut snapshot = sample();
+        snapshot.status.as_mut().unwrap().last_maintenance = Some(MaintenanceSummary {
+            finished_at: snapshot.server_time - 5 * MINUTE_MS,
+            trigger: Trigger::Manual,
+            merged: 1234,
+            written: 3,
+            raw_deleted: 40,
+            failed: false,
+        });
+        let html = render_storage(snapshot.clone(), true, "secret");
+        assert!(html.contains("Compact now"));
+        assert!(!button_disabled(&html));
+        assert!(html.contains("5m ago · asked for"));
+        assert!(html.contains("1,234 files compacted into 3 · 40 raw archives deleted"));
+        assert!(html.contains("Every 6h"));
+
+        assert!(button_disabled(&render_storage(snapshot.clone(), true, "")));
+        // Without a token on the server, there's no button at all.
+        assert!(!render_storage(snapshot.clone(), false, "").contains("<button"));
+
+        let status = snapshot.status.as_mut().unwrap();
+        status.phase = Phase::Maintenance;
+        status.last_maintenance = None;
+        let running = render_storage(snapshot, true, "secret");
+        assert!(running.contains("Compacting…"));
+        assert!(button_disabled(&running));
     }
 
     #[test]

@@ -283,6 +283,9 @@ pub enum Command {
     ScrapeAll,
     /// Stop the running sweep after aborting the current request.
     Cancel,
+    /// Run storage maintenance now instead of waiting for its interval: compact the closed
+    /// days and prune old raw archives. Waits for the current request, not for a sweep.
+    Maintain,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +360,22 @@ pub struct Settings {
     pub sort_by: Vec<SortBy>,
     pub verify_missing: usize,
     pub weapons: usize,
+    /// Hours between storage maintenance passes.
+    #[serde(default)]
+    pub maintenance_interval_hours: u64,
+}
+
+/// The last storage maintenance pass since the engine started.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaintenanceSummary {
+    pub finished_at: i64,
+    pub trigger: Trigger,
+    /// Parquet files merged, and the files they became.
+    pub merged: usize,
+    pub written: usize,
+    pub raw_deleted: usize,
+    /// The pass failed, for some days or as a whole; the status error says why.
+    pub failed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -374,6 +393,8 @@ pub struct ScraperStatus {
     pub requests: u64,
     pub settings: Settings,
     pub error: Option<String>,
+    #[serde(default)]
+    pub last_maintenance: Option<MaintenanceSummary>,
 }
 
 #[cfg(test)]

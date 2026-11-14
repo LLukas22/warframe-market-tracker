@@ -127,6 +127,24 @@ pub async fn scraper_control(cancel: bool, token: String) -> Result<(), ServerFn
     app.scraper.send(command).map_err(ServerFnError::new)
 }
 
+/// Runs storage maintenance now: compacts the closed days and prunes old raw archives. Answers
+/// with the server time it was asked at, so the page can tell when that pass has finished.
+#[post("/api/scraper/maintain")]
+pub async fn scraper_maintain(token: String) -> Result<i64, ServerFnError> {
+    let app = crate::app::get();
+    app.admin.check(&token).await?;
+    if !app.scraper.enabled() {
+        return Err(ServerFnError::new(
+            "Scraping is turned off on this server, and maintenance runs with the scraper.",
+        ));
+    }
+    let asked_at = now_ms();
+    app.scraper
+        .send(wfmt_types::Command::Maintain)
+        .map_err(ServerFnError::new)?;
+    Ok(asked_at)
+}
+
 /// Uploads every finished day that isn't on the Hub yet, or when pulling, downloads the new
 /// days, without waiting for the hourly check.
 #[post("/api/hub/upload")]
