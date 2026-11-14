@@ -46,66 +46,54 @@ const LOCAL_CATALOG: &str = "cache/riven_weapons.json";
 /// Larger READMEs were written by someone and are never replaced.
 const PLACEHOLDER_MAX: u64 = 4096;
 
+/// A dataset on the Hub.
 #[derive(Clone)]
-struct Config {
+pub struct Repo {
     /// Needed for uploads, and for pulling a private dataset.
     token: Option<String>,
     /// `owner/name`.
     dataset: String,
 }
 
-enum Mode {
+/// What the server does with the Hub.
+pub enum Mode {
     Off,
-    Upload(Config),
-    Pull(Config),
+    Upload(Repo),
+    Pull(Repo),
 }
 
-fn env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-}
-
-/// What the settings ask for, or what's wrong with them.
-fn mode() -> Result<Mode> {
-    resolve(
-        env("WFMT_HF_TOKEN"),
-        env("WFMT_HF_DATASET"),
-        env("WFMT_HF_PULL_DATASET"),
-        crate::worker::enabled().unwrap_or(false),
-    )
-}
-
-/// A scraping server has its own data, so it ignores `WFMT_HF_PULL_DATASET`.
-fn resolve(
-    token: Option<String>,
-    upload: Option<String>,
-    pull: Option<String>,
-    scraping: bool,
-) -> Result<Mode> {
-    if let Some(pull) = pull.as_deref().filter(|_| !scraping) {
-        if upload.is_some() {
-            bail!(
-                "WFMT_HF_DATASET and WFMT_HF_PULL_DATASET are both set. A server only uploads \
-                 what it scrapes, so set WFMT_ENABLE_SCRAPER=true or clear one of them."
-            );
+impl Mode {
+    /// From `WFMT_HF_TOKEN`, `WFMT_HF_DATASET` and `WFMT_HF_PULL_DATASET`, or what's wrong
+    /// with them. A scraping server has its own data, so it ignores `WFMT_HF_PULL_DATASET`.
+    pub fn from_settings(
+        token: Option<String>,
+        upload: Option<String>,
+        pull: Option<String>,
+        scraping: bool,
+    ) -> Result<Self> {
+        if let Some(pull) = pull.as_deref().filter(|_| !scraping) {
+            if upload.is_some() {
+                bail!(
+                    "WFMT_HF_DATASET and WFMT_HF_PULL_DATASET are both set. A server only uploads \
+                     what it scrapes, so set WFMT_ENABLE_SCRAPER=true or clear one of them."
+                );
+            }
+            return Ok(Mode::Pull(Repo {
+                token,
+                dataset: dataset_id("WFMT_HF_PULL_DATASET", pull)?,
+            }));
         }
-        return Ok(Mode::Pull(Config {
-            token,
-            dataset: dataset_id("WFMT_HF_PULL_DATASET", pull)?,
-        }));
-    }
-    match (token, upload) {
-        (None, None) => Ok(Mode::Off),
-        (Some(token), Some(dataset)) => Ok(Mode::Upload(Config {
-            token: Some(token),
-            dataset: dataset_id("WFMT_HF_DATASET", &dataset)?,
-        })),
-        (None, Some(_)) => bail!("WFMT_HF_DATASET is set, but WFMT_HF_TOKEN isn't."),
-        // The token is there for pulling a private dataset.
-        (Some(_), None) if pull.is_some() => Ok(Mode::Off),
-        (Some(_), None) => bail!("WFMT_HF_TOKEN is set, but WFMT_HF_DATASET isn't."),
+        match (token, upload) {
+            (None, None) => Ok(Mode::Off),
+            (Some(token), Some(dataset)) => Ok(Mode::Upload(Repo {
+                token: Some(token),
+                dataset: dataset_id("WFMT_HF_DATASET", &dataset)?,
+            })),
+            (None, Some(_)) => bail!("WFMT_HF_DATASET is set, but WFMT_HF_TOKEN isn't."),
+            // The token is there for pulling a private dataset.
+            (Some(_), None) if pull.is_some() => Ok(Mode::Off),
+            (Some(_), None) => bail!("WFMT_HF_TOKEN is set, but WFMT_HF_DATASET isn't."),
+        }
     }
 }
 
@@ -167,93 +155,151 @@ struct Live {
     commit_url: Option<String>,
 }
 
-static LIVE: Mutex<Live> = Mutex::new(Live {
-    running: false,
-    last_check_at: None,
-    outcome: None,
-    error: None,
-    last_upload_at: None,
-    last_day: None,
-    commit_url: None,
-});
-static STARTED: AtomicBool = AtomicBool::new(false);
-static FORCE: AtomicBool = AtomicBool::new(false);
-static WAKE: Notify = Notify::const_new();
-
-fn live() -> std::sync::MutexGuard<'static, Live> {
-    LIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn publish(state: &State) {
-    let mut live = live();
-    live.last_upload_at = state.last_upload_at;
-    live.last_day = state.days.keys().next_back().cloned();
-    live.commit_url = state.commit_url.clone();
+/// The uploads or downloads, and how they're going.
+pub struct Hub {
+    mode: Mode,
+    live: Mutex<Live>,
+    started: AtomicBool,
+    /// A check was asked for, see [`Hub::request_upload`].
+    force: AtomicBool,
+    wake: Notify,
 }
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-pub fn status() -> HubStatus {
-    let mode = mode();
-    let (dataset, pull) = match &mode {
-        Ok(Mode::Upload(config)) => (Some(config.dataset.clone()), false),
-        Ok(Mode::Pull(config)) => (Some(config.dataset.clone()), true),
-        Ok(Mode::Off) | Err(_) => (None, false),
-    };
-    let live = live();
-    HubStatus {
-        dataset,
-        pull,
-        running: live.running,
-        queued: FORCE.load(Ordering::SeqCst),
-        last_upload_at: live.last_upload_at,
-        last_day: live.last_day.clone(),
-        commit_url: live.commit_url.clone(),
-        last_check_at: live.last_check_at,
-        outcome: live.outcome.clone(),
-        error: mode
-            .err()
-            .map(|e| e.to_string())
-            .or_else(|| live.error.clone()),
+impl Hub {
+    pub fn new(mode: Mode) -> Self {
+        Self {
+            mode,
+            live: Mutex::new(Live::default()),
+            started: AtomicBool::new(false),
+            force: AtomicBool::new(false),
+            wake: Notify::new(),
+        }
+    }
+
+    fn live(&self) -> std::sync::MutexGuard<'_, Live> {
+        self.live
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn publish(&self, state: &State) {
+        let mut live = self.live();
+        live.last_upload_at = state.last_upload_at;
+        live.last_day = state.days.keys().next_back().cloned();
+        live.commit_url = state.commit_url.clone();
+    }
+
+    pub fn status(&self) -> HubStatus {
+        let (dataset, pull) = match &self.mode {
+            Mode::Upload(repo) => (Some(repo.dataset.clone()), false),
+            Mode::Pull(repo) => (Some(repo.dataset.clone()), true),
+            Mode::Off => (None, false),
+        };
+        let live = self.live();
+        HubStatus {
+            dataset,
+            pull,
+            running: live.running,
+            queued: self.force.load(Ordering::SeqCst),
+            last_upload_at: live.last_upload_at,
+            last_day: live.last_day.clone(),
+            commit_url: live.commit_url.clone(),
+            last_check_at: live.last_check_at,
+            outcome: live.outcome.clone(),
+            error: live.error.clone(),
+        }
+    }
+
+    /// Checks every finished day against the Hub right away, after the current check if one
+    /// runs. When pulling, checks the dataset for new days instead.
+    pub fn request_upload(&self) -> Result<()> {
+        if matches!(self.mode, Mode::Off) || !self.started.load(Ordering::SeqCst) {
+            bail!("Hugging Face isn't set up on this server.");
+        }
+        self.force.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// Starts the hourly upload or download check on the data in `root`, if either is set up.
+    pub fn start(&'static self, root: PathBuf) {
+        let (repo, pulling) = match &self.mode {
+            Mode::Upload(repo) => (repo.clone(), false),
+            Mode::Pull(repo) => (repo.clone(), true),
+            Mode::Off => return,
+        };
+        if self.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if pulling {
+            pull::start(self, root, repo);
+            return;
+        }
+        match load_state(&root, &repo.dataset) {
+            Ok(state) => self.publish(&state),
+            Err(error) => self.live().error = Some(format!("{error:#}")),
+        }
+        tokio::spawn(self.run(root, repo));
+    }
+
+    /// Runs `check` now and then, and whenever [`Hub::request_upload`] asks, keeping the status
+    /// up to date. `check` gets whether it was asked for.
+    async fn every_hour<F, Fut>(&self, first: Duration, mut check: F)
+    where
+        F: FnMut(bool) -> Fut,
+        Fut: std::future::Future<Output = Result<String>>,
+    {
+        let mut wait = first;
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                () = self.wake.notified() => {}
+            }
+            wait = CHECK_INTERVAL;
+            let forced = self.force.swap(false, Ordering::SeqCst);
+            self.live().running = true;
+            let result = check(forced).await;
+            let mut live = self.live();
+            live.running = false;
+            live.last_check_at = Some(now_ms());
+            match result {
+                Ok(outcome) => {
+                    live.outcome = Some(outcome);
+                    live.error = None;
+                }
+                Err(error) => {
+                    tracing::warn!("hugging face sync failed: {error:#}");
+                    live.error = Some(format!("{error:#}"));
+                }
+            }
+        }
+    }
+
+    async fn run(&self, root: PathBuf, repo: Repo) {
+        let client = match repository(&repo) {
+            Ok(client) => client,
+            Err(error) => {
+                self.live().error = Some(format!("{error:#}"));
+                return;
+            }
+        };
+        self.every_hour(FIRST_CHECK, |forced| {
+            let (root, client, dataset) = (root.clone(), client.clone(), repo.dataset.clone());
+            async move {
+                let result = sync(self, &root, &client, &dataset, forced).await;
+                let _ = fs::remove_dir_all(root.join(SNAPSHOT));
+                result
+            }
+        })
+        .await;
     }
 }
 
-/// Checks every finished day against the Hub right away, after the current check if one runs.
-/// When pulling, checks the dataset for new days instead.
-pub fn request_upload() -> Result<()> {
-    if matches!(mode()?, Mode::Off) || !STARTED.load(Ordering::SeqCst) {
-        bail!("Hugging Face isn't set up on this server.");
-    }
-    FORCE.store(true, Ordering::SeqCst);
-    WAKE.notify_one();
-    Ok(())
-}
-
-/// Starts the hourly upload or download check, if either is set up.
-pub fn start() {
-    let (config, pulling) = match mode() {
-        Ok(Mode::Upload(config)) => (config, false),
-        Ok(Mode::Pull(config)) => (config, true),
-        Ok(Mode::Off) | Err(_) => return,
-    };
-    if STARTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let root = crate::data::data_dir();
-    if pulling {
-        pull::start(root, config);
-        return;
-    }
-    match load_state(&root, &config.dataset) {
-        Ok(state) => publish(&state),
-        Err(error) => live().error = Some(format!("{error:#}")),
-    }
-    tokio::spawn(run(root, config));
-}
-
-fn repository(config: &Config) -> Result<HFRepository<RepoTypeDataset>> {
+fn repository(config: &Repo) -> Result<HFRepository<RepoTypeDataset>> {
     let mut builder = HFClient::builder().user_agent(wfmt_types::USER_AGENT);
     if let Some(token) = &config.token {
         builder = builder.token(token);
@@ -266,58 +312,6 @@ fn repository(config: &Config) -> Result<HFRepository<RepoTypeDataset>> {
         .split_once('/')
         .ok_or_else(|| anyhow!("{} isn't owner/name", config.dataset))?;
     Ok(client.dataset(owner, name))
-}
-
-/// Runs `check` now and then, and whenever [`request_upload`] asks, keeping [`LIVE`] up to date.
-/// `check` gets whether it was asked for.
-async fn every_hour<F, Fut>(first: Duration, mut check: F)
-where
-    F: FnMut(bool) -> Fut,
-    Fut: std::future::Future<Output = Result<String>>,
-{
-    let mut wait = first;
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => {}
-            _ = WAKE.notified() => {}
-        }
-        wait = CHECK_INTERVAL;
-        let forced = FORCE.swap(false, Ordering::SeqCst);
-        live().running = true;
-        let result = check(forced).await;
-        let mut live = live();
-        live.running = false;
-        live.last_check_at = Some(now_ms());
-        match result {
-            Ok(outcome) => {
-                live.outcome = Some(outcome);
-                live.error = None;
-            }
-            Err(error) => {
-                tracing::warn!("hugging face sync failed: {error:#}");
-                live.error = Some(format!("{error:#}"));
-            }
-        }
-    }
-}
-
-async fn run(root: PathBuf, config: Config) {
-    let repo = match repository(&config) {
-        Ok(repo) => repo,
-        Err(error) => {
-            live().error = Some(format!("{error:#}"));
-            return;
-        }
-    };
-    every_hour(FIRST_CHECK, |forced| {
-        let (root, repo, dataset) = (root.clone(), repo.clone(), config.dataset.clone());
-        async move {
-            let result = sync(&root, &repo, &dataset, forced).await;
-            let _ = fs::remove_dir_all(root.join(SNAPSHOT));
-            result
-        }
-    })
-    .await;
 }
 
 struct Day {
@@ -620,6 +614,7 @@ fn days_text(count: usize) -> String {
 }
 
 async fn sync(
+    hub: &Hub,
     root: &Path,
     repo: &HFRepository<RepoTypeDataset>,
     dataset: &str,
@@ -687,7 +682,7 @@ async fn sync(
     }
     if unchanged > 0 {
         save_state(root, &state)?;
-        publish(&state);
+        hub.publish(&state);
     }
     if batches.is_empty() && !extras.is_empty() {
         let message = match (card_added, upload_catalog) {
@@ -734,7 +729,7 @@ async fn sync(
             state.catalog = catalog;
         }
         save_state(root, &state)?;
-        publish(&state);
+        hub.publish(&state);
     }
     if check_card && card_problem.is_none() && !state.card_checked {
         state.card_checked = true;
@@ -811,20 +806,39 @@ mod tests {
         };
         let pull = some("LLukas22/wf-riven-data");
         assert_eq!(
-            name(resolve(None, None, pull.clone(), false)),
+            name(Mode::from_settings(None, None, pull.clone(), false)),
             "pull LLukas22/wf-riven-data"
         );
-        assert_eq!(name(resolve(None, None, pull.clone(), true)), "off");
-        assert_eq!(name(resolve(some("t"), None, pull.clone(), true)), "off");
         assert_eq!(
-            name(resolve(some("t"), some("me/rivens"), pull.clone(), true)),
+            name(Mode::from_settings(None, None, pull.clone(), true)),
+            "off"
+        );
+        assert_eq!(
+            name(Mode::from_settings(some("t"), None, pull.clone(), true)),
+            "off"
+        );
+        assert_eq!(
+            name(Mode::from_settings(
+                some("t"),
+                some("me/rivens"),
+                pull.clone(),
+                true
+            )),
             "upload me/rivens"
         );
         assert_eq!(
-            name(resolve(some("t"), some("me/rivens"), pull, false)),
+            name(Mode::from_settings(
+                some("t"),
+                some("me/rivens"),
+                pull,
+                false
+            )),
             "error"
         );
-        assert_eq!(name(resolve(some("t"), None, None, true)), "error");
+        assert_eq!(
+            name(Mode::from_settings(some("t"), None, None, true)),
+            "error"
+        );
     }
 
     #[test]

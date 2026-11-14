@@ -8,7 +8,13 @@ use tokio::sync::Mutex;
 
 /// Wrong tokens are answered one at a time, this slowly, which limits guessing.
 const WRONG_TOKEN_DELAY: Duration = Duration::from_secs(1);
-static WRONG_TOKENS: Mutex<()> = Mutex::const_new(());
+
+/// Checks admin tokens against the server's.
+pub struct Admin {
+    token: Option<String>,
+    /// Held while a wrong token is answered.
+    wrong_tokens: Mutex<()>,
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Denied {
@@ -42,30 +48,35 @@ impl From<Denied> for dioxus::prelude::ServerFnError {
     }
 }
 
-fn admin_token() -> Option<String> {
-    std::env::var("WFMT_ADMIN_TOKEN")
-        .ok()
-        .filter(|t| !t.trim().is_empty())
-}
-
-pub fn enabled() -> bool {
-    admin_token().is_some()
-}
-
 /// Takes the same time wherever the tokens differ, so timing doesn't give the token away.
 fn token_matches(expected: &str, given: &str) -> bool {
     use subtle::ConstantTimeEq;
     expected.as_bytes().ct_eq(given.as_bytes()).into()
 }
 
-pub async fn check(given: &str) -> Result<(), Denied> {
-    let expected = admin_token().ok_or(Denied::NoTokenSet)?;
-    if token_matches(&expected, given) {
-        return Ok(());
+impl Admin {
+    /// `token` is `WFMT_ADMIN_TOKEN`, see `Config`.
+    pub fn new(token: Option<String>) -> Self {
+        Self {
+            token,
+            wrong_tokens: Mutex::new(()),
+        }
     }
-    let _one_at_a_time = WRONG_TOKENS.lock().await;
-    tokio::time::sleep(WRONG_TOKEN_DELAY).await;
-    Err(Denied::WrongToken)
+
+    /// The server has a token, so the actions it guards are possible at all.
+    pub fn enabled(&self) -> bool {
+        self.token.is_some()
+    }
+
+    pub async fn check(&self, given: &str) -> Result<(), Denied> {
+        let expected = self.token.as_deref().ok_or(Denied::NoTokenSet)?;
+        if token_matches(expected, given) {
+            return Ok(());
+        }
+        let _one_at_a_time = self.wrong_tokens.lock().await;
+        tokio::time::sleep(WRONG_TOKEN_DELAY).await;
+        Err(Denied::WrongToken)
+    }
 }
 
 #[cfg(test)]

@@ -105,14 +105,16 @@ pub struct EngineArgs {
 }
 
 impl EngineArgs {
-    /// Defaults, overridden by `WFMT_*` environment variables.
-    pub fn from_env() -> Self {
+    /// Defaults, overridden by `WFMT_*` environment variables, or what's wrong with those.
+    pub fn from_env() -> Result<Self> {
         #[derive(clap::Parser)]
         struct Wrapper {
             #[command(flatten)]
             args: EngineArgs,
         }
-        <Wrapper as clap::Parser>::parse_from(["engine"]).args
+        let parsed = <Wrapper as clap::Parser>::try_parse_from(["engine"])
+            .map_err(|e| anyhow::anyhow!("{}", e.render().to_string().trim()))?;
+        Ok(parsed.args)
     }
 }
 

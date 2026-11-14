@@ -1,29 +1,14 @@
 //! `/ocr/...`: the screenshot scanner's files (`ocr/scripts/build-dist.sh`), loaded by the
 //! browser only when someone scans a riven.
 //!
-//! They're served from `WFMT_OCR_DIR`, else `ocr/` next to the server binary (the Docker
-//! image), else `ocr/dist` in the working directory (development).
+//! They're served from the directory `Config::ocr_dir` names.
 
 use std::path::{Component, Path as FsPath, PathBuf};
-use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
 use dioxus::fullstack::axum::extract::Path;
 use dioxus::fullstack::axum::http::{HeaderMap, StatusCode, header};
 use dioxus::fullstack::axum::response::{IntoResponse, Response};
-
-static DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    if let Some(dir) = std::env::var_os("WFMT_OCR_DIR") {
-        return dir.into();
-    }
-    let beside_binary = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("ocr")));
-    match beside_binary {
-        Some(dir) if dir.is_dir() => dir,
-        _ => PathBuf::from("ocr/dist"),
-    }
-});
 
 fn content_type(path: &FsPath) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
@@ -35,20 +20,20 @@ fn content_type(path: &FsPath) -> &'static str {
     }
 }
 
-/// Only plain relative paths inside the directory.
-fn resolve(path: &str) -> Option<PathBuf> {
+/// Only plain relative paths inside `dir`.
+fn resolve(dir: &FsPath, path: &str) -> Option<PathBuf> {
     let relative = FsPath::new(path);
     relative
         .components()
         .all(|c| matches!(c, Component::Normal(_)))
-        .then(|| DIR.join(relative))
+        .then(|| dir.join(relative))
 }
 
 pub async fn serve(Path(path): Path<String>, headers: HeaderMap) -> Response {
     if path == "riven_weapons.json" {
         return weapons().await;
     }
-    let Some(file) = resolve(&path) else {
+    let Some(file) = resolve(&crate::app::get().ocr_dir, &path) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let accepts_gzip = headers
@@ -106,8 +91,11 @@ pub async fn serve(Path(path): Path<String>, headers: HeaderMap) -> Response {
 /// The scraper's current weapon list, so new weapons can be scanned, plus the names in other
 /// languages from the snapshot bundled with the scanner (the scraper only asks for English).
 async fn weapons() -> Response {
-    let snapshot = tokio::fs::read(DIR.join("riven_weapons.json")).await.ok();
-    let current = tokio::fs::read(crate::data::data_dir().join("cache/riven_weapons.json"))
+    let app = crate::app::get();
+    let snapshot = tokio::fs::read(app.ocr_dir.join("riven_weapons.json"))
+        .await
+        .ok();
+    let current = tokio::fs::read(app.data_dir.join("cache/riven_weapons.json"))
         .await
         .ok();
     let body = tokio::task::spawn_blocking(move || merge_weapons(current, snapshot))
@@ -163,11 +151,11 @@ mod tests {
 
     #[test]
     fn paths_stay_inside_the_directory() {
-        assert!(resolve("pkg/wfmt_ocr_bg.wasm").is_some());
-        assert!(resolve("models/tiny_det/inference.onnx").is_some());
-        assert!(resolve("../Cargo.toml").is_none());
-        assert!(resolve("/etc/passwd").is_none());
-        assert!(resolve("pkg/../../x").is_none());
+        assert!(resolve(FsPath::new("ocr/dist"), "pkg/wfmt_ocr_bg.wasm").is_some());
+        assert!(resolve(FsPath::new("ocr/dist"), "models/tiny_det/inference.onnx").is_some());
+        assert!(resolve(FsPath::new("ocr/dist"), "../Cargo.toml").is_none());
+        assert!(resolve(FsPath::new("ocr/dist"), "/etc/passwd").is_none());
+        assert!(resolve(FsPath::new("ocr/dist"), "pkg/../../x").is_none());
     }
 
     #[test]

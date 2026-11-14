@@ -1,9 +1,11 @@
 #[cfg(feature = "server")]
 mod admin;
 mod api;
+#[cfg(feature = "server")]
+mod app;
 mod chart;
 #[cfg(feature = "server")]
-mod data;
+mod config;
 #[cfg(feature = "server")]
 mod hub;
 #[cfg(feature = "server")]
@@ -30,13 +32,24 @@ fn main() {
 fn main() {
     use dioxus::fullstack::axum::routing::{get, post};
 
-    dioxus::serve(|| async move {
-        transfer::recover(data::data_dir()).await?;
-        worker::start().await?;
-        hub::start();
+    // Settings are checked before anything starts. Logging only starts with the server, so a
+    // bad setting is reported on stderr.
+    let app = match config::Config::from_env().and_then(app::init) {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("Can't start: {error:#}");
+            std::process::exit(1);
+        }
+    };
+    // Runs again when the router is hot-reloaded in development, so everything here only
+    // starts what isn't running yet.
+    dioxus::serve(move || async move {
+        transfer::recover(app.data_dir.clone()).await?;
+        app.scraper.start(&app.data_dir).await?;
+        app.hub.start(app.data_dir.clone());
         // Load the data in the background while the server starts listening, so the first
         // visitor doesn't pay for it. Pages rendered before it's done fetch from the browser.
-        tokio::task::spawn_blocking(data::warm);
+        tokio::task::spawn_blocking(|| app.store.refresh());
         Ok(dioxus::server::router(ui::App)
             .route("/img/weapon/{slug}", get(images::weapon))
             .route("/ocr/{*path}", get(ocr_assets::serve))

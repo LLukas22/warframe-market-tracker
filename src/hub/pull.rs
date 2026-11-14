@@ -16,7 +16,7 @@ use hf_hub::{HFRepository, RepoTypeDataset};
 use serde::{Deserialize, Serialize};
 use wfmt_dataset::{DatasetLock, Transaction, durable_write};
 
-use super::{CATALOG, Config, LOCAL_CATALOG, day_files, every_hour, live, now_ms};
+use super::{CATALOG, Hub, LOCAL_CATALOG, Repo, day_files, now_ms};
 use wfmt_dataset::layout::{DATE_PREFIX, PARQUET_DIR, Table};
 
 const STATE: &str = "hub/pull.json";
@@ -55,8 +55,8 @@ fn commit_url(dataset: &str, commit: &str) -> String {
     format!("https://huggingface.co/datasets/{dataset}/commit/{commit}")
 }
 
-fn publish(state: &State) {
-    let mut live = live();
+fn publish(hub: &Hub, state: &State) {
+    let mut live = hub.live();
     live.last_upload_at = state.updated_at;
     live.last_day = state.last_day.clone();
     live.commit_url = state
@@ -65,24 +65,24 @@ fn publish(state: &State) {
         .map(|commit| commit_url(&state.dataset, commit));
 }
 
-pub(super) fn start(root: PathBuf, config: Config) {
+pub(super) fn start(hub: &'static Hub, root: PathBuf, config: Repo) {
     match load_state(&root, &config.dataset) {
-        Ok(state) => publish(&state),
-        Err(error) => live().error = Some(format!("{error:#}")),
+        Ok(state) => publish(hub, &state),
+        Err(error) => hub.live().error = Some(format!("{error:#}")),
     }
     tokio::spawn(async move {
         let repo = match super::repository(&config) {
             Ok(repo) => repo,
             Err(error) => {
-                live().error = Some(format!("{error:#}"));
+                hub.live().error = Some(format!("{error:#}"));
                 return;
             }
         };
         // There's nothing to show until the first download, so start right away.
-        every_hour(std::time::Duration::ZERO, |forced| {
+        hub.every_hour(std::time::Duration::ZERO, |forced| {
             let (root, repo, dataset) = (root.clone(), repo.clone(), config.dataset.clone());
             async move {
-                let result = pull(&root, &repo, &dataset, forced).await;
+                let result = pull(hub, &root, &repo, &dataset, forced).await;
                 let _ = fs::remove_dir_all(root.join(DOWNLOAD));
                 result
             }
@@ -201,6 +201,7 @@ async fn download(
 }
 
 async fn pull(
+    hub: &Hub,
     root: &Path,
     repo: &HFRepository<RepoTypeDataset>,
     dataset: &str,
@@ -232,7 +233,7 @@ async fn pull(
     }
     let total = plans.len();
     for (done, day) in plans.iter().enumerate() {
-        live().outcome = Some(format!(
+        hub.live().outcome = Some(format!(
             "Downloading {} ({} of {total})…",
             day.date,
             done + 1
@@ -246,7 +247,7 @@ async fn pull(
         }
         state.updated_at = Some(now_ms());
         state.last_day = state.last_day.clone().max(Some(day.date.clone()));
-        publish(&state);
+        publish(hub, &state);
     }
 
     let mut catalog_updated = false;
@@ -265,7 +266,7 @@ async fn pull(
         .map(|date| date.to_string());
     state.commit = Some(commit);
     durable_write(&root.join(STATE), &serde_json::to_vec(&state)?)?;
-    publish(&state);
+    publish(hub, &state);
 
     Ok(match (total, catalog_updated) {
         (0, false) if forced => "Everything was already here.".into(),

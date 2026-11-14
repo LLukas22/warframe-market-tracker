@@ -5,6 +5,9 @@
 //! with one rename, and from that point on `apply_ready` finishes the swap, again after a crash
 //! if needed. The replaced data moves to `backup-<time>/`, like `reprocess --replace`.
 
+use crate::app::App;
+use crate::config::ScraperSettings;
+use crate::worker;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
@@ -45,8 +48,11 @@ const BACKUP_NAME: &str = "backup-name";
 const MAX_UPLOAD: u64 = 64 << 30;
 const MAX_UNPACKED: u64 = 256 << 30;
 
-/// One export or import at a time.
-static BUSY: Mutex<()> = Mutex::const_new(());
+/// Exports and imports, one at a time.
+#[derive(Default)]
+pub struct Transfers {
+    busy: Mutex<()>,
+}
 
 /// The task owns the guard and all cleanup/restart work, independently of the request.
 fn operation<T: Send + 'static>(
@@ -60,8 +66,8 @@ fn operation<T: Send + 'static>(
 }
 
 /// The response to send if this token doesn't allow a transfer.
-async fn rejection(given: &str) -> Option<Response> {
-    let denied = crate::admin::check(given).await.err()?;
+async fn rejection(app: &App, given: &str) -> Option<Response> {
+    let denied = app.admin.check(given).await.err()?;
     Some(text(denied.status(), denied.message()))
 }
 
@@ -223,10 +229,14 @@ fn sync_tree(dir: &Path) -> Result<()> {
 
 /// Everything that can reject an upload. Loading a real engine on the result means a dataset the
 /// scraper can't open never replaces one it can.
-fn prepare(archive: &Path, stage: &Path) -> Result<()> {
+fn prepare(archive: &Path, stage: &Path, scraper: &ScraperSettings) -> Result<()> {
     unpack(archive, stage)?;
     validate(stage)?;
-    drop(crate::worker::open(stage.to_owned()).context("The scraper can't open this export")?);
+    drop(
+        scraper
+            .open(stage.to_owned())
+            .context("The scraper can't open this export")?,
+    );
     sync_tree(stage)
 }
 
@@ -281,7 +291,7 @@ fn apply_ready(root: &Path) -> Result<()> {
 
 /// Run once before the scraper starts: finishes an interrupted import and removes leftovers.
 pub async fn recover(root: PathBuf) -> Result<()> {
-    let Some(lock) = crate::worker::lock(&root).await? else {
+    let Some(lock) = worker::lock(&root).await? else {
         return Ok(());
     };
     tokio::task::spawn_blocking(move || {
@@ -303,10 +313,11 @@ pub struct ExportForm {
 
 /// Builds the archive with the scraper stopped, then lets it continue during the download. The
 /// file is already unlinked, so a cancelled download leaves nothing behind.
-async fn build_export(root: PathBuf) -> Result<File> {
-    crate::worker::stop().await;
+async fn build_export(app: &App) -> Result<File> {
+    let root = app.data_dir.clone();
+    app.scraper.stop().await;
     let result = async {
-        let Some(lock) = crate::worker::lock(&root).await? else {
+        let Some(lock) = worker::lock(&root).await? else {
             bail!(OTHER_SERVER);
         };
         let root = root.clone();
@@ -324,20 +335,21 @@ async fn build_export(root: PathBuf) -> Result<File> {
         .await?
     }
     .await;
-    if let Err(error) = crate::worker::start().await {
+    if let Err(error) = app.scraper.start(&app.data_dir).await {
         tracing::error!("failed to restart the scraper: {error:#}");
     }
     result
 }
 
 pub async fn export(Form(form): Form<ExportForm>) -> Response {
-    if let Some(response) = rejection(&form.token).await {
+    let app = crate::app::get();
+    if let Some(response) = rejection(app, &form.token).await {
         return response;
     }
-    let Ok(_busy) = BUSY.try_lock() else {
+    let Ok(_busy) = app.transfers.busy.try_lock() else {
         return text(StatusCode::CONFLICT, BUSY_MESSAGE);
     };
-    let file = match operation(_busy, build_export(crate::data::data_dir()))
+    let file = match operation(_busy, build_export(app))
         .await
         .context("export task failed")
         .and_then(|result| result)
@@ -382,10 +394,11 @@ async fn receive(body: Body, path: &Path) -> Result<()> {
 }
 
 /// Replaces the data with the prepared `stage`. The scraper continues afterwards either way.
-async fn swap(root: PathBuf, stage: PathBuf) -> Result<String> {
-    crate::worker::stop().await;
+async fn swap(app: &'static App, stage: PathBuf) -> Result<String> {
+    let root = app.data_dir.clone();
+    app.scraper.stop().await;
     let result = async {
-        let Some(lock) = crate::worker::lock(&root).await? else {
+        let Some(lock) = worker::lock(&root).await? else {
             bail!(OTHER_SERVER);
         };
         let root = root.clone();
@@ -393,13 +406,13 @@ async fn swap(root: PathBuf, stage: PathBuf) -> Result<String> {
             let _lock = lock;
             let backup = commit(&root, &stage)?;
             apply_ready(&root)?;
-            crate::data::reload();
+            app.store.reload();
             Ok(backup)
         })
         .await?
     }
     .await;
-    let restart = crate::worker::start().await;
+    let restart = app.scraper.start(&app.data_dir).await;
     let backup = result?;
     restart.with_context(|| {
         format!("Imported, previous data is in {backup}, but the scraper didn't restart")
@@ -407,18 +420,19 @@ async fn swap(root: PathBuf, stage: PathBuf) -> Result<String> {
     Ok(backup)
 }
 
-async fn import_upload(body: Body, root: PathBuf) -> Result<String> {
+async fn import_upload(app: &'static App, body: Body) -> Result<String> {
     let id = unique_id();
-    let transfer = root.join(TRANSFER_DIR);
+    let transfer = app.data_dir.join(TRANSFER_DIR);
     let upload = transfer.join(format!("upload-{id}.tar.gz"));
     let stage = transfer.join(format!("stage-{id}"));
     let result = async {
         receive(body, &upload).await?;
         fs::create_dir_all(&stage)?;
         let (archive, unpacked) = (upload.clone(), stage.clone());
-        tokio::task::spawn_blocking(move || prepare(&archive, &unpacked)).await??;
+        let scraper = app.scraper.settings().clone();
+        tokio::task::spawn_blocking(move || prepare(&archive, &unpacked, &scraper)).await??;
         fs::remove_file(&upload)?;
-        swap(root, stage.clone()).await
+        swap(app, stage.clone()).await
     }
     .await;
     let _ = fs::remove_file(&upload);
@@ -432,13 +446,14 @@ pub async fn import(headers: HeaderMap, body: Body) -> Response {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
-    if let Some(response) = rejection(token).await {
+    let app = crate::app::get();
+    if let Some(response) = rejection(app, token).await {
         return response;
     }
-    let Ok(_busy) = BUSY.try_lock() else {
+    let Ok(_busy) = app.transfers.busy.try_lock() else {
         return text(StatusCode::CONFLICT, BUSY_MESSAGE);
     };
-    match operation(_busy, import_upload(body, crate::data::data_dir()))
+    match operation(_busy, import_upload(app, body))
         .await
         .context("import task failed")
         .and_then(|result| result)
@@ -638,11 +653,23 @@ mod tests {
         let (source, out) = (Temp::new(), Temp::new());
         dataset(&source.0, "one");
         let good = Temp::new();
-        prepare(&exported(&source.0, &out.0), &good.0).unwrap();
+        prepare(
+            &exported(&source.0, &out.0),
+            &good.0,
+            &ScraperSettings::for_tests(),
+        )
+        .unwrap();
 
         write(&source.0.join("state.json"), b"not json");
         let bad = Temp::new();
-        assert!(prepare(&exported(&source.0, &out.0), &bad.0).is_err());
+        assert!(
+            prepare(
+                &exported(&source.0, &out.0),
+                &bad.0,
+                &ScraperSettings::for_tests()
+            )
+            .is_err()
+        );
     }
 
     fn committed(root: &Temp) {
