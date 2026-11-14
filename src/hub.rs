@@ -2,7 +2,8 @@
 //! `WFMT_HF_DATASET`. Without both, nothing is uploaded. `WFMT_HF_PULL_DATASET` does the
 //! opposite, see [`pull`]: the server downloads its data from a dataset instead of scraping it.
 //!
-//! Each finished UTC day is uploaded once maintenance has compacted it, as an exact copy of its
+//! Each finished UTC day is uploaded once maintenance has compacted it into its final form (see
+//! `wfmt_dataset::compact::day_complete`), as an exact copy of its
 //! `date=` folders: new or changed files are added and files the day no longer has are deleted,
 //! in the same commit. `hub/upload.json` remembers the files of every uploaded day, so the hourly
 //! check only contacts the Hub when a day is new or has changed. Today is never uploaded, it's
@@ -24,8 +25,7 @@ use hf_hub::repository::{AddSource, CommitOperation, RepoTreeEntry};
 use hf_hub::{HFClient, HFRepository, RepoTypeDataset};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
-use wfmt_dataset::maintenance;
-use wfmt_dataset::{DatasetLock, durable_write};
+use wfmt_dataset::{DatasetLock, compact, durable_write, maintenance};
 
 use crate::api::HubStatus;
 
@@ -326,6 +326,9 @@ struct Prepared {
     pending: Vec<Day>,
     /// No maintenance pass has finished yet, so nothing is known to be final.
     uncompacted: bool,
+    /// Finished days not in their final form, so held back: written to since their compaction,
+    /// or their compaction failed. The Hub keeps what it has of them until they are.
+    held_back: Vec<String>,
     /// [`fingerprint`] of the weapon list, copied into the snapshot, if the scraper has one.
     catalog: Option<u64>,
 }
@@ -397,6 +400,7 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
             state,
             pending: Vec::new(),
             uncompacted: true,
+            held_back: Vec::new(),
             catalog: None,
         });
     };
@@ -412,8 +416,14 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
     };
     let _lock = DatasetLock::read(root)?;
     let mut pending = Vec::new();
-    for date in dates(root)?.into_iter().filter(|d| *d < before) {
-        let date = date.to_string();
+    let mut held_back = Vec::new();
+    for day in dates(root)?.into_iter().filter(|d| *d < before) {
+        let date = day.to_string();
+        if !compact::day_complete(root, day)? {
+            tracing::warn!(%date, "finished day isn't compacted, holding it back");
+            held_back.push(date);
+            continue;
+        }
         let files = day_files(root, &date)?;
         if files.is_empty() || (!forced && state.days.get(&date) == Some(&files)) {
             continue;
@@ -433,6 +443,7 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
         state,
         pending,
         uncompacted: false,
+        held_back,
         catalog,
     })
 }
@@ -628,6 +639,7 @@ async fn sync(
         mut state,
         pending,
         uncompacted,
+        held_back,
         catalog,
     } = prepared;
     if uncompacted {
@@ -635,8 +647,13 @@ async fn sync(
     }
     let check_card = forced || !state.card_checked;
     let catalog_changed = catalog.is_some() && catalog != state.catalog;
+    let held_back_note = |outcome: String| match held_back.as_slice() {
+        [] => outcome,
+        [day] => format!("{outcome} {day} waits for compaction."),
+        days => format!("{outcome} {} wait for compaction.", listing(days)),
+    };
     if pending.is_empty() && !check_card && !catalog_changed {
-        return Ok("Up to date.".into());
+        return Ok(held_back_note("Up to date.".into()));
     }
     let remote = remote_files(repo, None).await.with_context(|| {
         format!(
@@ -752,6 +769,7 @@ async fn sync(
     } else {
         "Up to date.".into()
     };
+    let outcome = held_back_note(outcome);
     Ok(match card_problem {
         Some(problem) => format!("{outcome} {problem}."),
         None => outcome,
@@ -775,6 +793,38 @@ mod tests {
             let path = self.0.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, bytes).unwrap();
+        }
+
+        /// A parquet file, with the footer mark of a finished day if `layout` is given.
+        fn write_parquet(&self, path: &str, layout: Option<&str>) {
+            use arrow::array::{ArrayRef, Int64Array, RecordBatch};
+            use parquet::arrow::ArrowWriter;
+            use parquet::file::metadata::KeyValue;
+            use parquet::file::properties::WriterProperties;
+            let path = self.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let batch = RecordBatch::try_from_iter([(
+                "value",
+                std::sync::Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+            )])
+            .unwrap();
+            let props = WriterProperties::builder()
+                .set_key_value_metadata(layout.map(|layout| {
+                    vec![KeyValue::new(compact::LAYOUT_KEY.into(), layout.to_owned())]
+                }))
+                .build();
+            let file = fs::File::create(path).unwrap();
+            let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        }
+
+        fn write_final(&self, path: &str) {
+            self.write_parquet(path, Some(compact::SORTED_LAYOUT));
+        }
+
+        fn write_unmarked(&self, path: &str) {
+            self.write_parquet(path, None);
         }
     }
 
@@ -842,17 +892,14 @@ mod tests {
     }
 
     #[test]
-    fn only_compacted_changed_days_are_prepared() {
+    fn only_final_changed_days_are_prepared() {
         let root = TempRoot::new();
         for date in ["2026-11-07", "2026-11-08", "2026-11-09"] {
             for table in ["auctions", "attributes"] {
-                root.write(
-                    &format!("parquet/{table}/date={date}/compact-1.parquet"),
-                    b"rows",
-                );
+                root.write_final(&format!("parquet/{table}/date={date}/compact-1.parquet"));
             }
         }
-        root.write("parquet/gone/date=2026-11-08/part-2.parquet", b"gone");
+        root.write_final("parquet/gone/date=2026-11-08/compact-2.parquet");
         root.write("parquet/auctions/date=2026-11-08/part-3.tmp", b"half");
 
         assert!(prepare(&root.0, "me/rivens", false).unwrap().uncompacted);
@@ -864,22 +911,19 @@ mod tests {
         let prepared = prepare(&root.0, "me/rivens", false).unwrap();
         let dates: Vec<_> = prepared.pending.iter().map(|d| d.date.as_str()).collect();
         assert_eq!(dates, ["2026-11-07", "2026-11-08"]);
+        assert!(prepared.held_back.is_empty());
         assert_eq!(
             prepared.pending[1].files.keys().collect::<Vec<_>>(),
             [
                 "attributes/date=2026-11-08/compact-1.parquet",
                 "auctions/date=2026-11-08/compact-1.parquet",
-                "gone/date=2026-11-08/part-2.parquet",
+                "gone/date=2026-11-08/compact-2.parquet",
             ]
         );
+        let gone = "gone/date=2026-11-08/compact-2.parquet";
         assert_eq!(
-            fs::read(
-                root.0
-                    .join(SNAPSHOT)
-                    .join("gone/date=2026-11-08/part-2.parquet")
-            )
-            .unwrap(),
-            b"gone"
+            fs::read(root.0.join(SNAPSHOT).join(gone)).unwrap(),
+            fs::read(root.0.join(PARQUET_DIR).join(gone)).unwrap()
         );
 
         // Uploaded days are skipped until their files change, or the check is forced.
@@ -898,15 +942,29 @@ mod tests {
             prepare(&root.0, "me/rivens", true).unwrap().pending.len(),
             2
         );
-        root.write("parquet/gone/date=2026-11-07/compact-4.parquet", b"more");
+        root.write_final("parquet/gone/date=2026-11-07/compact-4.parquet");
         let changed = prepare(&root.0, "me/rivens", false).unwrap().pending;
         assert_eq!(changed.len(), 1);
         assert_eq!(changed[0].date, "2026-11-07");
 
+        // A part written after compaction, or a compaction that failed, holds the day back,
+        // even when forced: the Hub keeps the version it has until maintenance finishes the day.
+        root.write_unmarked("parquet/gone/date=2026-11-08/part-5.parquet");
+        let prepared = prepare(&root.0, "me/rivens", true).unwrap();
+        assert_eq!(prepared.held_back, ["2026-11-08"]);
+        assert_eq!(
+            prepared
+                .pending
+                .iter()
+                .map(|d| d.date.as_str())
+                .collect::<Vec<_>>(),
+            ["2026-11-07"]
+        );
+
         // A different dataset starts over.
         assert_eq!(
             prepare(&root.0, "me/other", false).unwrap().pending.len(),
-            2
+            1
         );
     }
 

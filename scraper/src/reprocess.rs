@@ -232,7 +232,7 @@ mod tests {
             &MaintenanceArgs {
                 raw_retention_days: 14,
                 maintenance_interval_hours: 6,
-                compact_target_mb: 128,
+                compact_memory_mb: wfmt_dataset::maintenance::DEFAULT_COMPACT_MEMORY_MB,
             },
         )?;
         assert_eq!(report.raw_deleted, 1);

@@ -1,6 +1,7 @@
 //! Searches, the overview and price charts.
 
 use super::*;
+use std::cmp::Reverse;
 
 /// Each riven's newest current auction, see [`Data::newest_current`].
 pub(super) type Newest = Table<RivenId, Option<AuctionId>>;
@@ -736,7 +737,8 @@ impl Data {
                 continue;
             }
             let entry = cheapest.entry(a.riven).or_insert((a, price));
-            if price < entry.1 {
+            // Equal prices go to the newest copy, whatever order the auctions were loaded in.
+            if (price, Reverse(recency(a))) < (entry.1, Reverse(recency(entry.0))) {
                 *entry = (a, price);
             }
         }
@@ -769,7 +771,9 @@ impl Data {
             .filter(|(_, c)| **c >= EFFECT_MIN_STAT_RIVENS)
             .map(|(s, _)| *s)
             .collect();
-        stats.sort_unstable();
+        // By name: ids follow the order the files were read in, and the column order changes the
+        // fit's rounding.
+        stats.sort_unstable_by(|a, b| self.attrs[a.0].cmp(&self.attrs[b.0]).then(a.1.cmp(&b.1)));
         if stats.is_empty() {
             return result;
         }

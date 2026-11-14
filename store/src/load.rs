@@ -497,8 +497,17 @@ impl Data {
     }
 
     pub(super) fn finish_load(&mut self) {
+        // Nothing depends on the order of observations at the same time: an auction has at most
+        // one per time, and copies of a riven are told apart by `recency`.
         self.observations.sort_by_key(|o| o.t);
-        self.gone.sort_by_key(|g| g.t);
+        // Gone events at the same time are ordered by their auction's `recency`, so when copies
+        // of a riven go at once, the newest one speaks for it (see `gone_by_bucket` and the gone
+        // tab), whatever order the files hold them in.
+        let auctions = &self.auctions;
+        self.gone.sort_by(|a, b| {
+            a.t.cmp(&b.t)
+                .then_with(|| recency(&auctions[a.auction]).cmp(&recency(&auctions[b.auction])))
+        });
 
         self.riven_changes = self.rivens.same_ids(RivenChanges::default());
         let mut first_prices = self.rivens.same_ids(None);

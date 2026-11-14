@@ -633,8 +633,8 @@ expression: "data.riven_detail(&listing.riven_id, None, comparisons, NOW)"
         "recoil"
       ],
       "added_positives": [
-        "status_duration",
-        "ammo_maximum"
+        "ammo_maximum",
+        "status_duration"
       ],
       "same_negative": false,
       "roll_distance": 0.8497942386831283
@@ -700,8 +700,8 @@ expression: "data.riven_detail(&listing.riven_id, None, comparisons, NOW)"
         "recoil"
       ],
       "added_positives": [
-        "status_duration",
-        "critical_chance"
+        "critical_chance",
+        "status_duration"
       ],
       "same_negative": false,
       "roll_distance": 1.0

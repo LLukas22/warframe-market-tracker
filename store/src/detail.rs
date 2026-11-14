@@ -12,6 +12,16 @@ pub(super) struct Similarity {
     pub(super) roll_distance: Option<f64>,
 }
 
+impl Data {
+    /// The slugs of the stats, sorted by name. Ids are assigned in the order the files were
+    /// read, so they mustn't decide what the answers show.
+    fn slugs(&self, attrs: &[AttrId]) -> Vec<String> {
+        let mut slugs: Vec<String> = attrs.iter().map(|&i| self.attrs[i].clone()).collect();
+        slugs.sort_unstable();
+        slugs
+    }
+}
+
 pub(super) fn similarity(a: &Auction, b: &Auction) -> Option<Similarity> {
     let stats = |a: &Auction, positive| {
         a.attrs
@@ -26,10 +36,8 @@ pub(super) fn similarity(a: &Auction, b: &Auction) -> Option<Similarity> {
     if shared == 0 {
         return None;
     }
-    let mut missing: Vec<_> = positives.difference(&other_positives).copied().collect();
-    let mut added: Vec<_> = other_positives.difference(&positives).copied().collect();
-    missing.sort_unstable();
-    added.sort_unstable();
+    let missing: Vec<_> = positives.difference(&other_positives).copied().collect();
+    let added: Vec<_> = other_positives.difference(&positives).copied().collect();
     let same_negative = stats(a, false) == stats(b, false);
     let roll_distance = if a.fit_ok && b.fit_ok {
         a.attrs
@@ -171,12 +179,8 @@ impl Data {
                     && score.added.is_empty()
                     && score.same_negative,
                 shared_positives: score.shared,
-                missing_positives: score
-                    .missing
-                    .iter()
-                    .map(|&i| self.attrs[i].clone())
-                    .collect(),
-                added_positives: score.added.iter().map(|&i| self.attrs[i].clone()).collect(),
+                missing_positives: self.slugs(&score.missing),
+                added_positives: self.slugs(&score.added),
                 same_negative: score.same_negative,
                 roll_distance: score.roll_distance,
             })

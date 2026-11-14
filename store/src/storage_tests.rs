@@ -1279,7 +1279,7 @@ fn cache_reloads_compacted_history_without_duplicate_observations() -> anyhow::R
     let options = MaintenanceArgs {
         raw_retention_days: 14,
         maintenance_interval_hours: 6,
-        compact_target_mb: 128,
+        compact_memory_mb: wfmt_dataset::maintenance::DEFAULT_COMPACT_MEMORY_MB,
     };
     let report = maintain(&root, "2026-11-03T00:00:00Z".parse()?, &options)?;
     assert_eq!(report.compacted_inputs, 4);

@@ -1,323 +1,460 @@
 # Long-term Parquet storage design
 
-Status: proposed; no storage implementation or migration has been performed.
+Status: stage 1a, 1b, 1d and 1e are implemented and tested, not yet deployed. 1c and stage 2 are
+still proposals. See "Implementation notes" at the end of stage 1.
 
 ## Objective
 
-Keep Parquet as the permanent historical record, reduce repeated listing and attribute data, and preserve the existing daily publication workflow. The same archive must be readable by the application and by Hugging Face's `datasets` library without a custom decoding script.
+Keep Parquet as the permanent historical record and make it cheap to keep for years, without
+changing what is recorded. Scrape frequency, admission rules, feed suppression and raw retention
+stay as they are, and every recorded sighting is kept: repeat sightings feed chart buckets,
+first/last seen times and observation counts.
 
-The design preserves every observation already admitted to the dataset. It does not change scrape frequency, admission rules, feed suppression, or raw-response retention. It does not replace historical sightings with aggregates or price-change-only events.
+Everything the scraper writes, sweeps and feed polls alike, must end up in one well-formed file
+per table per closed day.
 
-Compatibility means standard Parquet loading and documented joins. It does not mean that existing consumers of the current `auctions` schema can continue without changes.
+The archive must stay readable by the application and by Hugging Face `datasets` or DuckDB with no
+custom loader.
 
-## Current pipeline and constraints
+## What the data looks like
 
-| Stage | Current behavior | Design implication |
+Measured on the published dataset, 2026-11-07 to 2026-11-13, which includes the `feed_recent` and
+`feed_popular` polls. Sizes are `auctions` plus `attributes` of 2026-11-12, rewritten with DuckDB
+at Zstd 3 and 64K-row groups; the Rust writer will differ slightly. The appendix has the commit,
+versions and queries.
+
+| Layout | Size | Change |
 | --- | --- | --- |
-| `scraper/src/pipeline.rs` | Deduplicates overlapping pages within a fetch, rejects stale edits, and records repeat weapon sightings; feeds suppress some repeats. | Preserve the observations produced by these rules. |
-| `scraper/src/normalize.rs` | Writes a full auction row and one row per attribute for each sighting, including fitted model outputs. | Repeated payloads are the main structural opportunity. |
-| `dataset/src/sink.rs` | Writes daily auction/attribute pairs and gone events with Zstd level 3; commits receipts and tracking checkpoints transactionally. | Keep crash recovery and append publication intact. |
-| `dataset/src/maintenance.rs` | Merges closed-day parts by compatible schema, without sorting or deduplication. Uses a 128 MiB combined input target and row-group limits of 64K rows or 64 MiB. | Add a versioned archival transformation, including single-file days. |
-| `store/src/load.rs` | Discovers paired auction/attribute files and constructs latest listing state plus historical observations. | Add explicit bundle discovery and loading. |
-| `store/src/lib.rs` | Detects removed loaded paths and rebuilds the in-memory store. | Track archive generations and avoid loading both representations. |
-| `src/hub.rs`, `src/hub/pull.rs` | Publishes and replaces finished days; discovers three known tables and compares filenames and sizes. | Publish complete generations with immutable filenames and integrity metadata. |
-| `src/transfer.rs` | Transfers the dataset with a versioned export manifest. | Include archive metadata and validate the new relationships. |
-| `scraper/src/reprocess.rs` | Rebuilds from retained raw responses. | Historical format migration needs a separate Parquet-to-Parquet path. |
+| Published files | 59.9 MB | |
+| Same flat schema, sorted | 23.3 MB | -61% |
+| Normalized (stage 2 below) | 14.7 MB | -76% |
 
-Repeated sightings affect chart bucket membership, first/last seen times, and observation counts. Removing them would change application behavior even when their prices are unchanged.
+Zstd 19 only reaches 21.1 MB and 13.2 MB, so the level is not worth changing.
 
-## Core decisions
+Facts the design relies on:
 
-1. Keep daily UTC partitions as the publication, replacement, and recovery unit.
-2. Store distinct listing payloads and attribute sets once per bundle; keep one small observation row per recorded sighting.
-3. Make every bundle self-contained. No reference points into another day or bundle.
-4. Represent all joins with ordinary columns. Filenames, row positions, and manifests are not foreign keys.
-5. Keep every currently stored value, including model outputs and fields not used by today's UI.
-6. Use standard Parquet compression and encodings, with no external compression dictionary or opaque packed payload.
-7. Give each published day generation immutable files. Replace generations atomically rather than updating files in place.
-8. Use daily compaction first. Cross-day or monthly deduplication is deferred because it complicates incremental downloads and independent recovery.
+- A day is about 480k sightings of 98k auctions. The median auction has 6 sightings, from the
+  four-hourly sweeps; the busiest had 19 (40 on 2026-11-08).
+- Feeds add little volume: 12,073 rows for 11,239 auctions, 2.5% of the day. They arrive in about
+  590 polls a day that each write their own small part.
+- Payloads barely change: 98,585 distinct listing payloads for 98,459 auctions, and 96,706
+  distinct attribute sets for 481,414 sightings.
+- `(auction_id, scraped_at)` is unique in `auctions` on every day, feeds included, and
+  `(auction_id, scraped_at, position)` in `attributes`. Every sighting has attribute rows.
+- 83% of one day's auctions were already listed the day before. Over two days, 190k attribute
+  sets stored per day collapse to 110k distinct ones.
+- One early file lacks `riven_id` and `source`. Both are always written non-null since, so a null
+  can only mean "not recorded".
+- `gone` is 0.1 to 0.7 MB a day. `(auction_id, detected_at)` is unique in it.
+- Equal timestamps across listings are common. On 2026-11-12, 2,726 riven-and-time pairs had
+  sightings of several auctions, 1,668 of them at different prices. Over 2026-11-10 to 2026-11-13,
+  381 riven-and-time pairs had several auctions going at once.
+- One day decodes from 57 MB (`auctions`) and 40 MB (`attributes`) of encoded pages. In Arrow
+  memory that is a few times larger, not yet measured.
 
-Daily independence deliberately permits some repetition across days. Compression savings must be measured after accounting for that repetition and the new reference columns.
+## Problem found: compaction leaves fragments
 
-## Logical schema: format v2
+Closed days are not being merged into one file. 2026-11-12 was published as seven `auctions`
+files: one with 466,918 rows, one with 13,529, and five with 1 to 716 rows. Days since 2026-11-07
+have five to nine files per table.
 
-All tables have an explicit schema, including nullable columns in files where every value is null. Preserve current numeric precision and millisecond UTC timestamps. Do not infer types independently for each file.
+The cause is in `dataset/src/schema.rs`. The batches are built with `RecordBatch::try_from_iter`,
+which marks a column nullable only if that batch happens to contain a null. A sweep flush has
+nulls in most optional columns; a feed poll with a handful of rows often has none in `top_bid`,
+`buyout_price` or the fit columns. `maintain` groups parts by the debug string of their schema,
+nullability included, so each null pattern becomes its own group and is compacted separately. A
+pattern that occurs once stays an uncompacted `part-` file, because groups of one are skipped. A
+one-row part costs 12 KB.
 
-Common columns:
+The same applies to `attributes` (two patterns on 2026-11-12) and to `gone`.
 
-- `archive_date`: non-null date32, the UTC observation/event partition date.
-- `bundle_id`: non-null string, globally unique for an immutable bundle.
+This is what stage 1 fixes first. It also makes the published schema consistent, which it
+currently is not from file to file.
 
-Local IDs are non-null int64 values. They identify records within a bundle, not row positions. An ID has no meaning without its `bundle_id`.
+## Decisions
+
+1. Fix the schema and sort closed days in the existing compaction. The file format does not
+   change for readers; the store only gets deterministic tie-breaking.
+2. Normalize only if that is not enough, and decide it with numbers (see the gate below).
+3. One file per table per closed day. No bundles, generations or sidecar manifests.
+4. Files describe themselves through Parquet footer metadata. Joins use ordinary columns.
+5. `gone` keeps its columns in every stage.
+6. Standard Parquet only: Zstd 3, default encodings, no external dictionaries.
+7. The UTC day stays the unit of publication, replacement and recovery.
+8. A day is published only when it is complete, checked per day from its files.
+9. Query results never depend on the physical order of rows.
+
+## Stage 1: one sorted file per closed day
+
+### 1a. Explicit schemas
+
+In `dataset/src/schema.rs`, define one Arrow schema per table and build batches against it with
+`RecordBatch::try_new`. Nullability follows the row structs: `Option` fields are nullable, the
+rest are not. `riven_id` and `source` are nullable too, so the early file fits the same schema.
+
+From then on every part the sink writes has the same schema, whatever its rows contain.
+
+### 1b. Compaction
+
+In `dataset/src/maintenance.rs`, for each closed day and table group:
+
+- Read every part and cast it to the canonical schema: same columns and types, nullability
+  ignored, missing `riven_id` and `source` filled with nulls. A part with an unknown column or a
+  different type fails the day with a diagnostic and leaves it untouched.
+- Sort, and write one file per table:
+  - `auctions`: by `weapon_slug`, `auction_id`, `scraped_at`.
+  - `attributes`: by `weapon_slug`, `auction_id`, `scraped_at`, `position`.
+  - `gone`: by `weapon_slug`, `auction_id`, `detected_at`.
+- Mark outputs with footer key-value metadata, `wfmt.layout = sorted-1`.
+- Keep the same transaction: stage outputs, check row counts, delete inputs, commit.
+- A day that fails is logged and skipped; the pass continues with the other days.
+
+A day is complete when:
+
+- `auctions` and `attributes` each have exactly one file, with the same name, both marked; and
+- `gone` has no file, or exactly one marked file. A day without disappearances has none.
+
+This replaces the "fewer than two parts" check. A complete day is not rewritten.
+
+The 128 MiB input grouping goes away for closed days, since one sorted file needs the whole day.
+Keep the 64K-row and 64 MiB row-group limits. Sorting is bounded by a memory budget, a new
+maintenance option:
+
+- The budget covers what a sort really holds: the decoded Arrow batches, the sort indices, the
+  reordered copy, and the writer's row-group buffer. Sorting a table needs roughly twice its
+  decoded size, plus one row group.
+- Count the decoded bytes while reading, from the batches' own buffer sizes. Footer sizes are
+  only a first guess. Sort in memory, one table at a time, as long as the count stays within the
+  share of the budget that leaves room for the rest.
+- When reading would pass that share, switch to splitting: divide the weapons into ranges that
+  fit, then for each range read the parts again keeping only its rows, sort them, and append them
+  in order. The sort key leads with `weapon_slug`, so the rows come out in the same order.
+- If a single range still does not fit, fail the day and leave it as it is.
+
+Before choosing the default, measure the peak resident memory of sorting the largest current day,
+and set the budget from that with headroom.
+
+Outputs still get a new unique name, so the Hub's name-and-size comparison in `src/hub.rs` picks
+up every rewritten day. Leading with `weapon_slug` gives row-group statistics that let a reader
+fetch one weapon's history without scanning the day.
+
+Rows that arrive for a day after it was compacted (a late flush, a recovered raw archive) are
+ordinary parts without the marker. The next pass sees more than one file and merges again.
+
+### 1c. The open day
+
+Today's parts are left alone until the day closes, so the open day holds one part per flush: about
+590 from feed polls alone, per table, plus the sweep flushes. Count the parts and their bytes on
+the production server before deciding anything here.
+
+If it is a problem, extend the maintenance pass, which already runs every six hours, to merge
+today's parts into one unsorted file per table, using the existing streaming merge. Do not batch
+feed flushes in the sink instead: that would delay new listings in the app, which is what the
+feeds are for.
+
+A merge replaces loaded files, so the store rebuilds from scratch (`store/src/lib.rs`). That
+already happens when closed days are compacted, but it is the reason not to merge more often than
+the maintenance interval.
+
+### 1d. Publish only complete days
+
+`src/hub.rs` uploads every day before `compacted_before`, whatever files it holds. With failed
+days skipped and late parts possible, that watermark no longer says a day is ready.
+
+In `prepare`, under the dataset lock it already takes, upload a day only if it is complete by the
+rule above. A day that is not keeps its previously published version until a later pass completes
+it. `compacted_before` stays as the cut-off between closed days and the open one.
+
+### 1e. Make the store independent of row order
+
+Sorting changes the order of rows with equal timestamps, and the store's results depend on that
+order today:
+
+- `finish_load` sorts observations and gone events by time alone, so equal times keep file order.
+- The history's `gone_by_bucket` keeps one price per riven and bucket; the last event wins. When
+  two copies of a riven go at the same time, file order picks the price.
+
+Two orders are already total and stay as they are, covered by the new test: `newer` compares
+`recency`, which ends in the auction ID, and the listing order falls back to the auction ID.
+
+Rather than preserve file order, remove the dependence. Gone events at the same time are ordered
+by their auction's `recency`, so when copies of a riven go at once the newest copy speaks for it,
+in `gone_by_bucket` and on the gone tab. Observations need no tie-break: an auction has at most one
+per time, and copies of a riven are told apart through `recency`. Results then follow from the
+rows alone, and no stored order column is needed in any stage.
+
+Three more dependences turned up when comparing answers before and after compacting real days.
+All went through ids the store assigns in load order:
+
+- The stats a similar riven lacks or adds were sorted by attribute id. They are now sorted by
+  name.
+- Stat effects ordered the regression's columns by attribute id, which changed its rounding. The
+  columns are now ordered by name.
+- Stat effects took the cheapest copy of a riven; between copies at the same price, load order
+  decided. The newest copy now wins.
+
+This can change the gone median of a bucket in which two copies of a riven went at once. Write
+the expected result for that case by hand in the new test. If an existing snapshot changes, check
+that each difference is such a bucket before accepting it.
+
+### Acceptance
+
+- Per day, the multiset of rows is identical before and after, for all three tables.
+- A day built from parts with every null pattern seen in production ends as one file per table.
+- Order independence, as a test: build a dataset with equal-time sightings of several copies of a
+  riven at different prices, equal-time gone events for a riven within one bucket, and equally
+  recent copies. Load it in several row and part orders, sorted included; every query result must
+  be identical. Run the same check over a real day.
+- The over-budget path gives the same schema and the same rows in the same order as the in-memory
+  path on the same input, and the same query results. The files need not match byte for byte:
+  row-group boundaries may differ.
+- A day with late parts, or one that failed, is not uploaded; its previous version stays.
+- A second maintenance pass rewrites nothing.
+
+### Implementation notes
+
+What was built, where it differs from the text above, and what it measured.
+
+- Code: `dataset/src/compact.rs` (canonical schema reading, sorting, completeness),
+  `dataset/src/schema.rs` (fixed schemas), `dataset/src/maintenance.rs` (the pass),
+  `src/hub.rs` (holding back incomplete days), `store/src/load.rs`, `query.rs` and `detail.rs`
+  (tie-breaks). Tests: `dataset/src/compact.rs`, `store/tests/row_order.rs`.
+- The memory option is `WFMT_COMPACT_MEMORY_MB` (`--compact-memory-mb`), default 1024, minimum
+  128. It replaces `WFMT_COMPACT_TARGET_MB`.
+- The sort copies only the key columns and gathers the output one row group at a time, so it
+  holds the rows once rather than twice. A whole-day sort with `concat` and `take` peaked at
+  2.8 times the decoded size; this one at 1.7 times.
+- The over-budget path reads the parts once per weapon range instead of spilling to temporary
+  files. It costs decoding the day a few times, with nothing to clean up after a crash.
+- A day that fails keeps its files and its raw archives, the pass compacts the other days, and
+  then ends with an error naming the failed days.
+- One snapshot changed: two stat lists on a riven page are now alphabetical.
+
+Measured on the published days 2026-11-07 to 2026-11-13 (14.9 million rows):
+
+| | Result |
+| --- | --- |
+| Files | 101 to 21, one per table per day |
+| Size | 403 MB to 154 MB |
+| Largest table-day, decoded | 195 MiB (`attributes`) |
+| Default budget (1024 MiB), all in memory | 7 s, peak 329 MiB |
+| 384 / 256 / 160 MiB budgets | peak 285 / 184 / 120 MiB, 12 to 14 of 21 tables split |
+| Answers before and after compacting | identical for all 1,432 queries of `golden.rs` |
+| Split path against in-memory path | the same rows at the same file positions |
+
+Against the committed store code on the same uncompacted data, the tie-breaks change 649 of
+those answers, all ties that load order used to settle:
+
+- 239 gone lists: only the order of listings that disappeared at the same time. Times and totals
+  are the same.
+- 43 chart points: the gone median of a bucket in which two copies of a riven went at once.
+- 48 stat lists on riven pages, now alphabetical.
+- Stat effects: float rounding, around 1e-15.
+
+### Rollout
+
+Every published day is rewritten once and uploaded again. The old blobs stay in the repository
+history; squash it afterwards if that matters.
+
+## Gate for stage 2
+
+Stage 1 lands at roughly 23 MB per day, about 8.5 GB per year. Stage 2 saves about 9 MB per day
+more, around 3.2 GB per year, and costs a converter, a second reader path, a new public schema and
+a new dataset repository.
+
+Go ahead only if, after a month of stage 1 data, at least one holds:
+
+- The Hub repository or the server's disk is on course to exceed what is acceptable to keep.
+- Download time for a fresh `WFMT_HF_PULL_DATASET` server is a problem.
+- The store work below wants per-listing data stored once anyway.
+
+Otherwise stop at stage 1.
+
+## Stage 2: normalized closed days
+
+The open day keeps the flat format and writer. Conversion happens when a day closes, in the same
+maintenance pass, and replaces the day's `auctions` and `attributes` files.
+
+Layout:
+
+```text
+parquet/
+  observations/date=YYYY-MM-DD/<id>.parquet
+  listing_states/date=YYYY-MM-DD/<id>.parquet
+  attribute_sets/date=YYYY-MM-DD/<id>.parquet
+  gone/date=YYYY-MM-DD/<id>.parquet            unchanged
+```
+
+All three new files of a day share `<id>` and carry `wfmt.layout = normalized-1` in the footer.
+Every day is self-contained: IDs are only meaningful together with `archive_date`.
 
 ### `listing_states`
 
-One row per distinct listing payload within the bundle.
+One row per distinct listing payload of the day. Key: `(archive_date, listing_state_id)`.
 
-Key: `(bundle_id, listing_state_id)`.
+- `archive_date` (date32), `listing_state_id` (int64), `attribute_set_id` (int64),
+  `attribute_count` (int32).
+- Everything from `auctions` except the observation columns below: identity (`platform`,
+  `auction_id`, `riven_id`), weapon and item fields, model results, `is_direct_sell`,
+  `minimal_reputation`, `visible`, `closed`, `private`, `crossplay`, `created`, `note`,
+  `owner_id`, `owner_name`.
 
-Columns copied from the current auction schema:
-
-- Identity: `platform`, `auction_id`, `riven_id`.
-- Weapon: `weapon_slug`, `weapon_name`, `weapon_class`, `riven_type`, `is_bow`.
-- Item: `riven_name`, `polarity`, `mastery_level`, `re_rolls`, `n_positive`, `n_negative`, `has_spliced`, `listed_rank`.
-- Model results: `rank`, `disposition`, `legacy_stats`, `fit_ok`, `fit_ambiguous`, `fit_error`, `mean_positive_quality`.
-- Listing details: `is_direct_sell`, `minimal_reputation`, `visible`, `closed`, `private`, `crossplay`, `created`, `note`.
-- Owner identity: `owner_id`, `owner_name`.
-
-Additional columns:
-
-- `listing_state_id`.
-- `attribute_set_id`, referencing this bundle's attribute set.
-- `attribute_count`, so an empty attribute set can be distinguished from missing/corrupt attribute rows.
-- `source_schema_id`, identifying the source field-presence contract for legacy migration.
-
-Any change to these values creates or selects another state. States are immutable and may be reused if an identical state reappears later.
+Sorted by `weapon_slug`, `auction_id`. IDs are assigned in that order, so one weapon occupies a
+contiguous ID range and the row-group statistics of `observations` still allow fetching a single
+weapon.
 
 ### `attribute_sets`
 
-One row per attribute position in a distinct ordered attribute set.
+One row per stat of a distinct ordered set. Key: `(archive_date, attribute_set_id, position)`.
 
-Key: `(bundle_id, attribute_set_id, position)`.
+Columns: `archive_date`, `attribute_set_id`, `position`, `attribute`, `positive`, `spliced`,
+`value`, `value_rank8`, `roll`, `quality`, `coefficient`, `layout_multiplier`.
 
-Preserve `position`, `attribute`, `positive`, `spliced`, `value`, `value_rank8`, `roll`, `quality`, `coefficient`, and `layout_multiplier`.
-
-The old `scraped_at`, `auction_id`, and `weapon_slug` columns are reconstructed by joining observations and listing states. They are not repeated on every attribute row.
-
-Deduplicate by the entire ordered set, including nulls and stored model outputs. Never deduplicate solely by `riven_id`: rank, disposition, input values, and model results can differ for the same riven identity.
-
-Empty sets have zero rows and are identified through `attribute_count = 0` in the referencing state. Non-empty sets must have exactly the declared number of positions.
+Sets are equal only if every value in every position is equal, model outputs included. Never
+deduplicate by `riven_id`. `attribute_count` on the state tells an empty set from missing rows.
 
 ### `observations`
 
-One row per existing recorded auction sighting, including unchanged sightings.
+One row per sighting, from sweeps and feeds alike. Key:
+`(archive_date, listing_state_id, scraped_at)`, unique because `(auction_id, scraped_at)` is.
 
-Columns:
+Columns: `archive_date`, `listing_state_id`, `scraped_at`, `source`, `buyout_price`,
+`starting_price`, `top_bid`, `updated`, `owner_reputation`, `owner_status`, `owner_last_seen`.
 
-- Common columns plus `observation_id` and `listing_state_id`.
-- `scraped_at`, `source`.
-- `buyout_price`, `starting_price`, `top_bid`.
-- `updated`, `owner_reputation`, `owner_status`, `owner_last_seen`.
-- `observation_order`: a persisted day-scoped ordering value used to preserve tie behavior when timestamps are equal.
+Sorted by `listing_state_id`, `scraped_at`. No surrogate ID and no stored order column: the key is
+a total order.
 
-Key: `(bundle_id, observation_id)`.
+### Conversion rules
 
-Frequently changing prices and owner activity stay here so they do not cause repeated copies of the full listing state. Unchanged values can still benefit from ordinary Parquet encoding after sorting.
+- Compare stored values exactly; floats by bit pattern, null equal only to null.
+- Fail the day, leaving it flat, if `(auction_id, scraped_at)` is not unique, if an attribute row
+  has no sighting, or if a set's rows do not match its count.
+- Before committing, rebuild the flat rows by joining the three tables and compare them with the
+  inputs as multisets.
+- Commit the three outputs and the deletion of the flat files in one `Transaction`.
+- Late rows for a converted day arrive as flat parts. The next pass rebuilds the day from its
+  normalized files plus those parts; the local loader reads both in the meantime, since no
+  sighting is in both.
+- A normalized day is complete when the three tables each have exactly one marked file with the
+  same `<id>`, no flat parts remain for the date, and `gone` meets its stage 1 rule. Only complete
+  days are uploaded, as in 1d. Uploading a mixed day would hide the flat rows from anyone loading
+  `observations`.
+- Conversion never refits or reassigns riven IDs. `reprocess --replace` rebuilds the whole dataset
+  in the flat format as today, and the next maintenance pass converts it again.
 
-Do not turn missing prices into zero or carry a prior price forward. Do not collapse multiple observations at the same timestamp. Migration preserves the existing traversal order for ties; future writes persist an equivalent deterministic order. Recompaction preserves this order rather than deriving it from new filenames.
+### Code touched
 
-### `gone`
+- `dataset/src/layout.rs`: three new `Table` variants and their group.
+- `dataset/src/schema.rs`: column names and schemas.
+- `dataset/src/maintenance.rs`: the converter.
+- `store/src/load.rs`: discover normalized days next to flat ones, and build the same in-memory
+  auctions and observations from them. The existing "loaded path disappeared, rebuild" logic in
+  `store/src/lib.rs` already covers a day switching representation.
+- `src/hub.rs`: the completeness rule for normalized days, and the dataset card.
+- `src/hub/pull.rs` and `src/transfer.rs`: before replacing a local day, check what arrived. The
+  three files share an `<id>` and carry the marker, every `listing_state_id` in `observations`
+  exists in `listing_states`, every `attribute_set_id` exists unless `attribute_count` is zero,
+  and each set has as many rows as its count. A day that fails stays as it was. The pull already
+  downloads from one commit; keep that.
 
-Preserve the existing event payload: `detected_at`, `weapon_slug`, `auction_id`, `riven_id`, `reason`, `last_price`, `direct_sell`, `owner_name`, `created`, `first_seen`, and `last_seen`.
+### Hugging Face
 
-Add the common columns and a bundle-local `event_id`. Retain these snapshots even if a related listing observation is absent from the selected day. Do not require a listing-state reference to interpret a disappearance event.
+Publish stage 2 to a new dataset repository and freeze the old one, since the `auctions` config
+changes shape. One config per table, each with a glob over `date=*`.
 
-### Fidelity and schema evolution
+IDs are local to a day and are reassigned when a day is rewritten, so tables loaded from different
+commits can join wrongly. The card tells consumers to pass the same `revision` to every
+`load_dataset` call, and shows it in the example.
 
-Deduplication uses exact stored-value equality, not approximate float matching. Hashing may accelerate lookup, but a hash collision must never merge unequal payloads. Define canonical null and float handling, including signed zero and non-finite values, before implementation.
+The card gives the two queries that rebuild the old tables, the same ones the converter uses for
+its comparison:
 
-Validate that each legacy attribute row maps unambiguously to its original auction observation. Preserve original pairing and multiplicity; do not silently discard unmatched rows or multiply rows through an ambiguous join. Unsupported or inconsistent inputs leave the day unconverted with a diagnostic.
+```sql
+-- auctions: one row per sighting
+SELECT s.* EXCLUDE (archive_date, listing_state_id, attribute_set_id, attribute_count),
+       o.* EXCLUDE (archive_date, listing_state_id)
+FROM observations o
+JOIN listing_states s USING (archive_date, listing_state_id);
 
-Legacy schemas can omit columns. A source-schema descriptor must record which fields existed so migration does not claim that a missing field was an explicitly stored null. Keep descriptors in a small standard Parquet `source_schemas` table, keyed by `source_schema_id`, with a documented canonical schema description string. Publish it as its own Hugging Face configuration. Include all required descriptors with each independently distributable archive generation; duplicate identical descriptors may be deduplicated by key by readers.
-
-Future incompatible schema versions use distinct publication paths/configurations or a new dataset version. Do not mix incompatible files under one Hugging Face configuration wildcard.
-
-## Physical layout and metadata
-
-Local layout, with the same table directories published at the repository root:
-
-```text
-data/
-  parquet/
-    observations/date=YYYY-MM-DD/part-<generation>-<bundle>.parquet
-    listing_states/date=YYYY-MM-DD/part-<generation>-<bundle>.parquet
-    attribute_sets/date=YYYY-MM-DD/part-<generation>-<bundle>.parquet
-    gone/date=YYYY-MM-DD/part-<generation>-<bundle>.parquet
-    source_schemas/date=YYYY-MM-DD/part-<generation>.parquet
-  archive/
-    format.json
-    days/YYYY-MM-DD.json
+-- attributes: one row per stat of each sighting; a sighting with no stats has no rows
+SELECT o.scraped_at, s.auction_id, s.weapon_slug,
+       a.* EXCLUDE (archive_date, attribute_set_id)
+FROM observations o
+JOIN listing_states s USING (archive_date, listing_state_id)
+JOIN attribute_sets a USING (archive_date, attribute_set_id);
 ```
 
-`archive/format.json` declares the archive format version and reader requirements. Each day manifest declares its active generation, input fingerprint, bundle membership, table schemas, row counts, file byte sizes, and content checksums. It also records the compactor/encoding version and validation result.
+Before migrating history, upload a few converted days to a test repository and check
+`load_dataset` in normal and streaming mode, and the Hub viewer.
 
-The manifest coordinates the application's synchronization and validation. Standard Parquet readers can interpret all table data and joins without it. Day manifests must not contain the only copy of any field required to reconstruct observations.
+## Later, only if measured
 
-Write typed empty tables where needed to make a bundle's expected membership unambiguous. The descriptor table can be shared within its day generation; it is small and is included whenever that generation is transferred.
+Monthly listing tables. Most listings carry over to the next day, so states and attribute sets,
+about two thirds of a normalized day, are largely stored again daily. Folding a closed month into
+one set of tables would cut stage 2 substantially. It makes the month the replacement unit for old
+data and complicates incremental pulls, so it needs its own design and its own gate.
 
-## Compression strategy
+## Separate problem: store memory
 
-Before choosing settings, measure existing compressed bytes by column and table, distinct payload/set counts, decode time, full application load time, and peak memory.
+No file layout fixes this. `store/src/load.rs` keeps every sighting of every day in memory at 24
+bytes each, about 4 GB per year of history at the current rate, and rebuilds everything when a
+file is replaced. This will limit the server long before disk does.
 
-Benchmark two approaches on the same representative days:
+Plan it separately. The storage side only has to make it possible: day partitions allow loading a
+recent window in full, and the weapon-first sort lets older history be read per weapon on demand.
 
-- Existing flat schema, sorted and recompressed.
-- V2 normalized schema, sorted and recompressed, including all metadata and reference overhead.
+## Order of work
 
-Test Zstd levels such as 3, 9, and 15, plus several bounded row-group sizes and suitable dictionary/numeric encodings. Final settings are a benchmark decision, not a promised saving.
+1. Done: stage 1e, the store's tie-breaking and its order-independence test.
+2. Done: stage 1a, 1b and 1d. Remaining: deploy, which rewrites every published day in the first
+   maintenance pass and uploads them again.
+3. Count open-day parts on the production server and decide on 1c.
+4. Run for a month; record bytes per day, files per day, maintenance time and peak memory.
+5. Decide on stage 2 with the gate.
+6. If yes: schemas and converter, then the reader, then the test repository, then migrate history
+   day by day and switch the published dataset.
+7. Start the store memory design whenever history passes a few months, regardless of stage 2.
 
-Suggested sorting:
+## Appendix: how the numbers were measured
 
-- Listing states grouped by platform, auction ID, and local state ID.
-- Observations grouped by listing state and timestamp, preserving `observation_order` for ties.
-- Attributes grouped by attribute set and position.
-- Gone events grouped by auction ID and detection time.
+- Dataset `LLukas22/wf-riven-data` at commit `ca36876817b40394b68312a3ceb937379857b5db`, days
+  2026-11-07 to 2026-11-13.
+- DuckDB 2.0.0 through its Python package, session time zone UTC.
+- `union_by_name = true` on every read. Exclude the `date` partition column that DuckDB adds from
+  the path before comparing rows across days.
 
-Use an external sort or bounded partitioning so a large day does not need to fit in RAM. Prefer splitting bundles along listing boundaries. Define a bounded fallback for an unusually large listing group; duplicate its needed state across bundles rather than introduce cross-bundle references.
+With `A` the day's `auctions` files and `T` its `attributes` files:
 
-Avoid optimizing only for the smallest file. Row groups must also permit efficient streaming and Hub previews. Sorting may change physical row order, so application chronology must always use explicit ordering columns.
+```sql
+-- observation columns, everything else is the listing payload
+-- OBS = scraped_at, source, buyout_price, starting_price, top_bid, updated,
+--       owner_reputation, owner_status, owner_last_seen
 
-## Daily write and publication lifecycle
+-- distinct payloads and attribute sets
+SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (OBS) FROM A);
+SELECT count(DISTINCT s) FROM (
+  SELECT list(struct_pack(position, attribute, positive, spliced, value, value_rank8, roll,
+                          quality, coefficient, layout_multiplier) ORDER BY position) AS s
+  FROM T GROUP BY auction_id, scraped_at);
 
-### 1. Open UTC day
+-- key uniqueness
+SELECT count(*) FROM (SELECT 1 FROM A GROUP BY auction_id, scraped_at HAVING count(*) > 1);
 
-Initially retain the existing append-only ingestion format and transaction behavior. The application reads those live parts through its legacy reader. Preserve current durability, receipts, tracking checkpoints, and recovery semantics.
+-- null pattern per file, the cause of the fragments
+SELECT file_name, list(name ORDER BY name) FROM parquet_schema('auctions/date=2026-11-12/*.parquet')
+WHERE repetition_type = 'OPTIONAL' GROUP BY 1;
 
-Do not publish a partial v2 day as a completed archive. Live legacy parts and closed v2 archives may coexist locally for different dates.
-
-### 2. Close and snapshot the day
-
-Flush pending writes and identify the complete input set for a date strictly before the current UTC day. Capture a stable generation/fingerprint under the existing dataset coordination rules.
-
-Build output in staging. A single input bundle is eligible: this is a format conversion, not merely a small-file merge.
-
-For the initial implementation, reuse existing engine/dataset locking for correctness. A later optimization may build from an immutable snapshot outside the exclusive lock, but publication must recheck the input fingerprint and retry if it changed. Do not place long-lived build output where the current lock acquisition cleanup would delete it.
-
-### 3. Validate and activate locally
-
-Check checksums, schemas, key uniqueness, complete references, attribute counts, row counts, and semantic equivalence. Publish all new tables, the day manifest, and removal of the old representation using the existing recoverable transaction mechanism.
-
-A date has exactly one authoritative representation. Never discover both legacy rows and their v2 replacements as separate observations.
-
-Mark the day ready for upload only after successful activation. A day-specific generation is the authority; a date watermark alone cannot establish whether a corrected day is ready.
-
-### 4. Publish to Hugging Face
-
-For each new or corrected date, make one repository commit containing all generation files and its manifest, and deleting superseded files for that date. Use immutable generation filenames so same-size content changes cannot be missed by existing size-based checks.
-
-Ordinary daily updates add only the new day's files and manifest. They do not rewrite older days. Schema/configuration metadata changes only when required.
-
-Pin consumers to one repository revision when loading related tables. This avoids mixing states from one generation with observations from another while an update is being published.
-
-### 5. Download and apply
-
-Read manifests and fetch files from a single pinned repository revision. Compare generation/checksum information, download into staging, validate all table relationships, and transactionally replace the local date.
-
-Incomplete downloads leave the previous day generation usable. A remote day that is absent remains untouched, matching current behavior. Removing a day intentionally would require an explicit deletion protocol; absence alone is not a deletion instruction.
-
-### 6. Correct or reprocess a historical day
-
-Invalidate only that day's archive fingerprint. Rebuild from its authoritative Parquet records plus explicitly admitted new/replacement inputs. Preserve observation identity/order and prevent duplicates when replaying data.
-
-Activate and upload a new complete generation for that day. Downloaders replace it atomically. Repeating maintenance with unchanged inputs produces no new generation and no upload.
-
-Format migration and re-normalization are different operations: migration preserves stored model outputs and IDs. It must not rerun fitting or identity assignment as a side effect.
-
-## Hugging Face Datasets contract
-
-Publish each logical table as a separate configuration, each with a `train` split. Here `train` is simply the conventional name for the complete table, not a claim that records are a training sample.
-
-Example dataset-card front matter:
-
-```yaml
-configs:
-  - config_name: observations
-    default: true
-    data_files:
-      - split: train
-        path: observations/date=*/*.parquet
-  - config_name: listing_states
-    data_files:
-      - split: train
-        path: listing_states/date=*/*.parquet
-  - config_name: attribute_sets
-    data_files:
-      - split: train
-        path: attribute_sets/date=*/*.parquet
-  - config_name: gone
-    data_files:
-      - split: train
-        path: gone/date=*/*.parquet
-  - config_name: source_schemas
-    data_files:
-      - split: train
-        path: source_schemas/date=*/*.parquet
+-- sizes: each written with
+--   COPY (...) TO 'x.parquet' (FORMAT parquet, COMPRESSION zstd, COMPRESSION_LEVEL 3,
+--                              ROW_GROUP_SIZE 65536)
+-- flat sorted:  SELECT * FROM A ORDER BY weapon_slug, auction_id, scraped_at
+--               SELECT * FROM T ORDER BY weapon_slug, auction_id, scraped_at, position
+-- normalized:   the three stage 2 tables, built with the keys and sort orders given above
 ```
 
-Example consumer API after v2 is published:
+These are the queries in outline. Commit the full benchmark script with the stage 1
+implementation, so the figures can be rerun against later data.
 
-```python
-from datasets import load_dataset
-
-repo = "OWNER/DATASET"
-revision = "PINNED_COMMIT_SHA"
-
-observations = load_dataset(
-    repo, "observations", split="train", revision=revision
-)
-states = load_dataset(
-    repo, "listing_states", split="train", revision=revision
-)
-streamed = load_dataset(
-    repo, "observations", split="train", revision=revision, streaming=True
-)
-```
-
-`load_dataset` loads tables, not foreign-key relationships. Consumers explicitly join observations to states on `(bundle_id, listing_state_id)` and states to attributes on `(bundle_id, attribute_set_id)`. Attribute joins are one-to-many and must preserve empty attribute sets. Descriptor rows are resolved by `source_schema_id`.
-
-Provide a documented reconstruction example. Do not require a custom dataset script just to load the data. Streaming a table is supported; streaming reconstructed full listings requires a consumer to resolve the referenced bundle data.
-
-Always store `archive_date` and `bundle_id` in the files themselves. Do not depend on directory partition inference or preservation of source filenames by the library.
-
-Keep active generation files only under each configuration's wildcard. Retaining old and new generations there would make a generic Hugging Face load duplicate history, regardless of our application manifest.
-
-Prefer a versioned v2 dataset repository for the initial rollout while old clients use v1. Do not silently replace the old public `auctions` schema. Freeze or retire v1 through an explicit migration policy rather than permanently publishing a second expanded copy that cancels the storage benefit.
-
-## Application reader and transfer changes
-
-- Discover complete authoritative day generations, while supporting legacy live/unmigrated dates.
-- Validate a bundle before changing live indexes.
-- Load each state and attribute set once; build existing in-memory observations directly without materializing a wide reconstructed row for every sighting.
-- Preserve source-sensitive freshness, first/last seen, prices, model results, relists, and disappearance/reappearance behavior.
-- Detect generation replacement and rebuild/swap the affected read model safely; a full rebuild is acceptable initially.
-- Extend import/export manifests, allowed paths, backup handling, and validation to include v2 metadata and all tables.
-- Keep archive readability separate from resuming a scraper: tracker and registry checkpoints remain operational state, not prerequisites for reading historical Parquet.
-
-## Migration and validation
-
-Add a resumable Parquet-to-Parquet migration that operates one closed day at a time and requires no raw archives. Leave source files intact until the converted generation passes validation and is committed.
-
-Required validation:
-
-1. Reconstruct legacy records and compare their full logical contents and multiplicity, including field absence, nulls, floats, timestamps, and source strings.
-2. Exercise repeated sightings, bids, withdrawn prices, changing owner activity, state changes, model changes, relists, removals, reappearances, and equal-timestamp records.
-3. Compare application searches, history buckets/counts, detail timelines, and freshness behavior before and after conversion.
-4. Verify empty sets/tables, multiple bundles, multiple days, duplicate local IDs in different bundles, and malformed or missing references.
-5. Exercise crashes during local publication, partial downloads, failed validation, late-day correction, and idempotent maintenance/retry.
-6. Load actual Rust-written v2 samples using Hugging Face `datasets` in regular and streaming modes on the minimum supported and current library versions. Verify types, values, joins, multiple-day loads, and selected-day loads.
-7. Check a small published fixture with the Hub viewer before production migration; publication is a separate implementation-stage action.
-8. Report total archive bytes including descriptors/manifests, compression CPU time, peak memory, decoding/load time, and downloaded bytes for a new day and a corrected day.
-
-No compression percentage is an acceptance promise yet. The normalized format must demonstrate a meaningful net improvement over a sorted/recompressed flat baseline while meeting the correctness and compatibility gates.
-
-## Implementation order
-
-1. Add storage profiling and benchmark candidate physical encodings on copies of representative data.
-2. Finalize exact v2 Arrow schemas, field mapping, source-schema descriptors, tie ordering, manifest contract, and bundle validator.
-3. Implement the converter and mixed-version reader; establish record and application equivalence.
-4. Add version-aware daily maintenance, generation publication, download validation, and transfer support.
-5. Validate Hugging Face loading and viewer behavior; publish migration documentation and reconstruction examples.
-6. Migrate historical days incrementally and enable automatic conversion for newly closed days.
-7. Only if measurements justify it, write normalized bundles directly during ingestion; retain closed-day consolidation.
-
-Decisions still requiring measurements: archive Zstd level, encodings, row-group limits, bundle target size, and whether direct v2 ingestion earns enough benefit to justify changing the live writer.
-
-## Documentation references
-
-The compatibility assessment is based on official documentation; generated-file compatibility remains an implementation acceptance test.
-
-- [Hugging Face Parquet loading, projection, filtering, and streaming](https://huggingface.co/docs/datasets/en/package_reference/loading_methods)
-- [Hugging Face dataset configurations](https://huggingface.co/docs/hub/datasets-manual-configuration)
-- [Hugging Face feature types and consistent schemas](https://huggingface.co/docs/datasets/en/about_dataset_features)
-- [Hub data-file configuration and viewer row-group guidance](https://huggingface.co/docs/hub/datasets-data-files-configuration)
-- [PyArrow Parquet compression and writer options](https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ParquetWriter.html)
+The normalized figure was measured with an extra `bundle_id` string, an `observation_id` and
+`attribute_set_id` on `observations`, none of which stage 2 keeps, so it slightly overstates the
+size.

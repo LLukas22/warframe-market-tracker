@@ -1,18 +1,17 @@
-//! Streaming compaction of closed UTC dates and retention of committed raw responses.
+//! Storage maintenance: compaction of closed UTC dates (see `compact`) and retention of
+//! committed raw responses.
 
-use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File};
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
-use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
-use parquet::basic::{Compression, ZstdLevel};
-use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 
+use crate::compact;
 use crate::layout::{DATE_PREFIX, PARQUET_DIR, RAW_DIR, RECEIPTS_DIR, Table};
-use crate::tx::{DatasetLock, PARQUET_ZSTD_LEVEL, Transaction, durable_write, unique_id};
+use crate::tx::{DatasetLock, Transaction, durable_write};
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "clap", derive(clap::Args))]
@@ -36,23 +35,28 @@ pub struct MaintenanceArgs {
     )]
     pub maintenance_interval_hours: u64,
 
-    /// Approximate combined input size of a compacted part, in MiB.
+    /// Memory a compaction may use to sort one table of a day, in MiB. A larger day is sorted
+    /// in ranges of weapons; a weapon too large on its own leaves its day uncompacted.
     #[cfg_attr(
         feature = "clap",
         arg(
             long,
-            env = "WFMT_COMPACT_TARGET_MB",
-            default_value_t = 128,
-            value_parser = clap::value_parser!(u64).range(1..=4096)
+            env = "WFMT_COMPACT_MEMORY_MB",
+            default_value_t = DEFAULT_COMPACT_MEMORY_MB,
+            value_parser = clap::value_parser!(u64).range(compact::MIN_MEMORY_MB..=1 << 20)
         )
     )]
-    pub compact_target_mb: u64,
+    pub compact_memory_mb: u64,
 }
+
+pub const DEFAULT_COMPACT_MEMORY_MB: u64 = 1024;
 
 #[derive(Default, Debug)]
 pub struct Report {
     pub compacted_inputs: usize,
     pub compacted_outputs: usize,
+    /// Closed days that could not be compacted. Their files and raw archives are kept.
+    pub failed_days: Vec<NaiveDate>,
     pub raw_deleted: usize,
     pub raw_bytes_deleted: u64,
     pub raw_unconfirmed: usize,
@@ -64,16 +68,11 @@ pub struct RetentionState {
     pub last_cleanup_at: Option<DateTime<Utc>>,
 }
 
-/// Written after every compaction pass. Days before `compacted_before` won't change again unless
-/// the data is reprocessed or replaced, so they are ready to be published.
+/// Written after every compaction pass. Days before `compacted_before` are closed: no more scrapes
+/// write to them. Whether one is ready to publish is up to [`compact::day_complete`].
 pub const COMPACTION_STATE: &str = "storage/compaction.json";
 
 const MIB: u64 = 1024 * 1024;
-// Compacted files are read in batches and written in bounded row groups, so memory use stays
-// flat however big a day gets.
-const COMPACT_BATCH_ROWS: usize = 8192;
-const ROW_GROUP_MAX_ROWS: usize = 64 * 1024;
-const ROW_GROUP_MAX_BYTES: usize = 64 * MIB as usize;
 
 #[derive(Serialize, Deserialize)]
 struct CompactionState {
@@ -100,70 +99,45 @@ pub fn retention_state(root: &Path) -> Result<RetentionState> {
 }
 
 /// No network access. Caller should also hold the engine lock to exclude reprocessing.
+///
+/// Compacts every closed day that isn't in its final form yet (see `compact`). A day that fails
+/// is logged and skipped, keeping its files and its raw archives, and the pass goes on with the
+/// others; it then ends with an error naming the failed days.
 pub fn maintain(root: &Path, now: DateTime<Utc>, args: &MaintenanceArgs) -> Result<Report> {
     ensure!(
-        args.compact_target_mb > 0,
-        "compaction target must be positive"
+        args.compact_memory_mb >= compact::MIN_MEMORY_MB,
+        "the compaction memory budget must be at least {} MiB",
+        compact::MIN_MEMORY_MB
     );
+    let memory = usize::try_from(
+        args.compact_memory_mb
+            .checked_mul(MIB)
+            .context("compaction memory budget is too large")?,
+    )?;
     let _lock = DatasetLock::write(root)?;
     let mut report = Report::default();
-    let target = args
-        .compact_target_mb
-        .checked_mul(MIB)
-        .context("compaction target is too large")?;
     let parquet = root.join(PARQUET_DIR);
-    // Keep today's append-only parts untouched. Group by schema as well as date so older
-    // schema versions remain readable without inventing values for missing columns.
-    let mut days = dated_dirs(&parquet.join(Table::Auctions.as_str()), DATE_PREFIX)?;
-    days.extend(dated_dirs(
-        &parquet.join(Table::Gone.as_str()),
-        DATE_PREFIX,
-    )?);
+    // Today's append-only parts stay untouched until the day is over.
+    let mut days = Vec::new();
+    for table in Table::ALL {
+        days.extend(dated_dirs(&parquet.join(table.as_str()), DATE_PREFIX)?);
+    }
     days.sort();
     days.dedup();
     for date in days.into_iter().filter(|d| *d < now.date_naive()) {
         for tables in Table::GROUPS {
-            let partition = Path::new(PARQUET_DIR).join(tables[0].day_folder(date));
-            let mut schemas: BTreeMap<String, Vec<Vec<PathBuf>>> = BTreeMap::new();
-            for path in parquet_files(&root.join(&partition))? {
-                let mut bundle = Vec::new();
-                let mut schema_key = String::new();
-                for table in tables {
-                    let relative = Path::new(PARQUET_DIR)
-                        .join(table.day_folder(date))
-                        .join(path.file_name().unwrap());
-                    ensure!(
-                        root.join(&relative).exists(),
-                        "missing paired table {}",
-                        relative.display()
-                    );
-                    let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(
-                        root.join(&relative),
-                    )?)?;
-                    schema_key.push_str(&format!("{:?};", reader.schema()));
-                    bundle.push(relative);
+            match compact::compact_group(root, date, tables, memory) {
+                Ok(Some(compacted)) => {
+                    report.compacted_inputs += compacted.inputs;
+                    report.compacted_outputs += compacted.outputs;
                 }
-                schemas.entry(schema_key).or_default().push(bundle);
-            }
-            for bundles in schemas.values() {
-                let mut group = Vec::new();
-                let mut bytes = 0;
-                for bundle in bundles {
-                    let size: u64 = bundle
-                        .iter()
-                        .map(|p| fs::metadata(root.join(p)).map(|m| m.len()))
-                        .collect::<std::io::Result<Vec<_>>>()?
-                        .into_iter()
-                        .sum();
-                    if bytes + size > target && !group.is_empty() {
-                        compact_group(root, date, tables, &group, &mut report)?;
-                        group.clear();
-                        bytes = 0;
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(%date, error = %format!("{e:#}"), "compaction failed");
+                    if report.failed_days.last() != Some(&date) {
+                        report.failed_days.push(date);
                     }
-                    group.push(bundle.clone());
-                    bytes += size;
                 }
-                compact_group(root, date, tables, &group, &mut report)?;
             }
         }
     }
@@ -178,69 +152,23 @@ pub fn maintain(root: &Path, now: DateTime<Utc>, args: &MaintenanceArgs) -> Resu
             .date_naive()
             .checked_sub_signed(TimeDelta::days(i64::from(args.raw_retention_days)))
             .context("raw retention window is too large")?;
+        let failed = report.failed_days.clone();
         for date in dated_dirs(&root.join(RAW_DIR), "")?
             .into_iter()
-            .filter(|d| *d < cutoff)
+            .filter(|d| *d < cutoff && !failed.contains(d))
         {
             prune_day(root, date, now, &mut report)?;
         }
     }
     tracing::info!(?report, "storage maintenance finished");
-    Ok(report)
-}
-
-fn compact_group(
-    root: &Path,
-    date: NaiveDate,
-    tables: &[Table],
-    bundles: &[Vec<PathBuf>],
-    report: &mut Report,
-) -> Result<()> {
-    if bundles.len() < 2 {
-        return Ok(());
-    }
-    let id = unique_id();
-    let mut tx = Transaction::new(root)?;
-    for (i, table) in tables.iter().enumerate() {
-        let destination = Path::new(PARQUET_DIR)
-            .join(table.day_folder(date))
-            .join(format!("compact-{id}.parquet"));
-        let stage = tx.stage(destination);
-        let mut writer: Option<ArrowWriter<File>> = None;
-        let mut expected_rows = 0;
-        for bundle in bundles {
-            let builder =
-                ParquetRecordBatchReaderBuilder::try_new(File::open(root.join(&bundle[i]))?)?;
-            expected_rows += builder.metadata().file_metadata().num_rows();
-            if writer.is_none() {
-                let props = WriterProperties::builder()
-                    .set_compression(Compression::ZSTD(ZstdLevel::try_new(PARQUET_ZSTD_LEVEL)?))
-                    .set_max_row_group_row_count(Some(ROW_GROUP_MAX_ROWS))
-                    .set_max_row_group_bytes(Some(ROW_GROUP_MAX_BYTES))
-                    .build();
-                writer = Some(ArrowWriter::try_new(
-                    File::create(&stage)?,
-                    builder.schema().clone(),
-                    Some(props),
-                )?);
-            }
-            for batch in builder.with_batch_size(COMPACT_BATCH_ROWS).build()? {
-                writer.as_mut().unwrap().write(&batch?)?;
-            }
-            tx.delete(bundle[i].clone());
-        }
-        writer.unwrap().close()?;
-        File::open(&stage)?.sync_all()?;
-        let check = ParquetRecordBatchReaderBuilder::try_new(File::open(&stage)?)?;
-        ensure!(
-            check.metadata().file_metadata().num_rows() == expected_rows,
-            "compaction row count mismatch"
+    if !report.failed_days.is_empty() {
+        let days: Vec<String> = report.failed_days.iter().map(ToString::to_string).collect();
+        bail!(
+            "could not compact {}; their files and raw archives were kept",
+            days.join(", ")
         );
     }
-    tx.commit()?;
-    report.compacted_inputs += bundles.len() * tables.len();
-    report.compacted_outputs += tables.len();
-    Ok(())
+    Ok(report)
 }
 
 /// Names of the raw archives whose rows were durably published, per the given receipts.
@@ -403,9 +331,6 @@ fn files_with_extension(dir: &Path, extension: &str) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn parquet_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    files_with_extension(dir, "parquet")
-}
 fn json_files(dir: &Path) -> Result<Vec<PathBuf>> {
     files_with_extension(dir, "json")
 }
@@ -413,142 +338,93 @@ fn json_files(dir: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int64Array, RecordBatch};
-    use arrow::compute::concat_batches;
-    use std::sync::Arc;
+    use crate::compact::tests::{auction, gone_row, read_all, rows_text, write_parts};
+    use crate::compact::{day_complete, table_files};
 
-    /// The path, and the directory that is removed when this is dropped.
-    struct TempRoot(PathBuf, #[allow(dead_code)] tempfile::TempDir);
-    impl TempRoot {
-        fn new() -> Result<Self> {
-            let temp = tempfile::tempdir()?;
-            Ok(Self(temp.path().to_path_buf(), temp))
-        }
-    }
     fn options() -> MaintenanceArgs {
         MaintenanceArgs {
             raw_retention_days: 14,
             maintenance_interval_hours: 6,
-            compact_target_mb: 128,
+            compact_memory_mb: DEFAULT_COMPACT_MEMORY_MB,
         }
     }
 
-    fn write_part(
-        root: &Path,
-        table: &str,
-        date: &str,
-        name: &str,
-        value: i64,
-        legacy: bool,
-    ) -> Result<()> {
-        let mut columns = vec![(
-            "value",
-            Arc::new(Int64Array::from(vec![value])) as arrow::array::ArrayRef,
-        )];
-        if !legacy {
-            columns.push(("extra", Arc::new(Int64Array::from(vec![42]))));
-        }
-        let batch = RecordBatch::try_from_iter(columns)?;
-        let dir = root
-            .join("parquet")
-            .join(table)
-            .join(format!("date={date}"));
-        fs::create_dir_all(&dir)?;
-        let mut writer = ArrowWriter::try_new(File::create(dir.join(name))?, batch.schema(), None)?;
-        writer.write(&batch)?;
-        writer.close()?;
-        Ok(())
-    }
-
-    fn read_table(root: &Path, table: &str, date: &str) -> Result<RecordBatch> {
-        let mut batches = Vec::new();
-        for path in parquet_files(
-            &root
-                .join("parquet")
-                .join(table)
-                .join(format!("date={date}")),
-        )? {
-            for batch in ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?.build()? {
-                batches.push(batch?);
-            }
-        }
-        Ok(concat_batches(&batches[0].schema(), &batches)?)
+    fn rows(root: &Path, table: Table, date: NaiveDate) -> Vec<String> {
+        let mut rows = rows_text(&read_all(table, &table_files(root, table, date).unwrap()));
+        rows.sort();
+        rows
     }
 
     #[test]
-    fn compaction_preserves_rows_pairs_and_open_dates_and_is_idempotent() -> Result<()> {
-        let temp = TempRoot::new()?;
-        let root = &temp.0;
+    fn closed_days_are_compacted_once_and_open_days_left_alone() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
         let now = "2026-11-03T12:00:00Z".parse()?;
         assert_eq!(compacted_before(root)?, None);
-        for date in ["2026-11-01", "2026-11-03", "2026-11-04"] {
-            for table in ["auctions", "attributes", "gone"] {
-                for index in 0..3 {
-                    write_part(
-                        root,
-                        table,
-                        date,
-                        &format!("part-{index}.parquet"),
-                        index,
-                        false,
-                    )?;
-                }
-            }
+        for date in ["2026-11-01", "2026-11-03"] {
+            write_parts(
+                root,
+                (0..3)
+                    .map(|i| {
+                        let at = format!("{date}T0{i}:00:00Z");
+                        (
+                            vec![auction("soma", &format!("s{i}"), &at, Some(i))],
+                            vec![gone_row("soma", &format!("g{i}"), &at, None)],
+                        )
+                    })
+                    .collect(),
+            );
         }
-        let before: Vec<_> = ["auctions", "attributes", "gone"]
-            .iter()
-            .map(|table| read_table(root, table, "2026-11-01"))
-            .collect::<Result<_>>()?;
+        let closed: NaiveDate = "2026-11-01".parse()?;
+        let open: NaiveDate = "2026-11-03".parse()?;
+        let before: Vec<_> = Table::ALL.iter().map(|&t| rows(root, t, closed)).collect();
+
         let report = maintain(root, now, &options())?;
         assert_eq!(report.compacted_inputs, 9);
         assert_eq!(report.compacted_outputs, 3);
-        for (i, table) in ["auctions", "attributes", "gone"].iter().enumerate() {
-            assert_eq!(before[i], read_table(root, table, "2026-11-01")?);
-            for date in ["2026-11-03", "2026-11-04"] {
-                assert_eq!(
-                    parquet_files(
-                        &root
-                            .join("parquet")
-                            .join(table)
-                            .join(format!("date={date}"))
-                    )?
-                    .len(),
-                    3
-                );
-            }
+        assert!(day_complete(root, closed)?);
+        for (&table, before) in Table::ALL.iter().zip(before) {
+            assert_eq!(rows(root, table, closed), before);
+            assert_eq!(
+                table_files(root, table, open)?.len(),
+                3,
+                "today stays as written"
+            );
         }
-        let auctions = parquet_files(&root.join("parquet/auctions/date=2026-11-01"))?;
-        let attributes = parquet_files(&root.join("parquet/attributes/date=2026-11-01"))?;
-        assert_eq!(auctions[0].file_name(), attributes[0].file_name());
-        assert_eq!(compacted_before(root)?, Some("2026-11-03".parse()?));
+        assert_eq!(compacted_before(root)?, Some(open));
         assert_eq!(maintain(root, now, &options())?.compacted_inputs, 0);
         Ok(())
     }
 
     #[test]
-    fn compaction_keeps_schema_generations_separate() -> Result<()> {
-        let temp = TempRoot::new()?;
-        for table in ["auctions", "attributes"] {
-            for (index, legacy) in [true, true, false, false].iter().enumerate() {
-                write_part(
-                    &temp.0,
-                    table,
-                    "2026-11-01",
-                    &format!("part-{index}.parquet"),
-                    index as i64,
-                    *legacy,
-                )?;
-            }
+    fn a_failed_day_keeps_its_files_and_the_others_are_compacted() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        for date in ["2026-11-01", "2026-11-02"] {
+            write_parts(
+                root,
+                (0..2)
+                    .map(|i| {
+                        let at = format!("{date}T0{i}:00:00Z");
+                        (
+                            vec![auction("soma", &format!("s{i}"), &at, Some(1))],
+                            Vec::new(),
+                        )
+                    })
+                    .collect(),
+            );
         }
-        let report = maintain(&temp.0, "2026-11-03T00:00:00Z".parse()?, &options())?;
-        assert_eq!(report.compacted_inputs, 8);
-        assert_eq!(report.compacted_outputs, 4);
-        let files = parquet_files(&temp.0.join("parquet/auctions/date=2026-11-01"))?;
-        assert_eq!(files.len(), 2);
-        for file in files {
-            let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(file)?)?;
-            assert_eq!(reader.metadata().file_metadata().num_rows(), 2);
-        }
+        // An auctions part without its attributes partner.
+        let broken = table_files(root, Table::Attributes, "2026-11-01".parse()?)?;
+        fs::remove_file(&broken[0])?;
+
+        let error = maintain(root, "2026-11-03T00:00:00Z".parse()?, &options()).unwrap_err();
+        assert!(error.to_string().contains("2026-11-01"), "{error:#}");
+        assert_eq!(
+            table_files(root, Table::Auctions, "2026-11-01".parse()?)?.len(),
+            2
+        );
+        assert!(day_complete(root, "2026-11-02".parse()?)?);
         Ok(())
     }
 }

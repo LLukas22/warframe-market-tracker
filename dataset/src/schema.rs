@@ -3,15 +3,18 @@
 
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
 use arrow::array::{
     ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
     TimestampMillisecondArray,
 };
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use chrono::{DateTime, Utc};
 use wfmt_types::{RivenType, WeaponClass};
+
+use crate::layout::Table;
 
 pub struct AuctionRow {
     pub scraped_at: DateTime<Utc>,
@@ -209,6 +212,90 @@ pub mod gone {
     pub const LAST_SEEN: &str = "last_seen";
 }
 
+/// Columns of `auctions` that may hold nulls: the `Option` fields of [`AuctionRow`], and the two
+/// that the earliest files lack.
+const AUCTIONS_NULLABLE: &[&str] = &[
+    auctions::RIVEN_ID,
+    auctions::SOURCE,
+    auctions::WEAPON_CLASS,
+    auctions::MASTERY_LEVEL,
+    auctions::RE_ROLLS,
+    auctions::RANK,
+    auctions::DISPOSITION,
+    auctions::LEGACY_STATS,
+    auctions::FIT_AMBIGUOUS,
+    auctions::FIT_ERROR,
+    auctions::MEAN_POSITIVE_QUALITY,
+    auctions::BUYOUT_PRICE,
+    auctions::STARTING_PRICE,
+    auctions::TOP_BID,
+    auctions::MINIMAL_REPUTATION,
+    auctions::OWNER_REPUTATION,
+    auctions::OWNER_LAST_SEEN,
+];
+
+/// The `Option` fields of [`AttributeRow`].
+const ATTRIBUTES_NULLABLE: &[&str] = &[
+    attributes::SPLICED,
+    attributes::VALUE_RANK8,
+    attributes::ROLL,
+    attributes::QUALITY,
+    attributes::COEFFICIENT,
+    attributes::LAYOUT_MULTIPLIER,
+];
+
+/// The `Option` fields of [`GoneRow`].
+const GONE_NULLABLE: &[&str] = &[gone::LAST_PRICE];
+
+/// The columns' types as the builders make them, with the given columns nullable.
+fn schema_from(columns: Vec<(&'static str, ArrayRef)>, nullable: &[&str]) -> SchemaRef {
+    Arc::new(Schema::new(
+        columns
+            .iter()
+            .map(|(name, array)| {
+                Field::new(*name, array.data_type().clone(), nullable.contains(name))
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// The schema of a table. Every file the scraper writes has exactly this schema, whatever its
+/// rows hold, so parts of a day can always be merged. Parquet readers otherwise see a column
+/// as nullable only in files that happen to contain a null.
+pub fn schema(table: Table) -> SchemaRef {
+    static AUCTIONS: LazyLock<SchemaRef> =
+        LazyLock::new(|| schema_from(auction_columns(&[]), AUCTIONS_NULLABLE));
+    static ATTRIBUTES: LazyLock<SchemaRef> =
+        LazyLock::new(|| schema_from(attribute_columns(&[]), ATTRIBUTES_NULLABLE));
+    static GONE: LazyLock<SchemaRef> =
+        LazyLock::new(|| schema_from(gone_columns(&[]), GONE_NULLABLE));
+    match table {
+        Table::Auctions => AUCTIONS.clone(),
+        Table::Attributes => ATTRIBUTES.clone(),
+        Table::Gone => GONE.clone(),
+    }
+}
+
+fn batch(table: Table, columns: Vec<(&'static str, ArrayRef)>) -> Result<RecordBatch> {
+    let schema = schema(table);
+    Ok(RecordBatch::try_new(
+        schema,
+        columns.into_iter().map(|(_, array)| array).collect(),
+    )?)
+}
+
+pub(crate) fn auctions_batch(rows: &[AuctionRow]) -> Result<RecordBatch> {
+    batch(Table::Auctions, auction_columns(rows))
+}
+
+pub(crate) fn attributes_batch(rows: &[AttributeRow]) -> Result<RecordBatch> {
+    batch(Table::Attributes, attribute_columns(rows))
+}
+
+pub(crate) fn gone_batch(rows: &[GoneRow]) -> Result<RecordBatch> {
+    batch(Table::Gone, gone_columns(rows))
+}
+
 fn ts<'a>(it: impl Iterator<Item = Option<&'a DateTime<Utc>>>) -> ArrayRef {
     Arc::new(
         TimestampMillisecondArray::from(
@@ -239,9 +326,9 @@ fn bools(it: impl Iterator<Item = Option<bool>>) -> ArrayRef {
     Arc::new(BooleanArray::from(it.collect::<Vec<_>>()))
 }
 
-pub(crate) fn auctions_batch(rows: &[AuctionRow]) -> Result<RecordBatch> {
+fn auction_columns(rows: &[AuctionRow]) -> Vec<(&'static str, ArrayRef)> {
     let r = || rows.iter();
-    Ok(RecordBatch::try_from_iter([
+    vec![
         (auctions::SCRAPED_AT, ts(r().map(|x| Some(&x.scraped_at)))),
         (
             auctions::PLATFORM,
@@ -347,12 +434,12 @@ pub(crate) fn auctions_batch(rows: &[AuctionRow]) -> Result<RecordBatch> {
             ts(r().map(|x| x.owner_last_seen.as_ref())),
         ),
         (auctions::NOTE, strs(r().map(|x| Some(x.note.as_str())))),
-    ])?)
+    ]
 }
 
-pub(crate) fn attributes_batch(rows: &[AttributeRow]) -> Result<RecordBatch> {
+fn attribute_columns(rows: &[AttributeRow]) -> Vec<(&'static str, ArrayRef)> {
     let r = || rows.iter();
-    Ok(RecordBatch::try_from_iter([
+    vec![
         (attributes::SCRAPED_AT, ts(r().map(|x| Some(&x.scraped_at)))),
         (
             attributes::AUCTION_ID,
@@ -378,12 +465,12 @@ pub(crate) fn attributes_batch(rows: &[AttributeRow]) -> Result<RecordBatch> {
             attributes::LAYOUT_MULTIPLIER,
             f64s(r().map(|x| x.layout_multiplier)),
         ),
-    ])?)
+    ]
 }
 
-pub(crate) fn gone_batch(rows: &[GoneRow]) -> Result<RecordBatch> {
+fn gone_columns(rows: &[GoneRow]) -> Vec<(&'static str, ArrayRef)> {
     let r = || rows.iter();
-    Ok(RecordBatch::try_from_iter([
+    vec![
         (gone::DETECTED_AT, ts(r().map(|x| Some(&x.detected_at)))),
         (
             gone::WEAPON_SLUG,
@@ -404,5 +491,5 @@ pub(crate) fn gone_batch(rows: &[GoneRow]) -> Result<RecordBatch> {
         (gone::CREATED, ts(r().map(|x| Some(&x.created)))),
         (gone::FIRST_SEEN, ts(r().map(|x| Some(&x.first_seen)))),
         (gone::LAST_SEEN, ts(r().map(|x| Some(&x.last_seen)))),
-    ])?)
+    ]
 }

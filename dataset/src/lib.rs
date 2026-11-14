@@ -2,6 +2,7 @@
 //! reads it: where its files live, the tables' rows and columns, writing them in transactions,
 //! keeping them compact, and the registry that gives every riven a stable id.
 
+pub mod compact;
 pub mod identity;
 pub mod layout;
 pub mod maintenance;
