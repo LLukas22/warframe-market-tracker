@@ -89,7 +89,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
     let mut active = use_signal(|| 0usize);
 
     let selected = match &route {
-        Route::WeaponRoute { slug } => weapons.iter().find(|w| &w.slug == slug).cloned(),
+        Route::Weapon { slug } => weapons.iter().find(|w| &w.slug == slug).cloned(),
         _ => None,
     };
 
@@ -120,13 +120,13 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
 
     let id_like = looks_like_riven_id(&needle);
     let mut choose = move |slug: String| {
-        navigator.push(Route::WeaponRoute { slug });
+        navigator.push(Route::Weapon { slug });
         text.set(String::new());
         open.set(false);
         active.set(0);
     };
     let mut find_id = move |id: String| {
-        navigator.push(Route::SearchRoute { id });
+        navigator.push(Route::Search { id });
         text.set(String::new());
         open.set(false);
     };
@@ -191,7 +191,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                 }
                 if selected.is_some() {
                     Link {
-                        to: Route::MarketRoute {},
+                        to: Route::Market {},
                         class: "picker-clear",
                         title: "All weapons",
                         onclick: move |_| {
@@ -236,7 +236,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                             // Keep the menu mounted until the link receives its click.
                             onmousedown: move |e: MouseEvent| e.prevent_default(),
                             Link {
-                                to: Route::WeaponRoute { slug: w.slug.clone() },
+                                to: Route::Weapon { slug: w.slug.clone() },
                                 class: if i == active_index { "picker-item active" } else { "picker-item" },
                                 onclick: move |_| {
                                     text.set(String::new());
@@ -418,7 +418,7 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                             "name" => GridSort::Name,
                             _ => GridSort::Value,
                         },
-                    )
+                    );
                 },
                 option { value: "value", selected: sort() == GridSort::Value, "Most valuable" }
                 option { value: "listings", selected: sort() == GridSort::Listings, "Most listed" }
@@ -436,7 +436,7 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                         move |_| prefetch(slug.clone())
                     },
                     Link {
-                        to: Route::WeaponRoute { slug: w.slug.clone() },
+                        to: Route::Weapon { slug: w.slug.clone() },
                         class: if w.listings == 0 { "weapon-card empty" } else { "weapon-card" },
                         WeaponImage {
                             slug: w.slug.clone(),

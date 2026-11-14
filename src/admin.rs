@@ -32,6 +32,16 @@ impl Denied {
     }
 }
 
+impl From<Denied> for dioxus::prelude::ServerFnError {
+    fn from(denied: Denied) -> Self {
+        Self::ServerError {
+            message: denied.message().into(),
+            code: denied.status().as_u16(),
+            details: None,
+        }
+    }
+}
+
 fn admin_token() -> Option<String> {
     std::env::var("WFMT_ADMIN_TOKEN")
         .ok()
@@ -42,13 +52,10 @@ pub fn enabled() -> bool {
     admin_token().is_some()
 }
 
+/// Takes the same time wherever the tokens differ, so timing doesn't give the token away.
 fn token_matches(expected: &str, given: &str) -> bool {
-    expected.len() == given.len()
-        && expected
-            .bytes()
-            .zip(given.bytes())
-            .fold(0, |diff, (a, b)| diff | (a ^ b))
-            == 0
+    use subtle::ConstantTimeEq;
+    expected.as_bytes().ct_eq(given.as_bytes()).into()
 }
 
 pub async fn check(given: &str) -> Result<(), Denied> {

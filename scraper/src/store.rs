@@ -84,7 +84,7 @@ pub struct State {
 pub struct PersistedSweep {
     pub progress: wfmt_types::SweepProgress,
     /// Weapons still to fetch, in order.
-    pub queue: Vec<String>,
+    pub queue: std::collections::VecDeque<String>,
 }
 
 pub struct Store {

@@ -7,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use wfmt_scraper::{
-    dataset::unique_id,
     engine::{Engine, EngineArgs},
     identity::Registry,
     maintenance::{self, MaintenanceArgs},
@@ -18,18 +17,15 @@ use wfmt_scraper::{
     wfm,
 };
 
-struct Temp(PathBuf);
+/// The path, and the directory that is removed when this is dropped.
+struct Temp(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 impl Temp {
+    /// A path that doesn't exist yet, in a directory removed afterwards.
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("wfmt-recovery-{}", unique_id())))
+        let temp = tempfile::tempdir().unwrap();
+        Self(temp.path().join("data"), temp)
     }
 }
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 fn args() -> EngineArgs {
     EngineArgs {
         storage: MaintenanceArgs {

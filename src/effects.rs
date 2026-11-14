@@ -77,13 +77,14 @@ fn identifiable(mut gram: Vec<Vec<f64>>) -> Vec<bool> {
         for value in &mut gram[row] {
             *value /= divisor;
         }
-        for other in 0..p {
+        let pivot_row = gram[row].clone();
+        for (other, values) in gram.iter_mut().enumerate() {
             if other == row {
                 continue;
             }
-            let factor = gram[other][col];
-            for k in 0..p {
-                gram[other][k] -= factor * gram[row][k];
+            let factor = values[col];
+            for (value, pivot) in values.iter_mut().zip(&pivot_row) {
+                *value -= factor * pivot;
             }
         }
         pivots.push(col);

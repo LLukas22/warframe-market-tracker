@@ -120,6 +120,10 @@ fn auctions() -> RecordBatch {
 }
 
 fn gone() -> RecordBatch {
+    gone_with_reason("missing")
+}
+
+fn gone_with_reason(reason: &str) -> RecordBatch {
     RecordBatch::try_from_iter([
         (
             "detected_at",
@@ -131,7 +135,7 @@ fn gone() -> RecordBatch {
         ),
         (
             "reason",
-            Arc::new(StringArray::from(vec!["test"])) as ArrayRef,
+            Arc::new(StringArray::from(vec![reason])) as ArrayRef,
         ),
         (
             "last_price",
@@ -152,7 +156,10 @@ fn late_auction_failure_does_not_apply_a_prefix_or_intern_attributes() {
         assert!(
             inner
                 .load_parts(
-                    [Ok(auctions()), Err("damaged later row group".into())],
+                    [
+                        Ok(auctions()),
+                        Err(anyhow::anyhow!("damaged later row group"))
+                    ],
                     [Ok(attributes())],
                 )
                 .is_err()
@@ -193,7 +200,7 @@ fn late_gone_failure_does_not_mark_auctions_or_duplicate_events() {
     for _ in 0..2 {
         assert!(
             inner
-                .load_gone_batches([Ok(gone()), Err("damaged later row group".into())])
+                .load_gone_batches([Ok(gone()), Err(anyhow::anyhow!("damaged later row group"))])
                 .is_err()
         );
         assert!(inner.gone.is_empty());
@@ -202,4 +209,19 @@ fn late_gone_failure_does_not_mark_auctions_or_duplicate_events() {
     inner.load_gone_batches([Ok(gone())]).unwrap();
     assert_eq!(inner.gone.len(), 1);
     assert!(inner.auctions[0].gone.is_some());
+}
+
+#[test]
+fn unknown_gone_reasons_reject_the_part_before_anything_changes() {
+    let mut inner = Inner::default();
+    inner
+        .load_parts([Ok(auctions())], [Ok(attributes())])
+        .unwrap();
+    assert!(
+        inner
+            .load_gone_batches([Ok(gone()), Ok(gone_with_reason("sold?"))])
+            .is_err()
+    );
+    assert!(inner.gone.is_empty());
+    assert!(inner.auctions[0].gone.is_none());
 }

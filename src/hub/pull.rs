@@ -74,7 +74,7 @@ pub(super) fn start(root: PathBuf, config: Config) {
         let repo = match super::repository(&config) {
             Ok(repo) => repo,
             Err(error) => {
-                live().error = Some(error);
+                live().error = Some(format!("{error:#}"));
                 return;
             }
         };
@@ -279,14 +279,13 @@ async fn pull(
 mod tests {
     use super::*;
 
-    struct TempRoot(PathBuf);
+    /// The path, and the directory that is removed when this is dropped.
+    struct TempRoot(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
     impl TempRoot {
         fn new() -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("wfmt-pull-{}", wfmt_scraper::dataset::unique_id()));
-            fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            let temp = tempfile::tempdir().unwrap();
+            Self(temp.path().to_path_buf(), temp)
         }
 
         fn write(&self, path: &str, bytes: &[u8]) {
@@ -296,16 +295,13 @@ mod tests {
         }
     }
 
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn only_table_files_are_downloaded() {
         let date = NaiveDate::from_ymd_opt(2026, 11, 8);
-        assert_eq!(table_file("auctions/date=2026-11-08/compact-1.parquet"), date);
+        assert_eq!(
+            table_file("auctions/date=2026-11-08/compact-1.parquet"),
+            date
+        );
         assert_eq!(table_file("gone/date=2026-11-08/part-1.parquet"), date);
         for other in [
             "README.md",
@@ -325,7 +321,10 @@ mod tests {
     fn plan_mirrors_the_datasets_days_and_keeps_the_rest() {
         let root = TempRoot::new();
         // Already here.
-        root.write("parquet/auctions/date=2026-11-07/compact-1.parquet", b"same");
+        root.write(
+            "parquet/auctions/date=2026-11-07/compact-1.parquet",
+            b"same",
+        );
         // Replaced by the dataset's compacted parts.
         root.write("parquet/auctions/date=2026-11-08/part-1.parquet", b"part");
         root.write("parquet/attributes/date=2026-11-08/part-1.parquet", b"part");
@@ -394,8 +393,17 @@ mod tests {
             fs::read(root.0.join("parquet").join(new)).unwrap(),
             parquet_bytes()
         );
-        assert!(!root.0.join("parquet/auctions/date=2026-11-08/part-1.parquet").exists());
-        assert!(root.0.join("parquet/auctions/date=2026-11-09/part-2.parquet").exists());
+        assert!(
+            !root
+                .0
+                .join("parquet/auctions/date=2026-11-08/part-1.parquet")
+                .exists()
+        );
+        assert!(
+            root.0
+                .join("parquet/auctions/date=2026-11-09/part-2.parquet")
+                .exists()
+        );
         assert!(!root.0.join(DOWNLOAD).join(new).exists());
     }
 
@@ -411,7 +419,11 @@ mod tests {
             delete: vec!["auctions/date=2026-11-08/part-1.parquet".into()],
         };
         assert!(apply(&root.0, &root.0.join(DOWNLOAD), &day).is_err());
-        assert!(root.0.join("parquet/auctions/date=2026-11-08/part-1.parquet").exists());
+        assert!(
+            root.0
+                .join("parquet/auctions/date=2026-11-08/part-1.parquet")
+                .exists()
+        );
         assert!(!root.0.join("parquet").join(new).exists());
     }
 
@@ -421,10 +433,16 @@ mod tests {
         let downloaded = root.0.join(DOWNLOAD).join(CATALOG);
         root.write(&format!("{DOWNLOAD}/{CATALOG}"), br#"{"data":[]}"#);
         assert!(apply_catalog(&root.0, &downloaded).unwrap());
-        assert_eq!(fs::read(root.0.join(LOCAL_CATALOG)).unwrap(), br#"{"data":[]}"#);
+        assert_eq!(
+            fs::read(root.0.join(LOCAL_CATALOG)).unwrap(),
+            br#"{"data":[]}"#
+        );
         assert!(!apply_catalog(&root.0, &downloaded).unwrap());
         root.write(&format!("{DOWNLOAD}/{CATALOG}"), b"<html>");
         assert!(apply_catalog(&root.0, &downloaded).is_err());
-        assert_eq!(fs::read(root.0.join(LOCAL_CATALOG)).unwrap(), br#"{"data":[]}"#);
+        assert_eq!(
+            fs::read(root.0.join(LOCAL_CATALOG)).unwrap(),
+            br#"{"data":[]}"#
+        );
     }
 }

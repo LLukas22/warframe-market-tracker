@@ -192,8 +192,8 @@ mod tests {
 
     #[test]
     fn reader_recovers_partially_published_transaction() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("wfmt-recover-{}", unique_id()));
-        fs::create_dir_all(&root)?;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
         fs::write(root.join("old"), b"old")?;
         let mut tx = Transaction::new(&root)?;
         let first = tx.stage("first".into());
@@ -210,7 +210,6 @@ mod tests {
         assert!(!root.join("old").exists());
         assert!(!root.join(JOURNAL).exists());
         drop(guard);
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 }

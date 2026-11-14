@@ -140,9 +140,14 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
             }
             div { class: "section-head", h2 { "Price history" } span { class: "muted small", "one line per listing" } }
             div { class: "chart journey-chart",
-                onresize: move |event| { if let Ok(size) = event.get_content_box_size() {
-                    if size.width >= MIN_WIDTH && (size.width - width()).abs() > RESIZE_THRESHOLD { width.set(size.width); }
-                } },
+                onresize: move |event| {
+                    if let Ok(size) = event.get_content_box_size()
+                        && size.width >= MIN_WIDTH
+                        && (size.width - width()).abs() > RESIZE_THRESHOLD
+                    {
+                        width.set(size.width);
+                    }
+                },
                 if max_price > 0 {
                     svg { view_box: "0 0 {w} {HEIGHT}", role: "img", "aria-label": "Observed price history, with a separate series for each listing",
                         for v in ticks {

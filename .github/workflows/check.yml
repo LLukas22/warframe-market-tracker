@@ -1,0 +1,47 @@
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # The server, the browser app and the OCR module build with different features.
+      - run: cargo clippy --workspace --all-targets --features server
+      - run: cargo clippy -p wfmt-ocr --all-targets --features engine
+      - run: cargo clippy -p warframe-market-tracker --target wasm32-unknown-unknown
+      - run: cargo clippy -p wfmt-ocr --features wasm --target wasm32-unknown-unknown
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The OCR sample test needs the models from ocr/scripts/fetch-models.sh, so it isn't run here.
+      - run: cargo test --workspace --features server

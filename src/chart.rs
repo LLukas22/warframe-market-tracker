@@ -160,11 +160,12 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
     rsx! {
         div { class: "chart",
             onresize: move |event| {
-                if let Ok(size) = event.get_content_box_size() {
-                    if size.width > LEFT + RIGHT && (size.width - width()).abs() > RESIZE_THRESHOLD {
-                        LAST_WIDTH.set(size.width);
-                        width.set(size.width);
-                    }
+                if let Ok(size) = event.get_content_box_size()
+                    && size.width > LEFT + RIGHT
+                    && (size.width - width()).abs() > RESIZE_THRESHOLD
+                {
+                    LAST_WIDTH.set(size.width);
+                    width.set(size.width);
                 }
             },
             svg {

@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
 use futures_util::StreamExt;
 use hf_hub::repository::{AddSource, CommitOperation, RepoTreeEntry};
@@ -68,7 +68,7 @@ fn env(name: &str) -> Option<String> {
 }
 
 /// What the settings ask for, or what's wrong with them.
-fn mode() -> Result<Mode, String> {
+fn mode() -> Result<Mode> {
     resolve(
         env("WFMT_HF_TOKEN"),
         env("WFMT_HF_DATASET"),
@@ -83,13 +83,13 @@ fn resolve(
     upload: Option<String>,
     pull: Option<String>,
     scraping: bool,
-) -> Result<Mode, String> {
+) -> Result<Mode> {
     if let Some(pull) = pull.as_deref().filter(|_| !scraping) {
         if upload.is_some() {
-            return Err("WFMT_HF_DATASET and WFMT_HF_PULL_DATASET are both set. A server only \
-                        uploads what it scrapes, so set WFMT_ENABLE_SCRAPER=true or clear one \
-                        of them."
-                .into());
+            bail!(
+                "WFMT_HF_DATASET and WFMT_HF_PULL_DATASET are both set. A server only uploads \
+                 what it scrapes, so set WFMT_ENABLE_SCRAPER=true or clear one of them."
+            );
         }
         return Ok(Mode::Pull(Config {
             token,
@@ -102,23 +102,21 @@ fn resolve(
             token: Some(token),
             dataset: dataset_id("WFMT_HF_DATASET", &dataset)?,
         })),
-        (None, Some(_)) => Err("WFMT_HF_DATASET is set, but WFMT_HF_TOKEN isn't.".into()),
+        (None, Some(_)) => bail!("WFMT_HF_DATASET is set, but WFMT_HF_TOKEN isn't."),
         // The token is there for pulling a private dataset.
         (Some(_), None) if pull.is_some() => Ok(Mode::Off),
-        (Some(_), None) => Err("WFMT_HF_TOKEN is set, but WFMT_HF_DATASET isn't.".into()),
+        (Some(_), None) => bail!("WFMT_HF_TOKEN is set, but WFMT_HF_DATASET isn't."),
     }
 }
 
 /// Accepts `owner/name` as well as the dataset's URL.
-fn dataset_id(name: &str, value: &str) -> Result<String, String> {
+fn dataset_id(name: &str, value: &str) -> Result<String> {
     let id = value.trim_end_matches('/');
     let id = id.strip_prefix("https://huggingface.co/").unwrap_or(id);
     let id = id.strip_prefix("datasets/").unwrap_or(id);
     match id.split('/').collect::<Vec<_>>()[..] {
         [owner, name] if !owner.is_empty() && !name.is_empty() => Ok(id.to_owned()),
-        _ => Err(format!(
-            "{name} should look like owner/name, not {value:?}."
-        )),
+        _ => bail!("{name} should look like owner/name, not {value:?}."),
     }
 }
 
@@ -215,15 +213,18 @@ pub fn status() -> HubStatus {
         commit_url: live.commit_url.clone(),
         last_check_at: live.last_check_at,
         outcome: live.outcome.clone(),
-        error: mode.err().or_else(|| live.error.clone()),
+        error: mode
+            .err()
+            .map(|e| e.to_string())
+            .or_else(|| live.error.clone()),
     }
 }
 
 /// Checks every finished day against the Hub right away, after the current check if one runs.
 /// When pulling, checks the dataset for new days instead.
-pub fn request_upload() -> Result<(), String> {
+pub fn request_upload() -> Result<()> {
     if matches!(mode()?, Mode::Off) || !STARTED.load(Ordering::SeqCst) {
-        return Err("Hugging Face isn't set up on this server.".into());
+        bail!("Hugging Face isn't set up on this server.");
     }
     FORCE.store(true, Ordering::SeqCst);
     WAKE.notify_one();
@@ -252,15 +253,18 @@ pub fn start() {
     tokio::spawn(run(root, config));
 }
 
-fn repository(config: &Config) -> Result<HFRepository<RepoTypeDataset>, String> {
+fn repository(config: &Config) -> Result<HFRepository<RepoTypeDataset>> {
     let mut builder = HFClient::builder().user_agent(wfmt_types::USER_AGENT);
     if let Some(token) = &config.token {
         builder = builder.token(token);
     }
     let client = builder
         .build()
-        .map_err(|error| format!("Can't set up the Hugging Face client: {error}"))?;
-    let (owner, name) = config.dataset.split_once('/').unwrap();
+        .context("Can't set up the Hugging Face client")?;
+    let (owner, name) = config
+        .dataset
+        .split_once('/')
+        .ok_or_else(|| anyhow!("{} isn't owner/name", config.dataset))?;
     Ok(client.dataset(owner, name))
 }
 
@@ -290,7 +294,7 @@ where
                 live.error = None;
             }
             Err(error) => {
-                eprintln!("hugging face sync failed: {error:#}");
+                tracing::warn!("hugging face sync failed: {error:#}");
                 live.error = Some(format!("{error:#}"));
             }
         }
@@ -301,7 +305,7 @@ async fn run(root: PathBuf, config: Config) {
     let repo = match repository(&config) {
         Ok(repo) => repo,
         Err(error) => {
-            live().error = Some(error);
+            live().error = Some(format!("{error:#}"));
             return;
         }
     };
@@ -760,26 +764,19 @@ async fn sync(
 mod tests {
     use super::*;
 
-    struct TempRoot(PathBuf);
+    /// The path, and the directory that is removed when this is dropped.
+    struct TempRoot(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
     impl TempRoot {
         fn new() -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("wfmt-hub-{}", wfmt_scraper::dataset::unique_id()));
-            fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            let temp = tempfile::tempdir().unwrap();
+            Self(temp.path().to_path_buf(), temp)
         }
 
         fn write(&self, path: &str, bytes: &[u8]) {
             let path = self.0.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, bytes).unwrap();
-        }
-    }
-
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
@@ -792,27 +789,38 @@ mod tests {
             "me/rivens"
         );
         assert!(id("rivens").is_err());
-        assert!(id("me/rivens/extra").unwrap_err().starts_with("WFMT_HF_DATASET "));
+        assert!(
+            id("me/rivens/extra")
+                .unwrap_err()
+                .to_string()
+                .starts_with("WFMT_HF_DATASET ")
+        );
     }
 
     #[test]
     fn scraping_turns_the_pull_off() {
         let some = |v: &str| Some(v.to_owned());
-        let name = |mode: Result<Mode, String>| match mode {
+        let name = |mode: Result<Mode>| match mode {
             Ok(Mode::Off) => "off".to_owned(),
             Ok(Mode::Upload(c)) => format!("upload {}", c.dataset),
             Ok(Mode::Pull(c)) => format!("pull {}", c.dataset),
             Err(_) => "error".to_owned(),
         };
         let pull = some("LLukas22/wf-riven-data");
-        assert_eq!(name(resolve(None, None, pull.clone(), false)), "pull LLukas22/wf-riven-data");
+        assert_eq!(
+            name(resolve(None, None, pull.clone(), false)),
+            "pull LLukas22/wf-riven-data"
+        );
         assert_eq!(name(resolve(None, None, pull.clone(), true)), "off");
         assert_eq!(name(resolve(some("t"), None, pull.clone(), true)), "off");
         assert_eq!(
             name(resolve(some("t"), some("me/rivens"), pull.clone(), true)),
             "upload me/rivens"
         );
-        assert_eq!(name(resolve(some("t"), some("me/rivens"), pull, false)), "error");
+        assert_eq!(
+            name(resolve(some("t"), some("me/rivens"), pull, false)),
+            "error"
+        );
         assert_eq!(name(resolve(some("t"), None, None, true)), "error");
     }
 

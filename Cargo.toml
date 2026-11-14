@@ -9,42 +9,79 @@ repository = "https://github.com/LLukas22/warframe-market-tracker"
 [workspace]
 members = ["ocr", "scraper", "types"]
 
-[dependencies]
-anyhow = "1"
+# Versions shared by the crates. Members add the features they need.
+[workspace.dependencies]
 wfmt-types = { path = "types" }
-wfmt-scraper = { path = "scraper", optional = true }
+wfmt-scraper = { path = "scraper" }
+anyhow = "1"
+arrow = { version = "60", default-features = false }
+chrono = "0.4"
+flate2 = "1"
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
+reqwest = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = "1"
+tracing = "0.1"
+# Must match the installed wasm-bindgen CLI (`wasm-bindgen --version`), dx refuses mismatches.
+wasm-bindgen = "=0.2.129"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# Checked in CI with `-D warnings`. Pedantic is too noisy as a whole; these are the parts of it
+# worth keeping.
+cloned_instead_of_copied = "warn"
+explicit_iter_loop = "warn"
+manual_let_else = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+unnested_or_patterns = "warn"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+wfmt-types.workspace = true
+wfmt-scraper = { workspace = true, optional = true }
 gloo-timers = { version = "0.3", features = ["futures"] }
 dioxus = { version = "0.7", features = ["fullstack", "router"] }
-serde = { version = "1", features = ["derive"] }
+serde.workspace = true
+tracing.workspace = true
 
 # Server only
 tower-http = { version = "0.6", features = ["compression-gzip"], optional = true }
-arrow = { version = "60", default-features = false, optional = true }
-parquet = { version = "60", default-features = false, features = ["arrow", "zstd"], optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "io-util"], optional = true }
-reqwest = { version = "0.13", optional = true }
-serde_json = { version = "1", optional = true }
-chrono = { version = "0.4", optional = true }
-flate2 = { version = "1", optional = true }
+arrow = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "fs", "time", "io-util"], optional = true }
+reqwest = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
 futures-util = { version = "0.3", optional = true }
 tar = { version = "0.4", optional = true }
 tokio-util = { version = "0.7", features = ["io"], optional = true }
 hf-hub = { version = "1", optional = true }
 # Fast hashing for the in-memory indexes; keys are ids from our own dataset.
 rustc-hash = { version = "2", optional = true }
+# Constant-time comparison for the admin token.
+subtle = { version = "2", optional = true }
 
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-server = ["dep:tower-http", "dep:wfmt-scraper", "dioxus/server", "dep:arrow", "dep:parquet", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub", "dep:rustc-hash"]
+server = ["dep:tower-http", "dep:wfmt-scraper", "dioxus/server", "dep:arrow", "dep:parquet", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub", "dep:rustc-hash", "dep:subtle"]
 
-# Must match the installed wasm-bindgen CLI (`wasm-bindgen --version`), dx refuses mismatches.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "=0.2.129"
+wasm-bindgen.workspace = true
 js-sys = "0.3"
 
 [dev-dependencies]
-flate2 = "1"
+flate2.workspace = true
+tempfile.workspace = true
 
 # The OCR module's browser build (ocr/scripts/build-web.sh). Inference is slow without full
 # optimization, and the module is downloaded separately, so size and speed both matter.

@@ -117,6 +117,12 @@ impl EngineArgs {
     }
 }
 
+fn fatal(error: FetchError) -> anyhow::Error {
+    match error {
+        FetchError::Remote(e) | FetchError::Storage(e) => e,
+    }
+}
+
 fn hours(h: f64) -> TimeDelta {
     TimeDelta::milliseconds((h * HOUR_MS as f64) as i64)
 }
@@ -232,6 +238,28 @@ struct FetchResult {
     gone: u32,
 }
 
+/// Why a fetch failed, which decides what the engine does next.
+#[derive(Debug)]
+enum FetchError {
+    /// warframe.market failed or sent something unusable. Logged, and retried later.
+    Remote(anyhow::Error),
+    /// Archiving or processing a response failed. Fatal: the engine stops without advancing
+    /// its state, and a restart replays the raw journal.
+    Storage(anyhow::Error),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Remote(e) | Self::Storage(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
+
+type FetchOutcome = std::result::Result<FetchResult, FetchError>;
+
 pub struct Engine {
     args: EngineArgs,
     data_dir: PathBuf,
@@ -243,8 +271,9 @@ pub struct Engine {
     state: State,
     weapons: Vec<Weapon>,
     since_flush: usize,
-    processing: bool,
     status: ScraperStatus,
+    /// What `status.error` is about: a feed, a weapon or a step.
+    error_source: Option<String>,
 }
 
 impl Engine {
@@ -268,7 +297,7 @@ impl Engine {
             },
             weapons: Vec::new(),
             since_flush: 0,
-            processing: false,
+            error_source: None,
             status: ScraperStatus {
                 pid: std::process::id(),
                 started_at: now,
@@ -420,7 +449,7 @@ impl Engine {
                 gone: 0,
                 current: None,
             },
-            queue,
+            queue: queue.into(),
         });
         self.save_state();
         self.set_phase(Phase::Scraping);
@@ -521,7 +550,7 @@ impl Engine {
         Ok(())
     }
 
-    async fn fetch(&mut self, weapon: &Weapon) -> Result<FetchResult> {
+    async fn fetch(&mut self, weapon: &Weapon) -> FetchOutcome {
         let mut raw = RawResponse::new(
             Utc::now(),
             weapon.slug.clone(),
@@ -531,21 +560,26 @@ impl Engine {
         );
         raw.complete = false;
         let mut fetch_error = None;
+        let mut null_buyouts_descending = false;
         for sort_by in self.args.sort_by.clone() {
             self.set_step(format!("{sort_by} page"));
             match self.client.auctions_raw(&weapon.slug, &sort_by).await {
                 Ok(body) => {
+                    let parsed = wfm::parse_auctions(&body);
+                    null_buyouts_descending |= sort_by == "price_desc"
+                        && parsed.as_ref().is_ok_and(|(auctions, _)| {
+                            auctions.iter().any(|a| a.buyout_price.is_none())
+                        });
                     raw.pages.push(RawPage {
                         sort_by,
                         buyout_policy: None,
                         body,
                     });
-                    self.processing = true;
-                    self.archive_progress(&raw)?;
-                    self.processing = false;
+                    // Archived even when it doesn't parse, as a record of what came back.
+                    self.archive_progress(&raw).map_err(FetchError::Storage)?;
                     // Even a short page needs the other orders: only both price orders
                     // returning the same listings proves the search returned everything.
-                    if let Err(e) = wfm::parse_auctions(&raw.pages.last().unwrap().body) {
+                    if let Err(e) = parsed {
                         fetch_error = Some(e);
                         break;
                     }
@@ -557,22 +591,18 @@ impl Engine {
             }
         }
         if raw.pages.is_empty() {
-            return Err(
-                fetch_error.unwrap_or_else(|| anyhow::anyhow!("no search sort orders configured"))
-            );
+            return Err(FetchError::Remote(fetch_error.unwrap_or_else(|| {
+                anyhow::anyhow!("no search sort orders configured")
+            })));
         }
         // Null buyouts sort before expensive buyouts on descending pages. On popular
         // weapons they can occupy the entire cap, starving price analysis of good rolls.
         // Capped responses can contain only 98–99 entries. Only proven complete
         // coverage lets us skip supplementation when descending pages contain null buyouts.
-        let coverage = crate::pipeline::parse_pages(&raw.pages)?.coverage;
-        let needs_buyouts = !coverage.is_complete()
-            && raw.pages.iter().any(|page| {
-                page.sort_by == "price_desc"
-                    && wfm::parse_auctions(&page.body).is_ok_and(|(auctions, _)| {
-                        auctions.iter().any(|a| a.buyout_price.is_none())
-                    })
-            });
+        let coverage = crate::pipeline::parse_pages(&raw.pages)
+            .map_err(FetchError::Remote)?
+            .coverage;
+        let needs_buyouts = !coverage.is_complete() && null_buyouts_descending;
         if fetch_error.is_none() && needs_buyouts {
             // The API separates direct sales from bidding auctions with buyouts.
             for policy in ["direct", "with"] {
@@ -583,15 +613,14 @@ impl Engine {
                     .await
                 {
                     Ok(body) => {
+                        let parsed = wfm::parse_auctions(&body);
                         raw.pages.push(RawPage {
                             sort_by: "price_desc".into(),
                             buyout_policy: Some(policy.into()),
                             body,
                         });
-                        self.processing = true;
-                        self.archive_progress(&raw)?;
-                        self.processing = false;
-                        if let Err(e) = wfm::parse_auctions(&raw.pages.last().unwrap().body) {
+                        self.archive_progress(&raw).map_err(FetchError::Storage)?;
+                        if let Err(e) = parsed {
                             fetch_error = Some(e);
                         }
                     }
@@ -604,7 +633,10 @@ impl Engine {
         }
         raw.complete = fetch_error.is_none();
         if raw.complete && self.args.verify_missing > 0 {
-            let uncertain = self.pipeline.uncertain(&weapon.slug, &raw)?;
+            let uncertain = self
+                .pipeline
+                .uncertain(&weapon.slug, &raw)
+                .map_err(FetchError::Remote)?;
             for (i, id) in uncertain
                 .into_iter()
                 .take(self.args.verify_missing)
@@ -617,30 +649,18 @@ impl Engine {
                             auction_id: id,
                             exists,
                         });
-                        self.processing = true;
-                        self.archive_progress(&raw)?;
-                        self.processing = false;
+                        self.archive_progress(&raw).map_err(FetchError::Storage)?;
                     }
                     Err(e) => tracing::warn!(auction = %id, error = %e, "verify failed"),
                 }
             }
         }
-        self.processing = true;
-        self.archive_progress(&raw)?;
-        let summary = self.pipeline.process(weapon, &raw, &mut self.sink)?;
-        if !self.args.no_raw {
-            self.sink.acknowledge_raw(&raw);
-        }
-        // Without a raw journal, publish before the scheduler can persist progress.
-        if self.args.no_raw {
-            self.sink.flush()?;
-        }
-        self.processing = false;
+        let summary = self.process(weapon, &raw).map_err(FetchError::Storage)?;
         tracing::info!(weapon = %weapon.slug, pages = raw.pages.len(),
             auctions = summary.auctions, complete = summary.complete,
             fitted = summary.fitted, gone = summary.gone, skipped = summary.skipped, "fetched");
         if let Some(error) = fetch_error {
-            return Err(error);
+            return Err(FetchError::Remote(error));
         }
         Ok(FetchResult {
             pages: raw.pages.len() as u32,
@@ -649,11 +669,28 @@ impl Engine {
         })
     }
 
+    /// Archives and processes a fetched weapon.
+    fn process(&mut self, weapon: &Weapon, raw: &RawResponse) -> Result<crate::pipeline::Summary> {
+        self.archive_progress(raw)?;
+        let summary = self.pipeline.process(weapon, raw, &mut self.sink)?;
+        if self.args.no_raw {
+            // Without a raw journal, publish before the scheduler can persist progress.
+            self.sink.flush()?;
+        } else {
+            self.sink.acknowledge_raw(raw);
+        }
+        Ok(summary)
+    }
+
     /// Polls one site-wide feed and publishes what it found right away, since the engine may
     /// sit idle for hours afterwards.
-    async fn fetch_feed(&mut self, feed: &str) -> Result<FetchResult> {
-        let body = self.client.feed_raw(feed).await?;
-        wfm::parse_auctions(&body)?;
+    async fn fetch_feed(&mut self, feed: &str) -> FetchOutcome {
+        let remote = async {
+            let body = self.client.feed_raw(feed).await?;
+            wfm::parse_auctions(&body)?;
+            anyhow::Ok(body)
+        };
+        let body = remote.await.map_err(FetchError::Remote)?;
         let raw = RawResponse::new(
             Utc::now(),
             feed.to_owned(),
@@ -665,17 +702,7 @@ impl Engine {
             }],
             Vec::new(),
         );
-        self.processing = true;
-        self.archive_progress(&raw)?;
-        let summary = self
-            .pipeline
-            .process_feed(&self.weapons, &raw, &mut self.sink)?;
-        if !self.args.no_raw {
-            self.sink.acknowledge_raw(&raw);
-        }
-        self.sink.flush()?;
-        self.since_flush = 0;
-        self.processing = false;
+        let summary = self.process_feed(&raw).map_err(FetchError::Storage)?;
         tracing::info!(
             feed,
             auctions = summary.auctions,
@@ -689,7 +716,32 @@ impl Engine {
         })
     }
 
-    fn push_log(&mut self, name: &str, started: Instant, result: &Result<FetchResult>) {
+    /// Archives, processes and publishes a fetched feed.
+    fn process_feed(&mut self, raw: &RawResponse) -> Result<crate::pipeline::Summary> {
+        self.archive_progress(raw)?;
+        let summary = self
+            .pipeline
+            .process_feed(&self.weapons, raw, &mut self.sink)?;
+        if !self.args.no_raw {
+            self.sink.acknowledge_raw(raw);
+        }
+        self.sink.flush()?;
+        self.since_flush = 0;
+        Ok(summary)
+    }
+
+    /// Shows `error` in the status, as being about `source`.
+    fn set_error(&mut self, source: &str, error: impl std::fmt::Display) {
+        self.status.error = Some(format!("{source}: {error:#}"));
+        self.error_source = Some(source.to_owned());
+    }
+
+    fn clear_error(&mut self) {
+        self.status.error = None;
+        self.error_source = None;
+    }
+
+    fn push_log(&mut self, name: &str, started: Instant, result: &FetchOutcome) {
         let entry = FetchLog {
             t: ms(Utc::now()),
             weapon: name.to_owned(),
@@ -697,13 +749,13 @@ impl Engine {
             pages: result.as_ref().map_or(0, |r| r.pages),
             auctions: result.as_ref().map_or(0, |r| r.auctions),
             gone: result.as_ref().map_or(0, |r| r.gone),
-            error: result.as_ref().err().map(|e| format!("{e:#}")),
+            error: result.as_ref().err().map(ToString::to_string),
         };
         self.status.recent.insert(0, entry);
         self.status.recent.truncate(RECENT);
     }
 
-    fn log_fetch(&mut self, weapon: &str, started: Instant, result: &Result<FetchResult>) {
+    fn log_fetch(&mut self, weapon: &str, started: Instant, result: &FetchOutcome) {
         self.push_log(weapon, started, result);
         if let Some(sweep) = self.state.sweep.as_mut() {
             let p = &mut sweep.progress;
@@ -720,293 +772,24 @@ impl Engine {
     }
 
     /// Runs until `shutdown` fires.
-    pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
-        let mut rx = Commands::new(self.data_dir.clone());
+    pub async fn run(mut self, shutdown: watch::Receiver<bool>) -> Result<()> {
+        let mut inbox = Inbox {
+            commands: Commands::new(self.data_dir.clone()),
+            deferred: VecDeque::new(),
+            shutdown,
+        };
         // Drop stale commands from before this engine started.
         take_commands(&self.data_dir);
-
-        let mut deferred: VecDeque<Command> = VecDeque::new();
         if let Some(sweep) = &self.state.sweep {
             tracing::info!(remaining = sweep.queue.len(), "resuming sweep");
             self.status.phase = Phase::Scraping;
         }
         self.publish();
 
-        let mut shutting_down = false;
-        let mut feed_since_weapon = false;
-        let mut metadata_failed_at: Option<DateTime<Utc>> = None;
-        let mut next_maintenance = Instant::now();
-        let mut next_feed_prune = Instant::now();
-        // In memory only: polling once more after a restart costs next to nothing. Disabled
-        // feeds are dropped; the first poll happens as soon as the weapon list is ready.
-        let mut feeds: Vec<(&'static str, Duration, Instant)> = [
-            (wfmt_types::FEED_RECENT, self.args.recent_interval_secs),
-            (wfmt_types::FEED_POPULAR, self.args.popular_interval_secs),
-        ]
-        .into_iter()
-        .filter(|(_, secs)| *secs > 0)
-        .map(|(feed, secs)| (feed, Duration::from_secs(secs), Instant::now()))
-        .collect();
-        loop {
-            if *shutdown.borrow() {
+        let mut schedule = Schedule::new(&self.args);
+        while !*inbox.shutdown.borrow() {
+            if let Next::Stop = self.step(&mut inbox, &mut schedule).await? {
                 break;
-            }
-            if Instant::now() >= next_maintenance {
-                self.sink.flush()?;
-                self.set_phase(Phase::Maintenance);
-                let dir = self.data_dir.clone();
-                let args = self.args.storage.clone();
-                let mut task = tokio::task::spawn_blocking(move || {
-                    maintenance::maintain(&dir, Utc::now(), &args)
-                });
-                // Keep status alive while disk work runs. Commands stay queued and shutdown
-                // waits for the local transaction to finish safely.
-                loop {
-                    tokio::select! {
-                        result = &mut task => {
-                            match result {
-                                Ok(Ok(_)) => {},
-                                Ok(Err(e)) => {
-                                    tracing::error!(error = %e, "storage maintenance failed");
-                                    self.status.error = Some(format!("storage maintenance: {e:#}"));
-                                }
-                                Err(e) => return Err(e.into()),
-                            }
-                            break;
-                        }
-                        _ = tokio::time::sleep(MAINTENANCE_STATUS_INTERVAL) => self.publish(),
-                    }
-                }
-                next_maintenance = Instant::now()
-                    + Duration::from_hours(self.args.storage.maintenance_interval_hours);
-                self.set_phase(if self.state.sweep.is_some() {
-                    Phase::Scraping
-                } else {
-                    Phase::Idle
-                });
-                continue;
-            }
-            if self.args.feed_raw_retention_hours > 0 && Instant::now() >= next_feed_prune {
-                next_feed_prune = Instant::now() + FEED_PRUNE_INTERVAL;
-                let retention = hours(self.args.feed_raw_retention_hours as f64);
-                match maintenance::prune_feeds(&self.data_dir, Utc::now(), retention) {
-                    Ok(deleted) => tracing::debug!(deleted, "pruned feed archives"),
-                    Err(e) => {
-                        tracing::error!(error = %e, "feed archive cleanup failed");
-                        self.status.error = Some(format!("feed archive cleanup: {e:#}"));
-                    }
-                }
-            }
-            while let Some(command) = rx.try_recv() {
-                deferred.push_back(command);
-            }
-            let now = Utc::now();
-            let sweep_due = self.state.sweep.is_none() && now >= self.next_sweep_at();
-
-            // Make sure the weapon list is fresh before anything that needs it.
-            let needs_weapons = self.state.sweep.is_some()
-                || sweep_due
-                || !deferred.is_empty()
-                || self.weapons.is_empty();
-            let retry_metadata = metadata_failed_at.is_none_or(|t| now - t > METADATA_RETRY_DELAY);
-            if needs_weapons && self.metadata_due(now) && retry_metadata {
-                self.set_phase(Phase::Metadata);
-                tokio::select! {
-                    result = self.refresh_metadata() => match result {
-                        Ok(()) => metadata_failed_at = None,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "metadata refresh failed");
-                            metadata_failed_at = Some(now);
-                            self.status.error = Some(format!("weapon list: {e:#}"));
-                        }
-                    },
-                    _ = shutdown.changed() => break,
-                }
-                let phase = if self.state.sweep.is_some() {
-                    Phase::Scraping
-                } else {
-                    Phase::Idle
-                };
-                self.set_phase(phase);
-                continue;
-            }
-
-            while let Some(command) = deferred.pop_front() {
-                self.handle(command)?;
-            }
-
-            // At most one feed between weapons, even if multiple slow feeds are overdue.
-            // Oldest deadline first also prevents one feed from starving the other.
-            let sweep_waiting = self.state.sweep.is_some() || sweep_due;
-            let due = feeds
-                .iter_mut()
-                .filter(|(_, _, next)| Instant::now() >= *next)
-                .min_by_key(|(_, _, next)| *next);
-            if let Some((feed, interval, next)) =
-                due.filter(|_| !self.weapons.is_empty() && !(sweep_waiting && feed_since_weapon))
-            {
-                let feed = *feed;
-                feed_since_weapon = true;
-                let started = Instant::now();
-                let result = {
-                    let fetch = self.fetch_feed(feed);
-                    tokio::pin!(fetch);
-                    loop {
-                        tokio::select! {
-                            result = &mut fetch => break Some(result),
-                            Some(command) = rx.recv() => {
-                                // A backing-off poll must not hold up a cancel for minutes.
-                                let cancel = command == Command::Cancel;
-                                deferred.push_back(command);
-                                if cancel {
-                                    break None;
-                                }
-                            }
-                            _ = shutdown.changed() => break None,
-                        }
-                    }
-                };
-                // Backoff can outlast the poll interval. Start the next interval after
-                // completion (or cancellation), so a failed feed cannot immediately repeat.
-                *next = Instant::now() + *interval;
-                let Some(result) = result else {
-                    continue;
-                };
-                if self.processing {
-                    // Same as a weapon fetch: restart recovers the raw journal.
-                    return result.map(|_| ());
-                }
-                match &result {
-                    Ok(_) => {
-                        if self
-                            .status
-                            .error
-                            .as_deref()
-                            .is_some_and(|e| e.starts_with(feed))
-                        {
-                            self.status.error = None;
-                        }
-                    }
-                    Err(e) => {
-                        // No cooldown: the next poll is minutes away anyway.
-                        tracing::warn!(feed, error = %e, "feed fetch failed");
-                        self.status.error = Some(format!("{feed}: {e:#}"));
-                    }
-                }
-                self.push_log(feed, started, &result);
-                self.publish();
-                continue;
-            }
-
-            if self.state.sweep.is_none() {
-                if sweep_due && !self.weapons.is_empty() {
-                    self.start_scheduled();
-                    continue;
-                }
-                if self.status.phase != Phase::Idle {
-                    self.set_phase(Phase::Idle);
-                }
-                // Idle: wake for commands, the next sweep, or the heartbeat.
-                let heartbeat = TimeDelta::milliseconds(wfmt_types::HEARTBEAT_MS / 2);
-                let wake = self.next_sweep_at().min(now + heartbeat);
-                let sleep = tokio::time::sleep((wake - now).to_std().unwrap_or_default());
-                tokio::select! {
-                    _ = sleep => self.publish(),
-                    Some(command) = rx.recv() => deferred.push_back(command),
-                    _ = shutdown.changed() => break,
-                }
-                continue;
-            }
-
-            // Sweep running: next weapon.
-            let sweep = self.state.sweep.as_mut().unwrap();
-            if sweep.queue.is_empty() {
-                self.finish_sweep(false)?;
-                continue;
-            }
-            let slug = sweep.queue.remove(0);
-            feed_since_weapon = false;
-            let Some(weapon) = self.weapons.iter().find(|w| w.slug == slug).cloned() else {
-                tracing::warn!(weapon = %slug, "weapon no longer exists, skipping");
-                sweep.progress.total = sweep.progress.total.saturating_sub(1);
-                continue;
-            };
-            sweep.progress.current = Some(CurrentFetch {
-                weapon: slug.clone(),
-                started_at: ms(Utc::now()),
-                step: "starting".into(),
-            });
-            self.status.error = None;
-            self.set_phase(Phase::Scraping);
-
-            let started = Instant::now();
-            let mut cancelled = false;
-            let result = {
-                let fetch = self.fetch(&weapon);
-                tokio::pin!(fetch);
-                loop {
-                    tokio::select! {
-                        result = &mut fetch => break Some(result),
-                        Some(command) = rx.recv() => {
-                            if command == Command::Cancel {
-                                cancelled = true;
-                                break None;
-                            }
-                            deferred.push_back(command);
-                        }
-                        _ = shutdown.changed() => {
-                            shutting_down = true;
-                            break None;
-                        }
-                    }
-                }
-            };
-
-            let Some(result) = result else {
-                if shutting_down {
-                    // Put the weapon back so the sweep resumes with it.
-                    if let Some(s) = self.state.sweep.as_mut() {
-                        s.queue.insert(0, slug);
-                        s.progress.current = None;
-                    }
-                    self.save_state();
-                    break;
-                }
-                if cancelled {
-                    self.recover_pending()?;
-                    self.finish_sweep(true)?;
-                }
-                continue;
-            };
-
-            if self.processing {
-                // Storage/processing failures are fatal: do not advance state or publish
-                // partially updated in-memory tracking. Restart recovers the raw journal.
-                return result.map(|_| ());
-            }
-            if let Err(e) = &result {
-                tracing::error!(weapon = %slug, error = %e, "fetch failed");
-                self.status.error = Some(format!("{slug}: {e:#}"));
-            }
-            // Mark failures too, so a broken weapon is not retried in a tight loop.
-            self.state.last_fetch.insert(slug.clone(), Utc::now());
-            self.log_fetch(&slug, started, &result);
-            self.save_state();
-            self.since_flush += 1;
-            if self.since_flush >= self.args.flush_every {
-                self.sink.flush()?;
-                self.since_flush = 0;
-            }
-            self.publish();
-
-            if result.is_err() {
-                self.set_phase(Phase::Cooldown);
-                tokio::select! {
-                    _ = tokio::time::sleep(ERROR_COOLDOWN) => {}
-                    Some(command) = rx.recv() => deferred.push_back(command),
-                    _ = shutdown.changed() => break,
-                }
-                self.set_phase(Phase::Scraping);
             }
         }
 
@@ -1016,6 +799,350 @@ impl Engine {
         self.status.phase = Phase::Stopped;
         self.publish();
         Ok(())
+    }
+
+    /// One turn of the main loop: the most urgent of maintenance, the weapon list, commands,
+    /// a feed poll, the next weapon of a sweep, or waiting.
+    async fn step(&mut self, inbox: &mut Inbox, schedule: &mut Schedule) -> Result<Next> {
+        if Instant::now() >= schedule.next_maintenance {
+            self.maintain().await?;
+            schedule.next_maintenance =
+                Instant::now() + Duration::from_hours(self.args.storage.maintenance_interval_hours);
+            return Ok(Next::Continue);
+        }
+        if self.args.feed_raw_retention_hours > 0 && Instant::now() >= schedule.next_feed_prune {
+            schedule.next_feed_prune = Instant::now() + FEED_PRUNE_INTERVAL;
+            self.prune_feeds();
+        }
+        while let Some(command) = inbox.commands.try_recv() {
+            inbox.deferred.push_back(command);
+        }
+        let now = Utc::now();
+        let sweep_due = self.state.sweep.is_none() && now >= self.next_sweep_at();
+
+        // Make sure the weapon list is fresh before anything that needs it.
+        let needs_weapons = self.state.sweep.is_some()
+            || sweep_due
+            || !inbox.deferred.is_empty()
+            || self.weapons.is_empty();
+        let retry_metadata = schedule
+            .metadata_failed_at
+            .is_none_or(|t| now - t > METADATA_RETRY_DELAY);
+        if needs_weapons && self.metadata_due(now) && retry_metadata {
+            return Ok(self.update_weapons(inbox, schedule, now).await);
+        }
+
+        while let Some(command) = inbox.deferred.pop_front() {
+            self.handle(command)?;
+        }
+
+        // At most one feed between weapons, even if multiple slow feeds are overdue.
+        let sweep_waiting = self.state.sweep.is_some() || sweep_due;
+        if !self.weapons.is_empty()
+            && !(sweep_waiting && schedule.feed_since_weapon)
+            && let Some(feed) = schedule.due_feed()
+        {
+            schedule.feed_since_weapon = true;
+            self.poll_feed(inbox, &mut schedule.feeds[feed]).await?;
+            return Ok(Next::Continue);
+        }
+
+        if self.state.sweep.is_none() {
+            if sweep_due && !self.weapons.is_empty() {
+                self.start_scheduled();
+                return Ok(Next::Continue);
+            }
+            return Ok(self.idle(inbox, now).await);
+        }
+        self.next_weapon(inbox, schedule).await
+    }
+
+    /// Runs storage maintenance, publishing the status meanwhile. Commands stay queued, and
+    /// shutdown waits for the local transaction to finish safely.
+    async fn maintain(&mut self) -> Result<()> {
+        self.sink.flush()?;
+        self.set_phase(Phase::Maintenance);
+        let dir = self.data_dir.clone();
+        let args = self.args.storage.clone();
+        let mut task =
+            tokio::task::spawn_blocking(move || maintenance::maintain(&dir, Utc::now(), &args));
+        let result = loop {
+            tokio::select! {
+                result = &mut task => break result?,
+                _ = tokio::time::sleep(MAINTENANCE_STATUS_INTERVAL) => self.publish(),
+            }
+        };
+        if let Err(e) = result {
+            tracing::error!(error = %e, "storage maintenance failed");
+            self.set_error("storage maintenance", e);
+        }
+        self.set_phase(self.working_phase());
+        Ok(())
+    }
+
+    fn prune_feeds(&mut self) {
+        let retention = hours(self.args.feed_raw_retention_hours as f64);
+        match maintenance::prune_feeds(&self.data_dir, Utc::now(), retention) {
+            Ok(deleted) => tracing::debug!(deleted, "pruned feed archives"),
+            Err(e) => {
+                tracing::error!(error = %e, "feed archive cleanup failed");
+                self.set_error("feed archive cleanup", e);
+            }
+        }
+    }
+
+    /// Downloads the weapon list, unless shutdown comes first.
+    async fn update_weapons(
+        &mut self,
+        inbox: &mut Inbox,
+        schedule: &mut Schedule,
+        now: DateTime<Utc>,
+    ) -> Next {
+        self.set_phase(Phase::Metadata);
+        tokio::select! {
+            result = self.refresh_metadata() => match result {
+                Ok(()) => schedule.metadata_failed_at = None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "metadata refresh failed");
+                    schedule.metadata_failed_at = Some(now);
+                    self.set_error("weapon list", e);
+                }
+            },
+            _ = inbox.shutdown.changed() => return Next::Stop,
+        }
+        self.set_phase(self.working_phase());
+        Next::Continue
+    }
+
+    /// Polls a feed. Fails only when storing what came back fails.
+    async fn poll_feed(&mut self, inbox: &mut Inbox, feed: &mut Feed) -> Result<()> {
+        let started = Instant::now();
+        let result = inbox.interruptible(self.fetch_feed(feed.id)).await;
+        // Backoff can outlast the poll interval. Start the next interval after completion (or
+        // cancellation), so a failed feed cannot immediately repeat.
+        feed.next = Instant::now() + feed.interval;
+        let result = match result {
+            Ok(result) => result,
+            // A backing-off poll must not hold up a cancel for minutes.
+            Err(Interrupt::Cancel) => {
+                inbox.deferred.push_back(Command::Cancel);
+                return Ok(());
+            }
+            Err(Interrupt::Shutdown) => return Ok(()),
+        };
+        match &result {
+            // Same as a weapon fetch: restart recovers the raw journal.
+            Err(FetchError::Storage(_)) => return result.map(|_| ()).map_err(fatal),
+            Ok(_) => {
+                if self.error_source.as_deref() == Some(feed.id) {
+                    self.clear_error();
+                }
+            }
+            Err(e) => {
+                // No cooldown: the next poll is minutes away anyway.
+                tracing::warn!(feed = feed.id, error = %e, "feed fetch failed");
+                self.set_error(feed.id, e);
+            }
+        }
+        self.push_log(feed.id, started, &result);
+        self.publish();
+        Ok(())
+    }
+
+    /// Waits for commands, the next sweep, or the heartbeat.
+    async fn idle(&mut self, inbox: &mut Inbox, now: DateTime<Utc>) -> Next {
+        if self.status.phase != Phase::Idle {
+            self.set_phase(Phase::Idle);
+        }
+        let heartbeat = TimeDelta::milliseconds(wfmt_types::HEARTBEAT_MS / 2);
+        let wake = self.next_sweep_at().min(now + heartbeat);
+        let sleep = tokio::time::sleep((wake - now).to_std().unwrap_or_default());
+        tokio::select! {
+            () = sleep => self.publish(),
+            Some(command) = inbox.commands.recv() => inbox.deferred.push_back(command),
+            _ = inbox.shutdown.changed() => return Next::Stop,
+        }
+        Next::Continue
+    }
+
+    /// Fetches the next weapon of the running sweep, or finishes the sweep.
+    async fn next_weapon(&mut self, inbox: &mut Inbox, schedule: &mut Schedule) -> Result<Next> {
+        let sweep = self
+            .state
+            .sweep
+            .as_mut()
+            .expect("only called during a sweep");
+        let Some(slug) = sweep.queue.pop_front() else {
+            self.finish_sweep(false)?;
+            return Ok(Next::Continue);
+        };
+        schedule.feed_since_weapon = false;
+        let Some(weapon) = self.weapons.iter().find(|w| w.slug == slug).cloned() else {
+            tracing::warn!(weapon = %slug, "weapon no longer exists, skipping");
+            sweep.progress.total = sweep.progress.total.saturating_sub(1);
+            return Ok(Next::Continue);
+        };
+        sweep.progress.current = Some(CurrentFetch {
+            weapon: slug.clone(),
+            started_at: ms(Utc::now()),
+            step: "starting".into(),
+        });
+        self.clear_error();
+        self.set_phase(Phase::Scraping);
+
+        let started = Instant::now();
+        let result = match inbox.interruptible(self.fetch(&weapon)).await {
+            Ok(result) => result,
+            Err(Interrupt::Cancel) => {
+                self.recover_pending()?;
+                self.finish_sweep(true)?;
+                return Ok(Next::Continue);
+            }
+            Err(Interrupt::Shutdown) => {
+                // Put the weapon back so the sweep resumes with it.
+                if let Some(s) = self.state.sweep.as_mut() {
+                    s.queue.push_front(slug);
+                    s.progress.current = None;
+                }
+                self.save_state();
+                return Ok(Next::Stop);
+            }
+        };
+
+        if let Err(FetchError::Storage(_)) = result {
+            // Storage/processing failures are fatal: do not advance state or publish
+            // partially updated in-memory tracking. Restart recovers the raw journal.
+            return result.map(|_| Next::Stop).map_err(fatal);
+        }
+        if let Err(e) = &result {
+            tracing::error!(weapon = %slug, error = %e, "fetch failed");
+            self.set_error(&slug, e);
+        }
+        // Mark failures too, so a broken weapon is not retried in a tight loop.
+        self.state.last_fetch.insert(slug.clone(), Utc::now());
+        self.log_fetch(&slug, started, &result);
+        self.save_state();
+        self.since_flush += 1;
+        if self.since_flush >= self.args.flush_every {
+            self.sink.flush()?;
+            self.since_flush = 0;
+        }
+        self.publish();
+
+        if result.is_err() {
+            self.set_phase(Phase::Cooldown);
+            tokio::select! {
+                () = tokio::time::sleep(ERROR_COOLDOWN) => {}
+                Some(command) = inbox.commands.recv() => inbox.deferred.push_back(command),
+                _ = inbox.shutdown.changed() => return Ok(Next::Stop),
+            }
+            self.set_phase(Phase::Scraping);
+        }
+        Ok(Next::Continue)
+    }
+
+    /// The phase between steps: scraping while a sweep runs, idle otherwise.
+    fn working_phase(&self) -> Phase {
+        if self.state.sweep.is_some() {
+            Phase::Scraping
+        } else {
+            Phase::Idle
+        }
+    }
+}
+
+/// What the main loop does after a step.
+enum Next {
+    Continue,
+    Stop,
+}
+
+/// What the running engine listens to.
+struct Inbox {
+    commands: Commands,
+    /// Commands taken while busy, handled at the next chance.
+    deferred: VecDeque<Command>,
+    shutdown: watch::Receiver<bool>,
+}
+
+/// Why a fetch was abandoned.
+enum Interrupt {
+    Cancel,
+    Shutdown,
+}
+
+impl Inbox {
+    /// Runs `work` until it's done, or until a cancel or shutdown abandons it. Other commands
+    /// that arrive meanwhile are kept for later.
+    async fn interruptible<T>(
+        &mut self,
+        work: impl std::future::Future<Output = T>,
+    ) -> std::result::Result<T, Interrupt> {
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                result = &mut work => return Ok(result),
+                Some(command) = self.commands.recv() => {
+                    if command == Command::Cancel {
+                        return Err(Interrupt::Cancel);
+                    }
+                    self.deferred.push_back(command);
+                }
+                _ = self.shutdown.changed() => return Err(Interrupt::Shutdown),
+            }
+        }
+    }
+}
+
+/// A site-wide feed polled on its own interval.
+struct Feed {
+    id: &'static str,
+    interval: Duration,
+    next: Instant,
+}
+
+/// When things are due. In memory only: doing something once more after a restart costs next
+/// to nothing.
+struct Schedule {
+    next_maintenance: Instant,
+    next_feed_prune: Instant,
+    metadata_failed_at: Option<DateTime<Utc>>,
+    /// A feed was polled since the last weapon, so a waiting sweep goes next.
+    feed_since_weapon: bool,
+    feeds: Vec<Feed>,
+}
+
+impl Schedule {
+    fn new(args: &EngineArgs) -> Self {
+        // Disabled feeds are dropped; the first poll happens as soon as the weapon list is
+        // ready.
+        let feeds = [
+            (wfmt_types::FEED_RECENT, args.recent_interval_secs),
+            (wfmt_types::FEED_POPULAR, args.popular_interval_secs),
+        ]
+        .into_iter()
+        .filter(|(_, secs)| *secs > 0)
+        .map(|(id, secs)| Feed {
+            id,
+            interval: Duration::from_secs(secs),
+            next: Instant::now(),
+        })
+        .collect();
+        Self {
+            next_maintenance: Instant::now(),
+            next_feed_prune: Instant::now(),
+            metadata_failed_at: None,
+            feed_since_weapon: false,
+            feeds,
+        }
+    }
+
+    /// The overdue feed with the oldest deadline, so one feed can't starve the other.
+    fn due_feed(&self) -> Option<usize> {
+        let now = Instant::now();
+        (0..self.feeds.len())
+            .filter(|&i| now >= self.feeds[i].next)
+            .min_by_key(|&i| self.feeds[i].next)
     }
 }
 
@@ -1028,9 +1155,8 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_command_poll_cannot_consume_a_successors_commands() -> Result<()> {
-        let root =
-            std::env::temp_dir().join(format!("wfmt-commands-{}", crate::dataset::unique_id()));
-        fs::create_dir_all(&root)?;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
         let mut old = Commands::new(root.clone());
         assert!(
             tokio::time::timeout(Duration::from_millis(10), old.recv())
@@ -1045,7 +1171,6 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), next.recv()).await?,
             Some(Command::Cancel)
         );
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1073,8 +1198,8 @@ mod tests {
 
     #[tokio::test]
     async fn archives_first_page_before_second_request_and_recovers_failed_fetch() -> Result<()> {
-        let root =
-            std::env::temp_dir().join(format!("wfmt-partial-{}", crate::dataset::unique_id()));
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
         let store = Store::new(root.clone());
         store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
         let cutoff = "2026-10-22T00:00:00Z".parse()?;
@@ -1122,9 +1247,11 @@ mod tests {
             Ok(())
         });
         let weapon = engine.weapons[0].clone();
-        assert!(engine.fetch(&weapon).await.is_err());
+        assert!(
+            matches!(engine.fetch(&weapon).await, Err(FetchError::Remote(_))),
+            "network failures remain retryable"
+        );
         server.join().unwrap()?;
-        assert!(!engine.processing, "network failures remain retryable");
         assert_eq!(engine.sink.auctions.len(), PAGE_CAP);
         assert!(!store.seen_dir().join("kulstar.json").exists());
         drop(engine); // Crash before flushing the successful first page.
@@ -1133,12 +1260,12 @@ mod tests {
         let seen: std::collections::HashMap<String, crate::tracking::Seen> =
             serde_json::from_slice(&fs::read(store.seen_dir().join("kulstar.json"))?)?;
         assert_eq!(seen.len(), PAGE_CAP);
-        fs::remove_dir_all(root)?;
         Ok(())
     }
     #[tokio::test]
     async fn running_engine_prunes_expired_feed_archives() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("wfmt-prune-{}", crate::dataset::unique_id()));
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
         let store = Store::new(root.clone());
         store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
         let raw = RawResponse::new(
@@ -1170,13 +1297,13 @@ mod tests {
         }
         stop.send(true)?;
         running.await??;
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 
     #[tokio::test]
     async fn slow_failed_feeds_allow_sweep_and_other_feed_to_run() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("wfmt-fair-{}", crate::dataset::unique_id()));
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
         let store = Store::new(root.clone());
         store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
         let mut args = options(false);
@@ -1242,13 +1369,13 @@ mod tests {
         assert!(paths[1].contains("/search?") && paths[1].contains("price_asc"));
         assert!(paths[2].contains("/search?") && paths[2].contains("price_desc"));
         assert_eq!(paths[3], "/v1/auctions/popular");
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 
     #[tokio::test]
     async fn feed_poll_requests_its_endpoint_and_commits_right_away() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("wfmt-feed-{}", crate::dataset::unique_id()));
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
         let store = Store::new(root.clone());
         store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
         let mut engine = Engine::new(
@@ -1298,11 +1425,12 @@ mod tests {
         assert!(store.seen_dir().join("kulstar.json").exists());
 
         // A garbled response is retried at the next poll, never archived or treated as fatal.
-        assert!(engine.fetch_feed(wfmt_types::FEED_RECENT).await.is_err());
-        assert!(!engine.processing);
+        assert!(matches!(
+            engine.fetch_feed(wfmt_types::FEED_RECENT).await,
+            Err(FetchError::Remote(_))
+        ));
         assert_eq!(store.raw_files()?.len(), 1);
         server.join().unwrap()?;
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -1315,8 +1443,8 @@ mod tests {
     }
 
     async fn check_null_buyout_supplement(page_size: usize) -> Result<()> {
-        let root =
-            std::env::temp_dir().join(format!("wfmt-direct-{}", crate::dataset::unique_id()));
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
         let store = Store::new(root.clone());
         store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
         let mut engine = Engine::new(
@@ -1426,14 +1554,13 @@ mod tests {
         );
         assert!(!parsed.coverage.no_buyout);
         assert_eq!(parsed.auctions.len(), page_size * 2 + 2);
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 
     #[tokio::test]
     async fn no_raw_commits_tracking_before_fetch_returns() -> Result<()> {
-        let root =
-            std::env::temp_dir().join(format!("wfmt-no-raw-{}", crate::dataset::unique_id()));
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
         let store = Store::new(root.clone());
         store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
         let mut engine = Engine::new(root.clone(), "2026-10-22T00:00:00Z".parse()?, options(true))?;
@@ -1467,7 +1594,6 @@ mod tests {
         assert!(store.raw_files()?.is_empty());
         assert!(engine.sink.auctions.is_empty());
         assert!(store.load_state()?.last_fetch.is_empty());
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 }

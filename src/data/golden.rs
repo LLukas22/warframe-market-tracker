@@ -115,9 +115,11 @@ fn dump_answers() {
                 serde_json::to_value(inner.riven_detail(
                     &l.riven_id,
                     Some(&l.auction_id),
-                    options,
-                    options,
-                    options,
+                    Comparisons {
+                        legacy: options,
+                        unfit: options,
+                        loose: options,
+                    },
                 ))
                 .unwrap(),
             );

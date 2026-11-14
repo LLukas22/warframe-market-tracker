@@ -139,6 +139,13 @@ impl GoneReason {
             Self::Expired => "expired",
         }
     }
+
+    /// Parses what [`GoneReason::as_str`] writes.
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::Missing, Self::Verified, Self::Expired]
+            .into_iter()
+            .find(|r| r.as_str() == s)
+    }
 }
 
 pub struct GoneRow {

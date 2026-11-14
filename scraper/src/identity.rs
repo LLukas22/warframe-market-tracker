@@ -137,6 +137,10 @@ impl Registry {
         self.ids.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
     /// Returns the riven id for a listing, registering a new riven if needed.
     pub fn identify(&mut self, input: &IdInput) -> String {
         let mut order: Vec<usize> = (0..input.attributes.len()).collect();
@@ -402,9 +406,9 @@ mod tests {
 
     #[test]
     fn journal_lookup_ignores_polarity_and_never_registers() {
-        let dir = std::env::temp_dir().join(format!("wfmt-lookup-{}", std::process::id()));
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         let path = dir.join("rivens.jsonl");
-        let _ = fs::remove_file(&path);
         let a = [
             fitted("critical_chance", true, 1.04, 0.0004),
             fitted("multishot", true, 0.95, 0.0005),
@@ -438,14 +442,13 @@ mod tests {
             Registry::find_in_journal(&dir.join("missing.jsonl"), &lookup).unwrap(),
             None
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn journal_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("wfmt-registry-{}", std::process::id()));
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         let path = dir.join("rivens.jsonl");
-        let _ = fs::remove_file(&path);
         let a = [
             fitted("critical_chance", true, 1.04, 0.0004),
             fitted("multishot", true, 0.95, 0.0005),
@@ -460,6 +463,5 @@ mod tests {
             fitted("critical_chance", true, 1.041, 0.004),
         ];
         assert_eq!(id, again.identify(&input(&b, 1)));
-        let _ = fs::remove_dir_all(&dir);
     }
 }

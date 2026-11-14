@@ -6,18 +6,22 @@ description = "The server's background scraper: fetches warframe.market riven au
 license = "MIT"
 
 [dependencies]
-wfmt-types = { path = "../types" }
-anyhow = "1"
-arrow = { version = "60", default-features = false }
-chrono = { version = "0.4", features = ["serde"] }
+wfmt-types.workspace = true
+anyhow.workspace = true
+arrow.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
-flate2 = "1"
-parquet = { version = "60", default-features = false, features = ["arrow", "zstd"] }
-reqwest = { version = "0.13", features = ["json", "gzip"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
-tracing = "0.1"
+flate2.workspace = true
+parquet.workspace = true
+reqwest = { workspace = true, features = ["json", "gzip"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tracing.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true

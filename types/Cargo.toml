@@ -6,4 +6,7 @@ description = "Scraper status and control types, and constants, shared by the sc
 license = "MIT"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+serde.workspace = true
+
+[lints]
+workspace = true

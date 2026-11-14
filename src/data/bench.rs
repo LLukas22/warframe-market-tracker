@@ -11,6 +11,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use super::load::read_batches;
 use super::*;
 use crate::api::{Period, RivenScan, ScanAttr};
 
@@ -199,18 +200,18 @@ fn server_computations() {
         inner.riven_detail(
             &listing.riven_id,
             Some(&listing.auction_id),
-            false,
-            false,
-            false,
+            Comparisons::default(),
         )
     });
     bench("riven_detail, all options", || {
         inner.riven_detail(
             &listing.riven_id,
             Some(&listing.auction_id),
-            true,
-            true,
-            true,
+            Comparisons {
+                legacy: true,
+                unfit: true,
+                loose: true,
+            },
         )
     });
     bench("riven_history", || inner.riven_history(&listing.riven_id));
@@ -238,6 +239,6 @@ fn server_computations() {
     };
     bench("scan_match", || inner.scan_match(&scan));
     bench("scanned_detail", || {
-        inner.scanned_detail(&scan, false, false, false)
+        inner.scanned_detail(&scan, Comparisons::default())
     });
 }

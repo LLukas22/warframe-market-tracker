@@ -95,7 +95,10 @@ pub async fn sleep_ms(ms: u32) {
     #[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
     tokio::time::sleep(std::time::Duration::from_millis(u64::from(ms))).await;
     #[cfg(all(not(target_arch = "wasm32"), not(feature = "server")))]
-    std::future::pending::<()>().await;
+    {
+        let _ = ms;
+        std::future::pending::<()>().await;
+    }
 }
 
 /// How often the header checks for new scraped data.
@@ -105,11 +108,11 @@ const LIVE_POLL_MS: u32 = 5 * SECOND_MS as u32;
 pub(crate) enum Route {
     #[layout(Shell)]
     #[route("/")]
-    MarketRoute {},
+    Market {},
     #[route("/weapons/:slug")]
-    WeaponRoute { slug: String },
+    Weapon { slug: String },
     #[route("/search/:id")]
-    SearchRoute { id: String },
+    Search { id: String },
     #[route("/riven/:id?:auction")]
     RivenPage { id: String, auction: String },
     /// An editable riven read from a screenshot (see `RivenScan::to_param`).
@@ -407,7 +410,7 @@ fn Shell() -> Element {
         header {
             div { class: "brand",
                 h1 {
-                    Link { to: Route::MarketRoute {}, onclick: move |_| scraper_open.set(false), "Riven Tracker" }
+                    Link { to: Route::Market {}, onclick: move |_| scraper_open.set(false), "Riven Tracker" }
                 }
             }
             if let Some(o) = &data {
@@ -458,28 +461,28 @@ fn Shell() -> Element {
 /// Weapon and ID selection belongs to the URL; the shared signal holds filter preferences.
 fn query_for_route(mut query: Query, route: &Route) -> Query {
     query.weapon = match route {
-        Route::WeaponRoute { slug } => Some(slug.clone()),
+        Route::Weapon { slug } => Some(slug.clone()),
         _ => None,
     };
     query.riven_id = match route {
-        Route::SearchRoute { id } => Some(id.clone()),
+        Route::Search { id } => Some(id.clone()),
         _ => None,
     };
     query
 }
 
 #[component]
-fn WeaponRoute(slug: String) -> Element {
-    rsx! { MarketRoute { key: "weapon-{slug}" } }
+fn Weapon(slug: String) -> Element {
+    rsx! { Market { key: "weapon-{slug}" } }
 }
 
 #[component]
-fn SearchRoute(id: String) -> Element {
-    rsx! { MarketRoute { key: "search-{id}" } }
+fn Search(id: String) -> Element {
+    rsx! { Market { key: "search-{id}" } }
 }
 
 #[component]
-fn MarketRoute() -> Element {
+fn Market() -> Element {
     let route = use_route::<Route>();
     let loaded = use_context::<Signal<Option<Overview>>>();
     let query = use_context::<Signal<Query>>();
@@ -487,7 +490,7 @@ fn MarketRoute() -> Element {
     let overview = loaded();
     let unknown = matches!(
         (&overview, &route),
-        (Some(o), Route::WeaponRoute { slug }) if !o.weapons.iter().any(|w| &w.slug == slug)
+        (Some(o), Route::Weapon { slug }) if !o.weapons.iter().any(|w| &w.slug == slug)
     );
     rsx! {
         if unknown {
@@ -496,7 +499,7 @@ fn MarketRoute() -> Element {
                 h2 { "Weapon not found" }
                 p {
                     "This weapon is not in the catalog. Choose a weapon from the search box or "
-                    Link { to: Route::MarketRoute {}, "browse all weapons" }
+                    Link { to: Route::Market {}, "browse all weapons" }
                     "."
                 }
             }
@@ -540,7 +543,14 @@ fn RivenPageContent(id: String, auction: String) -> Element {
         async move {
             match first {
                 Some(detail) => Ok(detail),
-                None => api::riven_detail(id, auction, legacy, unfit, loose).await,
+                None => {
+                    let comparisons = api::Comparisons {
+                        legacy,
+                        unfit,
+                        loose,
+                    };
+                    api::riven_detail(id, auction, comparisons).await
+                }
             }
         }
     });
@@ -629,7 +639,14 @@ fn ScannedRivenContent(scan: String) -> Element {
         let (legacy, unfit, loose) = (include_legacy(), include_unfit(), include_loose());
         async move {
             match scan {
-                Some(scan) => api::scanned_detail(scan, legacy, unfit, loose).await,
+                Some(scan) => {
+                    let comparisons = api::Comparisons {
+                        legacy,
+                        unfit,
+                        loose,
+                    };
+                    api::scanned_detail(scan, comparisons).await
+                }
                 None => Ok(None),
             }
         }
@@ -940,7 +957,7 @@ fn MarketPage(
                     }
                 }
                 Link {
-                    to: Route::MarketRoute {},
+                    to: Route::Market {},
                     class: "picker-clear",
                     title: "All weapons",
                     "×"
@@ -1772,11 +1789,11 @@ mod route_tests {
     #[test]
     fn weapon_and_search_routes_round_trip() {
         for slug in ["torid", "arca_plasmor", "kuva_bramma"] {
-            let route = Route::WeaponRoute { slug: slug.into() };
+            let route = Route::Weapon { slug: slug.into() };
             assert_eq!(route.to_string(), format!("/weapons/{slug}"));
             assert_eq!(route.to_string().parse::<Route>().unwrap(), route);
         }
-        let route = Route::SearchRoute {
+        let route = Route::Search {
             id: "1234abcd".into(),
         };
         assert_eq!(route.to_string(), "/search/1234abcd");
@@ -1806,11 +1823,11 @@ mod route_tests {
             assert!(query.price_changed && query.owner_changed);
             assert_eq!(query.min_price, Some(250));
             match route {
-                Route::WeaponRoute { slug } => {
+                Route::Weapon { slug } => {
                     assert_eq!(query.weapon, Some(slug));
                     assert_eq!(query.riven_id, None);
                 }
-                Route::SearchRoute { id } => {
+                Route::Search { id } => {
                     assert_eq!(query.weapon, None);
                     assert_eq!(query.riven_id, Some(id));
                 }
@@ -1957,7 +1974,7 @@ mod route_tests {
                 auction: String::new()
             }
         );
-        assert_eq!("/".parse::<Route>().unwrap(), Route::MarketRoute {});
+        assert_eq!("/".parse::<Route>().unwrap(), Route::Market {});
     }
 
     #[test]

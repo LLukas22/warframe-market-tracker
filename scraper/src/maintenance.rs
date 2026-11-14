@@ -399,20 +399,14 @@ mod tests {
     use arrow::compute::concat_batches;
     use std::sync::Arc;
 
-    struct TempRoot(PathBuf);
+    /// The path, and the directory that is removed when this is dropped.
+    struct TempRoot(PathBuf, #[allow(dead_code)] tempfile::TempDir);
     impl TempRoot {
         fn new() -> Result<Self> {
-            let path = std::env::temp_dir().join(format!("wfmt-storage-{}", unique_id()));
-            fs::create_dir_all(&path)?;
-            Ok(Self(path))
+            let temp = tempfile::tempdir()?;
+            Ok(Self(temp.path().to_path_buf(), temp))
         }
     }
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     fn options() -> MaintenanceArgs {
         MaintenanceArgs {
             raw_retention_days: 14,

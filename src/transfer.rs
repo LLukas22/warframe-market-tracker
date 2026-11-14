@@ -325,7 +325,7 @@ async fn build_export(root: PathBuf) -> Result<File> {
     }
     .await;
     if let Err(error) = crate::worker::start().await {
-        eprintln!("failed to restart the scraper: {error:#}");
+        tracing::error!("failed to restart the scraper: {error:#}");
     }
     result
 }
@@ -460,19 +460,13 @@ mod tests {
     use arrow::array::{ArrayRef, Int32Array, RecordBatch};
     use parquet::arrow::ArrowWriter;
 
-    struct Temp(PathBuf);
+    /// The path, and the directory that is removed when this is dropped.
+    struct Temp(PathBuf, #[allow(dead_code)] tempfile::TempDir);
 
     impl Temp {
         fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!("wfmt-transfer-{}", unique_id()));
-            fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-    }
-
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            let temp = tempfile::tempdir().unwrap();
+            Self(temp.path().to_path_buf(), temp)
         }
     }
 

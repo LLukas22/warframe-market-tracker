@@ -16,19 +16,22 @@ engine = ["dep:pure-onnx-ocr", "dep:image"]
 wasm = ["engine", "dep:wasm-bindgen"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-wfmt-types = { path = "../types" }
+serde.workspace = true
+serde_json.workspace = true
+wfmt-types.workspace = true
 # Its default `multithread` feature needs threads, which plain wasm32 doesn't have.
 pure-onnx-ocr = { version = "0.3.2", default-features = false, optional = true }
 # Same version pure-onnx-ocr uses; for cropping. Its decoders come with pure-onnx-ocr.
 image = { version = "0.25", default-features = false, optional = true }
-# Must match the root crate's pin and the installed wasm-bindgen CLI.
-wasm-bindgen = { version = "=0.2.129", optional = true }
+# Pinned in the workspace to the installed wasm-bindgen CLI.
+wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Only for checking scans with the stat model (`riven::fit`) in the example and sample test.
-wfmt-scraper = { path = "../scraper" }
+wfmt-scraper.workspace = true
+
+[lints]
+workspace = true
 
 [[example]]
 name = "scan"

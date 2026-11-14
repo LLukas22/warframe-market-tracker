@@ -63,7 +63,7 @@ fn real_screenshots() {
         let scan = scanner.scan(&support::read_image(&path)).unwrap();
         let riven = &scan.riven;
         let mut wrong = |what: &str, got: String, want: String| {
-            failures.push(format!("{file}: {what} is {got}, expected {want}"))
+            failures.push(format!("{file}: {what} is {got}, expected {want}"));
         };
 
         if sample["not_a_riven"].as_bool() == Some(true) {

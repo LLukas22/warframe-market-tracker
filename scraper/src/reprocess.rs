@@ -161,13 +161,16 @@ mod tests {
     struct TestDir {
         data_dir: PathBuf,
         rework_cutoff: DateTime<Utc>,
+        _temp: tempfile::TempDir,
     }
 
     fn test_cli() -> TestDir {
+        let temp = tempfile::tempdir().unwrap();
         TestDir {
-            data_dir: std::env::temp_dir()
-                .join(format!("wfmt-reprocess-{}", crate::dataset::unique_id())),
+            // Not created yet, like a fresh data directory.
+            data_dir: temp.path().join("data"),
             rework_cutoff: "2026-10-22T00:00:00Z".parse().unwrap(),
+            _temp: temp,
         }
     }
 
@@ -196,7 +199,6 @@ mod tests {
                 .contains("discard historical")
         );
         assert_eq!(fs::read(history)?, b"historical data");
-        fs::remove_dir_all(cli.data_dir)?;
         Ok(())
     }
 
@@ -234,7 +236,6 @@ mod tests {
             },
         )?;
         assert_eq!(report.raw_deleted, 1);
-        fs::remove_dir_all(cli.data_dir)?;
         Ok(())
     }
 }

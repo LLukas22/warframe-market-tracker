@@ -192,7 +192,7 @@ fn rows(mut lines: Vec<Line>) -> Vec<Row> {
                         < SAME_ROW * line.height.min(last.height)
                 } =>
             {
-                row.lines.push(line)
+                row.lines.push(line);
             }
             _ => rows.push(Row { lines: vec![line] }),
         }
@@ -574,6 +574,7 @@ pub(crate) fn parse_with_layout(
 }
 
 /// Reroll count from OCR lines of the [`RerollArea`] crop. `None` if there was no number.
+#[cfg(feature = "engine")]
 pub(crate) fn rerolls_in(lines: &[Line]) -> Option<(u32, Option<String>)> {
     let text: String = lines
         .iter()

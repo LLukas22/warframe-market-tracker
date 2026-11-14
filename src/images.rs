@@ -84,12 +84,12 @@ pub async fn weapon(Path(slug): Path<String>) -> Response {
             }
             .await;
             if let Err(e) = saved {
-                eprintln!("failed to cache image {slug}: {e}");
+                tracing::warn!("failed to cache image {slug}: {e}");
             }
             png(bytes)
         }
         Err(e) => {
-            eprintln!("failed to download image {slug}: {e}");
+            tracing::warn!("failed to download image {slug}: {e}");
             FAILED.lock().unwrap().insert(slug.to_owned());
             StatusCode::NOT_FOUND.into_response()
         }

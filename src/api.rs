@@ -329,24 +329,24 @@ pub struct RivenDetail {
     pub server_time: i64,
 }
 
+/// Which other rivens a riven page compares with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Comparisons {
+    /// Include listings whose stats are still from before the disposition rework.
+    pub legacy: bool,
+    /// Include listings whose stats could not be fitted.
+    pub unfit: bool,
+    /// Include rivens that share a single positive stat; otherwise two are needed.
+    pub loose: bool,
+}
+
 #[post("/api/riven-detail")]
 pub async fn riven_detail(
     id: String,
     auction_id: Option<String>,
-    include_legacy: bool,
-    include_unfit: bool,
-    include_loose: bool,
+    comparisons: Comparisons,
 ) -> Result<Option<RivenDetail>, ServerFnError> {
-    crate::data::run(move |store| {
-        store.riven_detail(
-            &id,
-            auction_id.as_deref(),
-            include_legacy,
-            include_unfit,
-            include_loose,
-        )
-    })
-    .await
+    crate::data::run(move |store| store.riven_detail(&id, auction_id.as_deref(), comparisons)).await
 }
 
 /// One stat read from a screenshot, as warframe.market lists it.
@@ -454,14 +454,9 @@ pub async fn scan_match(scan: RivenScan) -> Result<Option<String>, ServerFnError
 #[post("/api/scan/detail")]
 pub async fn scanned_detail(
     scan: RivenScan,
-    include_legacy: bool,
-    include_unfit: bool,
-    include_loose: bool,
+    comparisons: Comparisons,
 ) -> Result<Option<RivenDetail>, ServerFnError> {
-    crate::data::run(move |store| {
-        store.scanned_detail(&scan, include_legacy, include_unfit, include_loose)
-    })
-    .await
+    crate::data::run(move |store| store.scanned_detail(&scan, comparisons)).await
 }
 
 /// How one stat moves the price of a weapon's rivens, compared with rivens without it.
@@ -625,7 +620,7 @@ pub async fn live_stats() -> Result<LiveStats, ServerFnError> {
     let (auctions, version) = crate::data::run(|store| store.live()).await?;
     let dir = crate::data::data_dir();
     let running = wfmt_scraper::engine::try_lock(&dir)
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .map_err(ServerFnError::new)?
         .is_none();
     let scraping =
         running && wfmt_scraper::engine::read_status(&dir).is_some_and(|s| s.sweep.is_some());
@@ -640,7 +635,7 @@ pub async fn live_stats() -> Result<LiveStats, ServerFnError> {
 pub async fn scraper_status() -> Result<ScraperSnapshot, ServerFnError> {
     let dir = crate::data::data_dir();
     let running = wfmt_scraper::engine::try_lock(&dir)
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .map_err(ServerFnError::new)?
         .is_none();
     Ok(ScraperSnapshot {
         status: wfmt_scraper::engine::read_status(&dir),
@@ -691,13 +686,7 @@ pub struct HubStatus {
 
 #[post("/api/scraper/control")]
 pub async fn scraper_control(cancel: bool, token: String) -> Result<(), ServerFnError> {
-    crate::admin::check(&token)
-        .await
-        .map_err(|denied| ServerFnError::ServerError {
-            message: denied.message().into(),
-            code: denied.status().as_u16(),
-            details: None,
-        })?;
+    crate::admin::check(&token).await?;
     if !crate::worker::enabled().unwrap_or(false) {
         return Err(ServerFnError::new(
             "Scraping is turned off on this server. Set WFMT_ENABLE_SCRAPER=true to turn it on.",
@@ -705,7 +694,7 @@ pub async fn scraper_control(cancel: bool, token: String) -> Result<(), ServerFn
     }
     let dir = crate::data::data_dir();
     if wfmt_scraper::engine::try_lock(&dir)
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .map_err(ServerFnError::new)?
         .is_some()
     {
         return Err(ServerFnError::new("The scraper isn't running right now."));
@@ -715,21 +704,14 @@ pub async fn scraper_control(cancel: bool, token: String) -> Result<(), ServerFn
     } else {
         wfmt_types::Command::ScrapeAll
     };
-    wfmt_scraper::engine::send_command(&dir, &command)
-        .map_err(|e| ServerFnError::new(e.to_string()))
+    wfmt_scraper::engine::send_command(&dir, &command).map_err(ServerFnError::new)
 }
 
 /// Uploads every finished day that isn't on the Hub yet, or when pulling, downloads the new
 /// days, without waiting for the hourly check.
 #[post("/api/hub/upload")]
 pub async fn hub_upload(token: String) -> Result<(), ServerFnError> {
-    crate::admin::check(&token)
-        .await
-        .map_err(|denied| ServerFnError::ServerError {
-            message: denied.message().into(),
-            code: denied.status().as_u16(),
-            details: None,
-        })?;
+    crate::admin::check(&token).await?;
     crate::hub::request_upload().map_err(ServerFnError::new)
 }
 
@@ -758,7 +740,7 @@ pub mod seed {
         fn search(query: &Query) -> SearchResult = |store| store.search_memo(query);
         fn stat_effects(weapon: &str) -> StatEffects = |store| store.stat_effects(weapon);
         fn riven_detail(id: &str, auction: Option<&str>) -> Option<RivenDetail> =
-            |store| store.riven_detail(id, auction, false, false, false);
+            |store| store.riven_detail(id, auction, super::Comparisons::default());
     }
 }
 

@@ -7,12 +7,11 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use tokio::sync::{Mutex, watch};
-use tokio::task::JoinHandle;
 use wfmt_scraper::engine::{self, Engine, EngineArgs, Lock};
 
 struct Running {
     shutdown: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    thread: std::thread::JoinHandle<()>,
 }
 
 static RUNNING: Mutex<Option<Running>> = Mutex::const_new(None);
@@ -65,7 +64,7 @@ pub async fn start() -> Result<()> {
         return Ok(());
     }
     let mut running = RUNNING.lock().await;
-    if running.as_ref().is_some_and(|r| !r.task.is_finished()) {
+    if running.as_ref().is_some_and(|r| !r.thread.is_finished()) {
         return Ok(());
     }
     let dir = crate::data::data_dir();
@@ -74,13 +73,20 @@ pub async fn start() -> Result<()> {
     };
     let engine = tokio::task::spawn_blocking(move || open(dir)).await??;
     let (shutdown, receiver) = watch::channel(false);
-    let task = tokio::spawn(async move {
-        let _lock = lock;
-        if let Err(error) = engine.run(receiver).await {
-            eprintln!("scraper stopped: {error:#}");
-        }
-    });
-    *running = Some(Running { shutdown, task });
+    // The engine writes to disk between requests, at times for long, so it gets a thread and
+    // runtime of its own rather than stalling one of the web server's.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let thread = std::thread::Builder::new()
+        .name("scraper".into())
+        .spawn(move || {
+            let _lock = lock;
+            if let Err(error) = runtime.block_on(engine.run(receiver)) {
+                tracing::error!("scraper stopped: {error:#}");
+            }
+        })?;
+    *running = Some(Running { shutdown, thread });
     Ok(())
 }
 
@@ -89,7 +95,7 @@ pub async fn start() -> Result<()> {
 pub async fn stop() {
     if let Some(running) = RUNNING.lock().await.take() {
         let _ = running.shutdown.send(true);
-        let _ = running.task.await;
+        let _ = tokio::task::spawn_blocking(move || running.thread.join()).await;
     }
 }
 

@@ -61,6 +61,33 @@ impl WeaponClass {
     }
 }
 
+impl std::str::FromStr for WeaponClass {
+    type Err = UnknownClass;
+
+    /// Parses what [`WeaponClass::as_str`] writes.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "rifle" => Self::Rifle,
+            "shotgun" => Self::Shotgun,
+            "pistol" => Self::Pistol,
+            "archgun" => Self::Archgun,
+            "melee" => Self::Melee,
+            _ => return Err(UnknownClass),
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct UnknownClass;
+
+impl std::fmt::Display for UnknownClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("unknown weapon class")
+    }
+}
+
+impl std::error::Error for UnknownClass {}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Display {
     /// Shown as `100v` percent.
