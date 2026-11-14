@@ -18,8 +18,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use clap::Args;
 use tokio::sync::watch;
 use wfmt_types::{
-    COMMAND_DIR, Command, CurrentFetch, FetchLog, HOUR_MS, LOCK_FILE, Phase, STATUS_FILE,
-    ScraperStatus, Settings, SweepProgress, SweepSummary, Trigger,
+    COMMAND_DIR, Command, CurrentFetch, Feed, FetchLog, HOUR_MS, LOCK_FILE, Phase, STATUS_FILE,
+    ScraperStatus, Settings, SortBy, SweepProgress, SweepSummary, Trigger,
 };
 
 use crate::identity::Registry;
@@ -30,7 +30,7 @@ use crate::store::{
     Meta, ParquetSink, PersistedSweep, RawPage, RawResponse, State, Store, Verified,
 };
 use crate::tracking::Tracker;
-use crate::wfm::{self, Client, Weapon};
+use crate::wfm::{self, BuyoutPolicy, Client, Weapon};
 
 const RECENT: usize = 50;
 const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
@@ -88,7 +88,7 @@ pub struct EngineArgs {
         value_delimiter = ',',
         default_values = ["price_asc", "price_desc"]
     )]
-    pub sort_by: Vec<String>,
+    pub sort_by: Vec<SortBy>,
 
     /// Per weapon fetch, ask warframe.market whether up to this many listings that dropped out
     /// of the pages still exist, most recently seen first (one request each). Without checks
@@ -288,7 +288,7 @@ impl Engine {
         let now = ms(Utc::now());
         let state = store.load_state()?;
         let mut engine = Self {
-            sink: ParquetSink::new(store.root().join("parquet")),
+            sink: ParquetSink::new(store.root().join(wfmt_types::layout::PARQUET_DIR)),
             meta: store.load_meta()?,
             pipeline: Pipeline {
                 normalizer: Normalizer::new(rework_cutoff),
@@ -521,7 +521,7 @@ impl Engine {
         let weapons = wfm::parse_weapons(&body)?;
         let tracked = self.track(weapons.clone());
         for raw in pending {
-            if wfmt_types::is_feed(&raw.weapon) {
+            if raw.feed().is_some() {
                 tracing::info!(feed = %raw.weapon, "recovering uncommitted raw fetch");
                 self.pipeline.process_feed(&tracked, &raw, &mut self.sink)?;
                 self.sink.acknowledge_raw(&raw);
@@ -563,15 +563,15 @@ impl Engine {
         let mut null_buyouts_descending = false;
         for sort_by in self.args.sort_by.clone() {
             self.set_step(format!("{sort_by} page"));
-            match self.client.auctions_raw(&weapon.slug, &sort_by).await {
+            match self.client.auctions_raw(&weapon.slug, sort_by).await {
                 Ok(body) => {
                     let parsed = wfm::parse_auctions(&body);
-                    null_buyouts_descending |= sort_by == "price_desc"
+                    null_buyouts_descending |= sort_by == SortBy::PriceDesc
                         && parsed.as_ref().is_ok_and(|(auctions, _)| {
                             auctions.iter().any(|a| a.buyout_price.is_none())
                         });
                     raw.pages.push(RawPage {
-                        sort_by,
+                        sort_by: sort_by.into(),
                         buyout_policy: None,
                         body,
                     });
@@ -605,18 +605,18 @@ impl Engine {
         let needs_buyouts = !coverage.is_complete() && null_buyouts_descending;
         if fetch_error.is_none() && needs_buyouts {
             // The API separates direct sales from bidding auctions with buyouts.
-            for policy in ["direct", "with"] {
-                self.set_step(format!("price_desc {policy} buyout page"));
+            for policy in [BuyoutPolicy::Direct, BuyoutPolicy::With] {
+                self.set_step(format!("price_desc {} buyout page", policy.as_str()));
                 match self
                     .client
-                    .auctions_raw_scoped(&weapon.slug, "price_desc", Some(policy))
+                    .auctions_raw_scoped(&weapon.slug, SortBy::PriceDesc, Some(policy))
                     .await
                 {
                     Ok(body) => {
                         let parsed = wfm::parse_auctions(&body);
                         raw.pages.push(RawPage {
-                            sort_by: "price_desc".into(),
-                            buyout_policy: Some(policy.into()),
+                            sort_by: SortBy::PriceDesc.into(),
+                            buyout_policy: Some(policy),
                             body,
                         });
                         self.archive_progress(&raw).map_err(FetchError::Storage)?;
@@ -684,7 +684,7 @@ impl Engine {
 
     /// Polls one site-wide feed and publishes what it found right away, since the engine may
     /// sit idle for hours afterwards.
-    async fn fetch_feed(&mut self, feed: &str) -> FetchOutcome {
+    async fn fetch_feed(&mut self, feed: Feed) -> FetchOutcome {
         let remote = async {
             let body = self.client.feed_raw(feed).await?;
             wfm::parse_auctions(&body)?;
@@ -693,10 +693,10 @@ impl Engine {
         let body = remote.await.map_err(FetchError::Remote)?;
         let raw = RawResponse::new(
             Utc::now(),
-            feed.to_owned(),
+            feed.as_str().to_owned(),
             self.client.platform().to_owned(),
             vec![RawPage {
-                sort_by: feed.to_owned(),
+                sort_by: feed.into(),
                 buyout_policy: None,
                 body,
             }],
@@ -704,7 +704,7 @@ impl Engine {
         );
         let summary = self.process_feed(&raw).map_err(FetchError::Storage)?;
         tracing::info!(
-            feed,
+            feed = feed.as_str(),
             auctions = summary.auctions,
             skipped = summary.skipped,
             "fetched feed"
@@ -915,7 +915,7 @@ impl Engine {
     }
 
     /// Polls a feed. Fails only when storing what came back fails.
-    async fn poll_feed(&mut self, inbox: &mut Inbox, feed: &mut Feed) -> Result<()> {
+    async fn poll_feed(&mut self, inbox: &mut Inbox, feed: &mut FeedPoll) -> Result<()> {
         let started = Instant::now();
         let result = inbox.interruptible(self.fetch_feed(feed.id)).await;
         // Backoff can outlast the poll interval. Start the next interval after completion (or
@@ -934,17 +934,17 @@ impl Engine {
             // Same as a weapon fetch: restart recovers the raw journal.
             Err(FetchError::Storage(_)) => return result.map(|_| ()).map_err(fatal),
             Ok(_) => {
-                if self.error_source.as_deref() == Some(feed.id) {
+                if self.error_source.as_deref() == Some(feed.id.as_str()) {
                     self.clear_error();
                 }
             }
             Err(e) => {
                 // No cooldown: the next poll is minutes away anyway.
-                tracing::warn!(feed = feed.id, error = %e, "feed fetch failed");
-                self.set_error(feed.id, e);
+                tracing::warn!(feed = feed.id.as_str(), error = %e, "feed fetch failed");
+                self.set_error(feed.id.as_str(), e);
             }
         }
-        self.push_log(feed.id, started, &result);
+        self.push_log(feed.id.as_str(), started, &result);
         self.publish();
         Ok(())
     }
@@ -1095,8 +1095,8 @@ impl Inbox {
 }
 
 /// A site-wide feed polled on its own interval.
-struct Feed {
-    id: &'static str,
+struct FeedPoll {
+    id: Feed,
     interval: Duration,
     next: Instant,
 }
@@ -1109,7 +1109,7 @@ struct Schedule {
     metadata_failed_at: Option<DateTime<Utc>>,
     /// A feed was polled since the last weapon, so a waiting sweep goes next.
     feed_since_weapon: bool,
-    feeds: Vec<Feed>,
+    feeds: Vec<FeedPoll>,
 }
 
 impl Schedule {
@@ -1117,12 +1117,12 @@ impl Schedule {
         // Disabled feeds are dropped; the first poll happens as soon as the weapon list is
         // ready.
         let feeds = [
-            (wfmt_types::FEED_RECENT, args.recent_interval_secs),
-            (wfmt_types::FEED_POPULAR, args.popular_interval_secs),
+            (Feed::Recent, args.recent_interval_secs),
+            (Feed::Popular, args.popular_interval_secs),
         ]
         .into_iter()
         .filter(|(_, secs)| *secs > 0)
-        .map(|(id, secs)| Feed {
+        .map(|(id, secs)| FeedPoll {
             id,
             interval: Duration::from_secs(secs),
             next: Instant::now(),
@@ -1189,7 +1189,7 @@ mod tests {
             feed_raw_retention_hours: 6,
             metadata_interval_hours: 24.0,
             flush_every: 3,
-            sort_by: vec!["price_asc".into(), "price_desc".into()],
+            sort_by: vec![wfmt_types::SortBy::PriceAsc, wfmt_types::SortBy::PriceDesc],
             verify_missing: 0,
             no_raw,
             weapons: vec![],
@@ -1270,7 +1270,7 @@ mod tests {
         store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
         let raw = RawResponse::new(
             Utc::now() - TimeDelta::hours(7),
-            wfmt_types::FEED_RECENT.into(),
+            wfmt_types::Feed::Recent.as_str().into(),
             "pc".into(),
             Vec::new(),
             Vec::new(),
@@ -1419,14 +1419,14 @@ mod tests {
             }
             Ok(())
         });
-        let polled = engine.fetch_feed(wfmt_types::FEED_POPULAR).await?;
+        let polled = engine.fetch_feed(wfmt_types::Feed::Popular).await?;
         assert_eq!(polled.auctions, 1);
         assert!(store.pending_raw()?.is_empty(), "committed by the poll");
         assert!(store.seen_dir().join("kulstar.json").exists());
 
         // A garbled response is retried at the next poll, never archived or treated as fatal.
         assert!(matches!(
-            engine.fetch_feed(wfmt_types::FEED_RECENT).await,
+            engine.fetch_feed(wfmt_types::Feed::Recent).await,
             Err(FetchError::Remote(_))
         ));
         assert_eq!(store.raw_files()?.len(), 1);
@@ -1530,8 +1530,8 @@ mod tests {
         let raw = RawResponse::read(&store.raw_files()?[0])?;
         assert!(raw.complete);
         assert_eq!(raw.pages.len(), 4);
-        assert_eq!(raw.pages[2].buyout_policy.as_deref(), Some("direct"));
-        assert_eq!(raw.pages[3].buyout_policy.as_deref(), Some("with"));
+        assert_eq!(raw.pages[2].buyout_policy, Some(BuyoutPolicy::Direct));
+        assert_eq!(raw.pages[3].buyout_policy, Some(BuyoutPolicy::With));
         assert!(
             engine
                 .sink
@@ -1570,7 +1570,7 @@ mod tests {
             .set_api(format!("http://{}", listener.local_addr()?));
         let server = std::thread::spawn(move || -> Result<()> {
             // A short page still needs the other order to prove the search was complete.
-            for sort_by in ["price_asc", "price_desc"] {
+            for sort_by in [wfmt_types::SortBy::PriceAsc, wfmt_types::SortBy::PriceDesc] {
                 let (mut stream, _) = listener.accept()?;
                 stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                 let mut request = [0; 4096];

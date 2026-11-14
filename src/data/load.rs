@@ -1,6 +1,7 @@
 //! Reading the scraper's parquet parts into [`Inner`].
 
 use super::*;
+use wfmt_types::layout;
 
 /// Prices above this are invalid. `None` when there are too few listings to tell.
 pub(super) fn price_limit(prices: &mut [i64]) -> Option<i64> {
@@ -20,11 +21,11 @@ pub(super) fn price_limit(prices: &mut [i64]) -> Option<i64> {
 
 pub(super) fn apply_catalog(inner: &mut Inner, catalog: Catalog) {
     for w in catalog.data {
-        let class = WeaponClass::from_wfm(&w.riven_type, &w.group);
+        let class = WeaponClass::of(w.riven_type, w.group);
         let index = inner.intern_weapon(&w.slug, &w.i18n.en.name, class);
-        let weapon = &mut inner.weapons[index as usize];
+        let weapon = &mut inner.weapons[index];
         weapon.name = w.i18n.en.name;
-        weapon.is_bow = w.riven_type != "melee" && w.game_ref.to_ascii_lowercase().contains("bow");
+        weapon.is_bow = wfmt_types::market::is_bow(w.riven_type, &w.game_ref);
         weapon.group = w.group;
         weapon.thumb = w.i18n.en.thumb;
     }
@@ -40,9 +41,9 @@ pub(super) struct Catalog {
 pub(super) struct CatalogWeapon {
     pub(super) slug: String,
     #[serde(default)]
-    pub(super) group: String,
+    pub(super) group: WeaponGroup,
     #[serde(default)]
-    pub(super) riven_type: String,
+    pub(super) riven_type: RivenType,
     #[serde(default)]
     pub(super) game_ref: String,
     pub(super) i18n: CatalogI18n,
@@ -62,7 +63,7 @@ pub(super) struct CatalogName {
 /// Pairs of (auctions, attributes) part files that both exist, oldest first.
 pub(super) fn part_files(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
     let mut out = Vec::new();
-    let Ok(days) = fs::read_dir(dir.join("auctions")) else {
+    let Ok(days) = fs::read_dir(dir.join(layout::Table::Auctions.as_str())) else {
         return out;
     };
     for day in days.flatten() {
@@ -75,7 +76,7 @@ pub(super) fn part_files(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
                 continue;
             }
             let attrs = dir
-                .join("attributes")
+                .join(layout::Table::Attributes.as_str())
                 .join(day.file_name())
                 .join(part.file_name());
             if attrs.exists() {
@@ -90,7 +91,7 @@ pub(super) fn part_files(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
 /// Parquet parts of the `gone` table, oldest first.
 pub(super) fn gone_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let Ok(days) = fs::read_dir(dir.join("gone")) else {
+    let Ok(days) = fs::read_dir(dir.join(layout::Table::Gone.as_str())) else {
         return out;
     };
     for day in days.flatten() {
@@ -207,29 +208,21 @@ pub(super) fn opt<A: Array, T>(a: &A, i: usize, get: impl Fn(&A, usize) -> T) ->
     a.is_valid(i).then(|| get(a, i))
 }
 
-/// The id of the next item in a table of `len`. Ids are kept small to keep the indexes
-/// compact; running out is a bug to fix, not something to wrap around.
-pub(super) fn next_id<T: TryFrom<usize>>(len: usize, table: &str) -> T {
-    T::try_from(len).unwrap_or_else(|_| panic!("too many {table} for their id type"))
-}
-
 impl Inner {
-    pub(super) fn intern_attr(&mut self, slug: &str) -> u16 {
+    pub(super) fn intern_attr(&mut self, slug: &str) -> AttrId {
         if let Some(i) = self.attr_index.get(slug) {
             return *i;
         }
-        let i = next_id(self.attrs.len(), "attributes");
-        self.attrs.push(slug.to_owned());
+        let i = self.attrs.push(slug.to_owned());
         self.attr_index.insert(slug.to_owned(), i);
         i
     }
 
-    pub(super) fn intern_riven(&mut self, id: &str) -> u32 {
+    pub(super) fn intern_riven(&mut self, id: &str) -> RivenId {
         if let Some(i) = self.riven_index.get(id) {
             return *i;
         }
-        let i = next_id(self.rivens.len(), "rivens");
-        self.rivens.push(id.to_owned());
+        let i = self.rivens.push(id.to_owned());
         self.riven_index.insert(id.to_owned(), i);
         self.riven_auctions.push(Vec::new());
         self.riven_changes.push(RivenChanges::default());
@@ -241,16 +234,15 @@ impl Inner {
         slug: &str,
         name: &str,
         class: Option<WeaponClass>,
-    ) -> u16 {
+    ) -> WeaponId {
         if let Some(i) = self.weapon_index.get(slug) {
             return *i;
         }
-        let i = next_id(self.weapons.len(), "weapons");
-        self.weapons.push(Weapon {
+        let i = self.weapons.push(Weapon {
             slug: slug.to_owned(),
             name: name.to_owned(),
             class,
-            group: String::new(),
+            group: WeaponGroup::Unknown,
             is_bow: false,
             thumb: None,
             last_scrape: 0,
@@ -356,8 +348,10 @@ impl Inner {
                 let weapon = self.intern_weapon(weapon_slug.value(i), weapon_name.value(i), class);
                 // A feed sighting says nothing about the weapon's other listings, so it must not
                 // make them look unconfirmed.
-                if !sources.is_some_and(|c| c.is_valid(i) && wfmt_types::is_feed(c.value(i))) {
-                    let w = &mut self.weapons[weapon as usize];
+                if !sources.is_some_and(|c| {
+                    c.is_valid(i) && wfmt_types::Feed::from_id(c.value(i)).is_some()
+                }) {
+                    let w = &mut self.weapons[weapon];
                     w.last_scrape = w.last_scrape.max(t);
                 }
 
@@ -383,15 +377,15 @@ impl Inner {
                 };
                 let index = match existing {
                     // An older sighting only moves `first_seen`.
-                    Some(index) if t < self.auctions[index as usize].last_seen => {
-                        let a = &mut self.auctions[index as usize];
+                    Some(index) if t < self.auctions[index].last_seen => {
+                        let a = &mut self.auctions[index];
                         a.first_seen = a.first_seen.min(t);
                         index
                     }
                     // A newer one replaces the auction's details. Parts load oldest first, so
                     // this is the common case: update in place, reusing the string buffers.
                     Some(index) => {
-                        let a = &mut self.auctions[index as usize];
+                        let a = &mut self.auctions[index];
                         let old_riven = a.riven;
                         a.weapon = weapon;
                         a.riven = riven;
@@ -415,14 +409,13 @@ impl Inner {
                         a.top_bid = top;
                         a.direct_sell = direct.value(i);
                         if old_riven != riven {
-                            self.riven_auctions[old_riven as usize].retain(|&a| a != index);
-                            self.riven_auctions[riven as usize].push(index);
+                            self.riven_auctions[old_riven].retain(|&a| a != index);
+                            self.riven_auctions[riven].push(index);
                         }
                         index
                     }
                     None => {
-                        let index = next_id(self.auctions.len(), "auctions");
-                        self.auctions.push(Auction {
+                        let index = self.auctions.push(Auction {
                             id: auction_id.to_owned(),
                             weapon,
                             riven,
@@ -447,7 +440,7 @@ impl Inner {
                             direct_sell: direct.value(i),
                         });
                         self.auction_index.insert(auction_id.to_owned(), index);
-                        self.riven_auctions[riven as usize].push(index);
+                        self.riven_auctions[riven].push(index);
                         index
                     }
                 };
@@ -481,7 +474,7 @@ impl Inner {
                     continue;
                 };
                 let t = detected.value(i);
-                let listing = &mut self.auctions[auction as usize];
+                let listing = &mut self.auctions[auction];
                 if listing.gone.is_none_or(|previous| t >= previous.at) {
                     listing.gone = Some(Gone {
                         at: t,
@@ -505,20 +498,20 @@ impl Inner {
         self.observations.sort_by_key(|o| o.t);
         self.gone.sort_by_key(|g| g.t);
 
-        self.riven_changes = vec![RivenChanges::default(); self.rivens.len()];
-        let mut first_prices = vec![None; self.rivens.len()];
+        self.riven_changes = self.rivens.same_ids(RivenChanges::default());
+        let mut first_prices = self.rivens.same_ids(None);
         for o in &self.observations {
-            let riven = self.auctions[o.auction as usize].riven as usize;
+            let riven = self.auctions[o.auction].riven;
             // Missing prices aren't evidence of a change; compare known numeric prices only.
             if let Some(price) = o.price() {
                 let first = first_prices[riven].get_or_insert(price);
                 self.riven_changes[riven].price |= *first != price;
             }
         }
-        for (riven, auctions) in self.riven_auctions.iter().enumerate() {
+        for (riven, auctions) in self.riven_auctions.enumerate() {
             let mut sellers = auctions
                 .iter()
-                .map(|&i| self.auctions[i as usize].owner_name.trim())
+                .map(|&i| self.auctions[i].owner_name.trim())
                 .filter(|name| !name.is_empty());
             if let Some(first) = sellers.next() {
                 self.riven_changes[riven].owner =
@@ -526,9 +519,9 @@ impl Inner {
             }
         }
 
-        let mut prices: Vec<Vec<i64>> = vec![Vec::new(); self.weapons.len()];
+        let mut prices = self.weapons.same_ids(Vec::new());
         for a in &self.auctions {
-            prices[a.weapon as usize].extend(auction_price(a));
+            prices[a.weapon].extend(auction_price(a));
         }
         for (weapon, mut prices) in self.weapons.iter_mut().zip(prices) {
             weapon.price_limit = price_limit(&mut prices);
@@ -536,32 +529,31 @@ impl Inner {
         self.rows = self.build_rows();
     }
 
-    pub(super) fn build_rows(&self) -> Vec<Row> {
+    pub(super) fn build_rows(&self) -> Table<AuctionId, Row> {
         self.auctions
             .iter()
             .map(|a| {
-                let flag = |set: bool, flag: u8| if set { flag } else { 0 };
+                let mut flags = RowFlags::default();
+                flags.set(RowFlags::FIT_OK, a.fit_ok);
+                flags.set(RowFlags::LEGACY, a.legacy_stats == Some(true));
+                flags.set(RowFlags::DIRECT, a.direct_sell);
+                flags.set(RowFlags::CURRENT, self.is_current(a));
+                flags.set(RowFlags::CURSED, a.attrs.iter().any(|x| !x.positive));
                 Row {
                     price: auction_price(a).unwrap_or(Row::NO_PRICE),
-                    limit: self.weapons[a.weapon as usize]
-                        .price_limit
-                        .unwrap_or(i64::MAX),
+                    limit: self.weapons[a.weapon].price_limit.unwrap_or(i64::MAX),
                     created: a.created,
                     mean_quality: a.mean_quality.unwrap_or(f64::NAN),
                     riven: a.riven,
                     weapon: a.weapon,
-                    flags: flag(a.fit_ok, Row::FIT_OK)
-                        | flag(a.legacy_stats == Some(true), Row::LEGACY)
-                        | flag(a.direct_sell, Row::DIRECT)
-                        | flag(self.is_current(a), Row::CURRENT)
-                        | flag(a.attrs.iter().any(|x| !x.positive), Row::CURSED),
+                    flags,
                 }
             })
             .collect()
     }
 
     /// The rows, rebuilt here if the auctions changed since `finish_load` (only in tests).
-    pub(super) fn rows(&self) -> std::borrow::Cow<'_, [Row]> {
+    pub(super) fn rows(&self) -> std::borrow::Cow<'_, Table<AuctionId, Row>> {
         if self.rows.len() == self.auctions.len() {
             std::borrow::Cow::Borrowed(&self.rows)
         } else {

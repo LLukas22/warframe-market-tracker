@@ -12,10 +12,11 @@ use wfmt_scraper::{
     maintenance::{self, MaintenanceArgs},
     normalize::Normalizer,
     pipeline::Pipeline,
-    store::{ParquetSink, RawPage, RawResponse, State, Store},
+    store::{PageKind, ParquetSink, RawPage, RawResponse, State, Store},
     tracking::Tracker,
     wfm,
 };
+use wfmt_types::SortBy;
 
 /// The path, and the directory that is removed when this is dropped.
 struct Temp(PathBuf, #[allow(dead_code)] tempfile::TempDir);
@@ -41,7 +42,7 @@ fn args() -> EngineArgs {
         feed_raw_retention_hours: 6,
         metadata_interval_hours: 24.0,
         flush_every: 3,
-        sort_by: vec!["price_asc".into(), "price_desc".into()],
+        sort_by: vec![wfmt_types::SortBy::PriceAsc, wfmt_types::SortBy::PriceDesc],
         verify_missing: 0,
         no_raw: false,
         weapons: vec![],
@@ -98,7 +99,7 @@ fn restart_replays_uncommitted_gone_with_tracking_and_does_not_duplicate_history
             at,
             "kulstar".into(),
             "pc".into(),
-            ["price_asc", "price_desc"]
+            [wfmt_types::SortBy::PriceAsc, wfmt_types::SortBy::PriceDesc]
                 .map(|sort_by| RawPage {
                     buyout_policy: None,
                     sort_by: sort_by.into(),
@@ -165,7 +166,8 @@ fn feeds_add_listings_without_inferring_absence_and_replay_after_a_crash() -> Re
             "pc".into(),
             vec![RawPage {
                 buyout_policy: None,
-                sort_by: id.into(),
+                sort_by: wfmt_types::Feed::from_id(id)
+                    .map_or(wfmt_types::SortBy::PriceAsc.into(), Into::into),
                 body: serde_json::json!({"payload":{"auctions":auctions}}).to_string(),
             }],
             vec![],
@@ -192,7 +194,7 @@ fn feeds_add_listings_without_inferring_absence_and_replay_after_a_crash() -> Re
         serde_json::json!({"id": "lich", "item": {"type": "lich", "weapon_url_name": "kulstar"}});
     let feed = raw(
         t + TimeDelta::minutes(3),
-        wfmt_types::FEED_RECENT,
+        wfmt_types::Feed::Recent.as_str(),
         vec![
             listing("new", 600.into()),
             listing("starting_only", serde_json::Value::Null),
@@ -209,7 +211,7 @@ fn feeds_add_listings_without_inferring_absence_and_replay_after_a_crash() -> Re
     // The next poll overlaps: only the repriced listing adds a row.
     let unchanged = raw(
         t + TimeDelta::minutes(6),
-        wfmt_types::FEED_RECENT,
+        wfmt_types::Feed::Recent.as_str(),
         vec![listing("new", 600.into())],
     );
     assert_eq!(
@@ -220,7 +222,7 @@ fn feeds_add_listings_without_inferring_absence_and_replay_after_a_crash() -> Re
     );
     let repriced = raw(
         t + TimeDelta::minutes(9),
-        wfmt_types::FEED_POPULAR,
+        wfmt_types::Feed::Popular.as_str(),
         vec![listing("new", 550.into())],
     );
     assert_eq!(
@@ -242,7 +244,7 @@ fn feeds_add_listings_without_inferring_absence_and_replay_after_a_crash() -> Re
     // A poll archived right before a crash is replayed on the next start.
     let crashed = raw(
         t + TimeDelta::minutes(12),
-        wfmt_types::FEED_RECENT,
+        wfmt_types::Feed::Recent.as_str(),
         vec![listing("recovered", 800.into())],
     );
     store.save_raw(&crashed)?;
@@ -357,11 +359,11 @@ fn feed_rows_keep_every_change_and_outlive_their_raw_archives() -> Result<()> {
     for (minutes, auction, wanted) in &polls {
         let raw = RawResponse::new(
             start + TimeDelta::minutes(*minutes),
-            wfmt_types::FEED_POPULAR.into(),
+            wfmt_types::Feed::Popular.as_str().into(),
             "pc".into(),
             vec![RawPage {
                 buyout_policy: None,
-                sort_by: wfmt_types::FEED_POPULAR.into(),
+                sort_by: wfmt_types::Feed::Popular.into(),
                 body: serde_json::json!({"payload":{"auctions":[auction]}}).to_string(),
             }],
             vec![],
@@ -384,7 +386,7 @@ fn feed_rows_keep_every_change_and_outlive_their_raw_archives() -> Result<()> {
         "pc".into(),
         vec![RawPage {
             buyout_policy: None,
-            sort_by: "price_asc".into(),
+            sort_by: wfmt_types::SortBy::PriceAsc.into(),
             body: serde_json::json!({"payload":{"auctions":[
                 swept,
                 listing(650, 200, "2026-11-01T10:14:00+00:00")
@@ -402,11 +404,11 @@ fn feed_rows_keep_every_change_and_outlive_their_raw_archives() -> Result<()> {
     // A later poll recording nothing still files its receipt under its own date.
     let next_day = RawResponse::new(
         start + TimeDelta::days(1),
-        wfmt_types::FEED_RECENT.into(),
+        wfmt_types::Feed::Recent.as_str().into(),
         "pc".into(),
         vec![RawPage {
             buyout_policy: None,
-            sort_by: wfmt_types::FEED_RECENT.into(),
+            sort_by: wfmt_types::Feed::Recent.into(),
             body: r#"{"payload":{"auctions":[]}}"#.into(),
         }],
         vec![],
@@ -477,11 +479,11 @@ fn feed_rows_keep_every_change_and_outlive_their_raw_archives() -> Result<()> {
     let mut sink = ParquetSink::new(root.0.join("parquet"));
     let again = RawResponse::new(
         start + TimeDelta::hours(2) + TimeDelta::minutes(10),
-        wfmt_types::FEED_POPULAR.into(),
+        wfmt_types::Feed::Popular.as_str().into(),
         "pc".into(),
         vec![RawPage {
             buyout_policy: None,
-            sort_by: wfmt_types::FEED_POPULAR.into(),
+            sort_by: wfmt_types::Feed::Popular.into(),
             body: serde_json::json!({"payload":{"auctions":[
                 listing(650, 200, "2026-11-01T10:14:00+00:00")
             ]}})
@@ -519,7 +521,7 @@ fn malformed_present_id_is_preserved_and_unknown_ids_do_not_infer_absence() -> R
             at,
             "kulstar".into(),
             "pc".into(),
-            ["price_asc", "price_desc"]
+            [wfmt_types::SortBy::PriceAsc, wfmt_types::SortBy::PriceDesc]
                 .map(|sort_by| RawPage {
                     buyout_policy: None,
                     sort_by: sort_by.into(),
@@ -571,7 +573,7 @@ fn starting_only_prices_must_exceed_the_mean_without_causing_false_sales() -> Re
             "kulstar".into(),
             "pc".into(),
             vec![RawPage {
-                sort_by: "price_asc".into(),
+                sort_by: wfmt_types::SortBy::PriceAsc.into(),
                 buyout_policy: None,
                 body: serde_json::json!({"payload": {"auctions": auctions}}).to_string(),
             }],
@@ -620,7 +622,7 @@ fn starting_only_prices_must_exceed_the_mean_without_causing_false_sales() -> Re
         ],
     );
     next.pages.push(RawPage {
-        sort_by: "price_desc".into(),
+        sort_by: wfmt_types::SortBy::PriceDesc.into(),
         buyout_policy: None,
         body: serde_json::json!({"payload": {"auctions": [duplicate_bid]}}).to_string(),
     });
@@ -691,10 +693,10 @@ fn duplicate_pages_keep_newest_edit_and_latest_bid_on_ties() -> Result<()> {
     let mut listing = fixture();
     let mut pages = Vec::new();
     for (sort, updated, price, bid) in [
-        ("price_asc", "2026-11-10T10:00:00Z", 100, 10),
-        ("price_desc", "2026-11-10T10:01:00Z", 200, 20),
-        ("price_desc", "2026-11-10T10:00:00Z", 50, 5),
-        ("price_desc", "2026-11-10T10:01:00Z", 200, 30),
+        (SortBy::PriceAsc, "2026-11-10T10:00:00Z", 100, 10),
+        (SortBy::PriceDesc, "2026-11-10T10:01:00Z", 200, 20),
+        (SortBy::PriceDesc, "2026-11-10T10:00:00Z", 50, 5),
+        (SortBy::PriceDesc, "2026-11-10T10:01:00Z", 200, 30),
     ] {
         listing["updated"] = updated.into();
         listing["buyout_price"] = price.into();
@@ -737,10 +739,10 @@ fn feed_price_withdrawal_survives_restart_and_restoration() -> Result<()> {
         let mut sink = ParquetSink::new(root.0.join("parquet"));
         let raw = RawResponse::new(
             start + TimeDelta::minutes(minutes),
-            wfmt_types::FEED_RECENT.into(),
+            wfmt_types::Feed::Recent.as_str().into(),
             "pc".into(),
             vec![RawPage {
-                sort_by: wfmt_types::FEED_RECENT.into(),
+                sort_by: wfmt_types::Feed::Recent.into(),
                 buyout_policy: None,
                 body: serde_json::json!({"payload":{"auctions":[listing]}}).to_string(),
             }],
@@ -789,15 +791,15 @@ fn older_edits_cannot_replace_prices_from_feeds_or_sweeps_after_restart() -> Res
         auction["updated"] = updated.into();
         auction["item"]["weapon_url_name"] = "kulstar".into();
         let body = serde_json::json!({"payload":{"auctions":[auction]}}).to_string();
-        let sorts = if feed {
-            vec![wfmt_types::FEED_POPULAR]
+        let sorts: Vec<PageKind> = if feed {
+            vec![wfmt_types::Feed::Popular.into()]
         } else {
-            vec!["price_asc", "price_desc"]
+            vec![SortBy::PriceAsc.into(), SortBy::PriceDesc.into()]
         };
         RawResponse::new(
             start + TimeDelta::minutes(minutes),
             if feed {
-                wfmt_types::FEED_POPULAR
+                wfmt_types::Feed::Popular.as_str()
             } else {
                 "kulstar"
             }
@@ -806,7 +808,7 @@ fn older_edits_cannot_replace_prices_from_feeds_or_sweeps_after_restart() -> Res
             sorts
                 .into_iter()
                 .map(|sort| RawPage {
-                    sort_by: sort.into(),
+                    sort_by: sort,
                     buyout_policy: None,
                     body: body.clone(),
                 })

@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
+use wfmt_types::{WeaponClass, WeaponGroup};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum CurseFilter {
@@ -16,6 +17,29 @@ pub enum CurseFilter {
     Attr(String),
 }
 
+impl CurseFilter {
+    /// How a `<select>` names it.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Any => "any".into(),
+            Self::None => "none".into(),
+            Self::Required => "required".into(),
+            Self::Attr(slug) => format!("attr:{slug}"),
+        }
+    }
+
+    /// The inverse of [`CurseFilter::key`]; anything else means `Any`.
+    pub fn from_key(key: &str) -> Self {
+        match key {
+            "none" => Self::None,
+            "required" => Self::Required,
+            _ => key
+                .strip_prefix("attr:")
+                .map_or(Self::Any, |slug| Self::Attr(slug.to_owned())),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Sort {
     #[default]
@@ -23,6 +47,29 @@ pub enum Sort {
     PriceDesc,
     QualityDesc,
     Newest,
+}
+
+impl Sort {
+    pub const ALL: [Self; 4] = [
+        Self::PriceAsc,
+        Self::PriceDesc,
+        Self::QualityDesc,
+        Self::Newest,
+    ];
+
+    /// How a `<select>` names it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::PriceAsc => "price_asc",
+            Self::PriceDesc => "price_desc",
+            Self::QualityDesc => "quality",
+            Self::Newest => "newest",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.key() == key)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -147,9 +194,9 @@ impl Default for Query {
 pub struct WeaponInfo {
     pub slug: String,
     pub name: String,
-    pub class: String,
-    /// warframe.market group: primary, secondary, melee, archgun, zaw, kitgun, sentinel.
-    pub group: String,
+    /// `None` for a weapon type the stat model doesn't know.
+    pub class: Option<WeaponClass>,
+    pub group: WeaponGroup,
     pub has_image: bool,
     /// Listings seen in the most recent scrape of this weapon (0 = not scraped yet).
     pub listings: u32,
@@ -167,8 +214,8 @@ pub struct WeaponInfo {
 pub struct AttrInfo {
     pub slug: String,
     pub name: String,
-    /// Weapon classes this attribute has been seen on.
-    pub classes: Vec<String>,
+    /// Weapon classes this attribute has been seen on, `None` for weapons without one.
+    pub classes: Vec<Option<WeaponClass>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -504,79 +551,7 @@ pub async fn riven_history(id: String) -> Result<Vec<RivenAuction>, ServerFnErro
     crate::data::run(move |store| store.riven_history(&id)).await
 }
 
-/// Human readable attribute name for a warframe.market slug.
-pub fn attribute_name(slug: &str) -> String {
-    let name = match slug {
-        "chance_to_gain_extra_combo_count" => "Additional Combo Count Chance",
-        "chance_to_gain_combo_count" => "Chance to Gain Combo Count",
-        "ammo_maximum" => "Ammo Maximum",
-        "damage_vs_corpus" => "Damage to Corpus",
-        "damage_vs_grineer" => "Damage to Grineer",
-        "damage_vs_infested" => "Damage to Infested",
-        "cold_damage" => "Cold",
-        "combo_duration" => "Combo Duration",
-        "critical_chance" => "Critical Chance",
-        "critical_chance_on_slide_attack" => "Critical Chance on Slide Attack",
-        "critical_damage" => "Critical Damage",
-        "base_damage_/_melee_damage" => "Damage",
-        "electric_damage" => "Electricity",
-        "heat_damage" => "Heat",
-        "finisher_damage" => "Finisher Damage",
-        "fire_rate_/_attack_speed" => "Fire Rate / Attack Speed",
-        "projectile_speed" => "Projectile Speed",
-        "channeling_damage" => "Initial Combo",
-        "impact_damage" => "Impact",
-        "magazine_capacity" => "Magazine Capacity",
-        "channeling_efficiency" => "Heavy Attack Efficiency",
-        "multishot" => "Multishot",
-        "toxin_damage" => "Toxin",
-        "punch_through" => "Punch Through",
-        "puncture_damage" => "Puncture",
-        "reload_speed" => "Reload Speed",
-        "range" => "Range",
-        "slash_damage" => "Slash",
-        "status_chance" => "Status Chance",
-        "status_duration" => "Status Duration",
-        "recoil" => "Weapon Recoil",
-        "zoom" => "Zoom",
-        "ammo_efficiency" => "Ammo Efficiency",
-        "blast" => "Blast",
-        "corrosive" => "Corrosive",
-        "damage_to_orokin" => "Damage to Orokin",
-        "damage_to_scaldra" => "Damage to Scaldra",
-        "damage_to_techrot" => "Damage to Techrot",
-        "gas" => "Gas",
-        "heavy_attack_wind_up_speed" => "Heavy Attack Wind Up Speed",
-        "magnetic" => "Magnetic",
-        "melee_damage_on_heavy_attack" => "Melee Damage on Heavy Attack",
-        "parry_angle" => "Parry Angle",
-        "radiation" => "Radiation",
-        "magazine_reloaded_s_when_holstered" => "Reload While Holstered",
-        "slam_attack_damage" => "Slam Attack Damage",
-        "status_damage" => "Status Damage",
-        "viral" => "Viral",
-        "weak_point_damage" => "Weak Point Damage",
-        "weak_point_critical_chance" => "Weak Point Critical Chance",
-        other => return other.replace('_', " "),
-    };
-    name.to_owned()
-}
-
-/// Formats a listed value the way it shows in game.
-pub fn format_value(slug: &str, value: f64) -> String {
-    match slug {
-        s if is_multiplier(s) => format!("x{value:.2}"),
-        "punch_through" | "range" => format!("{value:+.1}m"),
-        "combo_duration" => format!("{value:+.1}s"),
-        "channeling_damage" => format!("{value:+.1}"),
-        _ => format!("{value:+.1}%"),
-    }
-}
-
-/// Faction damage is shown as a multiplier, `x1.61`, rather than as a change.
-fn is_multiplier(slug: &str) -> bool {
-    slug.starts_with("damage_vs_") || slug.starts_with("damage_to_")
-}
+pub use wfmt_types::attributes::{format_value, name_of as attribute_name};
 
 /// The values a stat could have had on this riven: worst roll to best, or for a negative,
 /// mildest to harshest. A roll scales the stat's base value by `ROLL_MIN` to `ROLL_MAX`, and
@@ -585,7 +560,7 @@ pub fn roll_range(slug: &str, value: f64, quality: f64) -> (f64, f64) {
     use wfmt_types::riven::{ROLL_MAX, ROLL_MIN};
     let roll = ROLL_MIN + (ROLL_MAX - ROLL_MIN) * quality.clamp(0.0, 1.0);
     let at = |w: f64| {
-        if is_multiplier(slug) && value > 0.0 {
+        if wfmt_types::attributes::unit_of(slug) == wfmt_types::Unit::Multiply && value > 0.0 {
             1.0 + (value - 1.0) * w / roll
         } else {
             value * w / roll
@@ -772,6 +747,26 @@ mod period_tests {
         assert_eq!(valid.bounds(0), (Some(0), Some(2 * DAY_MS)));
         for period in [Period::Today, Period::Week, Period::Month] {
             let _ = period.bounds(i64::MIN);
+        }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn select_keys_round_trip() {
+        for sort in Sort::ALL {
+            assert_eq!(Sort::from_key(sort.key()), Some(sort));
+        }
+        for curse in [
+            CurseFilter::Any,
+            CurseFilter::None,
+            CurseFilter::Required,
+            CurseFilter::Attr("zoom".into()),
+        ] {
+            assert_eq!(CurseFilter::from_key(&curse.key()), curse);
         }
     }
 }

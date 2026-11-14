@@ -50,10 +50,15 @@ fn price_limit_catches_joke_prices_but_keeps_real_high_ends() {
     assert_eq!(price_limit(&mut [10, 20, 99999]), None);
 }
 
-fn add_auction(inner: &mut Inner, weapon: u16, id: &str, price: i64, last_seen: i64) -> u32 {
+fn add_auction(
+    inner: &mut Inner,
+    weapon: WeaponId,
+    id: &str,
+    price: i64,
+    last_seen: i64,
+) -> AuctionId {
     let riven = inner.intern_riven(id);
-    let index = inner.auctions.len() as u32;
-    inner.auctions.push(Auction {
+    let index = inner.auctions.push(Auction {
         id: id.into(),
         weapon,
         riven,
@@ -78,7 +83,7 @@ fn add_auction(inner: &mut Inner, weapon: u16, id: &str, price: i64, last_seen: 
         direct_sell: true,
     });
     inner.auction_index.insert(id.into(), index);
-    inner.riven_auctions[riven as usize].push(index);
+    inner.riven_auctions[riven].push(index);
     inner
         .observations
         .push(Observation::new(last_seen, index, Some(price), true));
@@ -87,16 +92,16 @@ fn add_auction(inner: &mut Inner, weapon: u16, id: &str, price: i64, last_seen: 
 
 fn comparison_auction(
     inner: &mut Inner,
-    weapon: u16,
+    weapon: WeaponId,
     id: &str,
     quality: Option<f64>,
-    negative: Option<u16>,
+    negative: Option<AttrId>,
     time: i64,
-) -> u32 {
+) -> AuctionId {
     let index = add_auction(inner, weapon, id, 100, time);
     let critical = inner.intern_attr("critical_chance");
     let damage = inner.intern_attr("critical_damage");
-    inner.auctions[index as usize].attrs = [(critical, true), (damage, true)]
+    inner.auctions[index].attrs = [(critical, true), (damage, true)]
         .into_iter()
         .chain(negative.map(|n| (n, false)))
         .map(|(attr, positive)| Attr {
@@ -127,9 +132,9 @@ fn comparisons_rank_stats_then_normalized_rolls_and_ignore_price_and_rank() {
     );
     comparison_auction(&mut inner, weapon, "far", Some(0.9), Some(zoom), 4000);
     let near = comparison_auction(&mut inner, weapon, "near", Some(0.51), Some(zoom), 2000);
-    inner.auctions[near as usize].rank = Some(0);
-    inner.auctions[near as usize].attrs[0].value = 10.0;
-    inner.auctions[near as usize].buyout_price = Some(999999);
+    inner.auctions[near].rank = Some(0);
+    inner.auctions[near].attrs[0].value = 10.0;
+    inner.auctions[near].buyout_price = Some(999999);
     comparison_auction(&mut inner, weapon, "unknown", None, Some(zoom), 6000);
     comparison_auction(&mut inner, weapon, "no-negative", Some(0.5), None, 7000);
     let incompatible = comparison_auction(
@@ -140,7 +145,7 @@ fn comparisons_rank_stats_then_normalized_rolls_and_ignore_price_and_rank() {
         Some(zoom),
         1000,
     );
-    inner.auctions[incompatible as usize].attrs.remove(0);
+    inner.auctions[incompatible].attrs.remove(0);
     let detail = inner
         .riven_detail("source", None, Comparisons::default())
         .unwrap();
@@ -161,7 +166,7 @@ fn comparisons_rank_stats_then_normalized_rolls_and_ignore_price_and_rank() {
     );
     assert!(detail.similar[0].roll_distance.unwrap() < 0.011);
     assert_eq!(detail.similar[2].roll_distance, None);
-    inner.auctions[source as usize].fit_ok = false;
+    inner.auctions[source].fit_ok = false;
     assert!(
         inner
             .riven_detail("source", None, Comparisons::default())
@@ -188,13 +193,9 @@ fn partial_matches_rank_overlap_before_curse_quality_and_recency() {
         quality,
     };
     let source = comparison_auction(&mut inner, weapon, "source", Some(0.5), Some(zoom), 1000);
-    inner.auctions[source as usize]
-        .attrs
-        .push(extra(toxin, Some(0.5)));
+    inner.auctions[source].attrs.push(extra(toxin, Some(0.5)));
     let exact = comparison_auction(&mut inner, weapon, "exact", Some(0.9), Some(zoom), 1000);
-    inner.auctions[exact as usize]
-        .attrs
-        .push(extra(toxin, Some(0.9)));
+    inner.auctions[exact].attrs.push(extra(toxin, Some(0.9)));
     let curse = comparison_auction(
         &mut inner,
         weapon,
@@ -203,21 +204,17 @@ fn partial_matches_rank_overlap_before_curse_quality_and_recency() {
         Some(recoil),
         1000,
     );
-    inner.auctions[curse as usize]
-        .attrs
-        .push(extra(toxin, Some(0.5)));
+    inner.auctions[curse].attrs.push(extra(toxin, Some(0.5)));
     comparison_auction(&mut inner, weapon, "subset", None, Some(recoil), 1000);
     let swap = comparison_auction(&mut inner, weapon, "swap", Some(0.5), Some(zoom), 5000);
-    inner.auctions[swap as usize]
-        .attrs
-        .push(extra(heat, Some(0.5)));
+    inner.auctions[swap].attrs.push(extra(heat, Some(0.5)));
     let loose = comparison_auction(&mut inner, weapon, "loose", Some(0.5), Some(zoom), 6000);
-    inner.auctions[loose as usize].attrs[0].attr = heat;
+    inner.auctions[loose].attrs[0].attr = heat;
     let unrelated =
         comparison_auction(&mut inner, weapon, "unrelated", Some(0.5), Some(zoom), 6000);
     // Negative critical chance is not a matching positive critical chance.
-    inner.auctions[unrelated as usize].attrs[0].positive = false;
-    inner.auctions[unrelated as usize].attrs[1].attr = heat;
+    inner.auctions[unrelated].attrs[0].positive = false;
+    inner.auctions[unrelated].attrs[1].attr = heat;
     let normal = inner
         .riven_detail("source", None, Comparisons::default())
         .unwrap();
@@ -274,12 +271,12 @@ fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() 
     comparison_auction(&mut inner, weapon, "source", Some(0.5), None, 1000);
     let old = comparison_auction(&mut inner, weapon, "old", Some(0.5), None, 1000);
     let new = comparison_auction(&mut inner, weapon, "new", Some(0.6), None, 2000);
-    let riven = inner.auctions[old as usize].riven;
-    let old_new_riven = inner.auctions[new as usize].riven;
-    inner.riven_auctions[old_new_riven as usize].clear();
-    inner.auctions[new as usize].riven = riven;
-    inner.riven_auctions[riven as usize].push(new);
-    inner.auctions[new as usize].gone = Some(Gone {
+    let riven = inner.auctions[old].riven;
+    let old_new_riven = inner.auctions[new].riven;
+    inner.riven_auctions[old_new_riven].clear();
+    inner.auctions[new].riven = riven;
+    inner.riven_auctions[riven].push(new);
+    inner.auctions[new].gone = Some(Gone {
         at: 3000,
         reason: GoneReason::Missing,
     });
@@ -292,9 +289,9 @@ fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() 
         1000,
     );
     let legacy = comparison_auction(&mut inner, weapon, "legacy", Some(0.5), None, 1000);
-    inner.auctions[legacy as usize].legacy_stats = Some(true);
+    inner.auctions[legacy].legacy_stats = Some(true);
     let unfit = comparison_auction(&mut inner, weapon, "unfit", Some(0.5), None, 1000);
-    inner.auctions[unfit as usize].fit_ok = false;
+    inner.auctions[unfit].fit_ok = false;
     let result = inner
         .riven_detail("source", None, Comparisons::default())
         .unwrap();
@@ -375,7 +372,7 @@ fn riven_history_orders_observations_and_clears_stale_removal_status() {
     inner
         .observations
         .push(Observation::new(1000, index, Some(100), true));
-    inner.auctions[index as usize].gone = Some(Gone {
+    inner.auctions[index].gone = Some(Gone {
         at: 2000,
         reason: GoneReason::Missing,
     });
@@ -429,7 +426,7 @@ fn comparisons_are_bounded_with_deterministic_recency_ties() {
     assert_eq!(broad.similar.len(), 10);
     assert_eq!(broad.similar_total, 25);
     assert_eq!(result.similar[0].listing.auction_id, "match-24");
-    inner.auctions.last_mut().unwrap().last_seen = 2023;
+    inner.auctions.iter_mut().last().unwrap().last_seen = 2023;
     let result = inner
         .riven_detail("source", None, Comparisons::default())
         .unwrap();
@@ -440,13 +437,13 @@ fn comparisons_are_bounded_with_deterministic_recency_ties() {
 fn store_with_outlier() -> Inner {
     let mut inner = Inner::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
-    inner.weapons[weapon as usize].last_scrape = 2000;
+    inner.weapons[weapon].last_scrape = 2000;
     for i in 0..9 {
         add_auction(&mut inner, weapon, &format!("normal{i}"), 100, 2000);
     }
     add_auction(&mut inner, weapon, "joke", 66666, 2000);
     let gone = add_auction(&mut inner, weapon, "gonejoke", 88888, 1000);
-    inner.auctions[gone as usize].gone = Some(Gone {
+    inner.auctions[gone].gone = Some(Gone {
         at: 1500,
         reason: GoneReason::Missing,
     });
@@ -465,7 +462,7 @@ fn store_with_outlier() -> Inner {
 fn store_with_stat_effects(count: usize, strength: f64) -> Inner {
     let mut inner = Inner::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
-    inner.weapons[weapon as usize].last_scrape = 2000;
+    inner.weapons[weapon].last_scrape = 2000;
     let crit = inner.intern_attr("critical_chance");
     let zoom = inner.intern_attr("zoom");
     let toxin = inner.intern_attr("toxin_damage");
@@ -488,7 +485,7 @@ fn store_with_stat_effects(count: usize, strength: f64) -> Inner {
             price *= 1.0 + strength / 2.0;
         }
         let index = add_auction(&mut inner, weapon, &format!("r{i}"), price as i64, 2000);
-        let attrs = &mut inner.auctions[index as usize].attrs;
+        let attrs = &mut inner.auctions[index].attrs;
         attrs.extend(has_crit.then(|| attr(crit, true)));
         attrs.extend(has_zoom.then(|| attr(zoom, false)));
         attrs.extend(has_toxin.then(|| attr(toxin, true)));
@@ -539,7 +536,7 @@ fn stat_effects_ignore_invalid_prices_and_hold_back_weak_signals() {
         value_rank8: None,
         quality: None,
     }];
-    joked.auctions[index as usize].attrs = attrs;
+    joked.auctions[index].attrs = attrs;
     joked.finish_load();
     assert_eq!(joked.stat_effects("w").positive, clean.positive);
 
@@ -558,7 +555,7 @@ fn stat_effects_ignore_invalid_prices_and_hold_back_weak_signals() {
 fn history_filters_combine_and_paginate_active_and_gone_rivens() {
     fn pair(
         inner: &mut Inner,
-        weapon: u16,
+        weapon: WeaponId,
         id: &str,
         old_price: i64,
         new_price: i64,
@@ -566,14 +563,14 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
     ) {
         let old = add_auction(inner, weapon, &format!("{id}-old"), old_price, 1000);
         let new = add_auction(inner, weapon, &format!("{id}-new"), new_price, 3000);
-        let old_riven = inner.auctions[old as usize].riven;
-        let new_riven = inner.auctions[new as usize].riven;
-        inner.riven_auctions[new_riven as usize].clear();
-        inner.auctions[new as usize].riven = old_riven;
-        inner.riven_auctions[old_riven as usize].push(new);
-        inner.auctions[old as usize].owner_name = "Alice".into();
-        inner.auctions[new as usize].owner_name = seller.into();
-        inner.auctions[old as usize].gone = Some(Gone {
+        let old_riven = inner.auctions[old].riven;
+        let new_riven = inner.auctions[new].riven;
+        inner.riven_auctions[new_riven].clear();
+        inner.auctions[new].riven = old_riven;
+        inner.riven_auctions[old_riven].push(new);
+        inner.auctions[old].owner_name = "Alice".into();
+        inner.auctions[new].owner_name = seller.into();
+        inner.auctions[old].gone = Some(Gone {
             at: 2000,
             reason: GoneReason::Missing,
         });
@@ -606,15 +603,17 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
     // every relist disappears too.
     for gone in [false, true] {
         if gone {
-            let relists: Vec<u32> = (0..inner.auctions.len() as u32)
-                .filter(|&a| inner.auctions[a as usize].id.ends_with("-new"))
+            let relists: Vec<AuctionId> = inner
+                .auctions
+                .ids()
+                .filter(|&a| inner.auctions[a].id.ends_with("-new"))
                 .collect();
             for a in relists {
-                inner.auctions[a as usize].gone = Some(Gone {
+                inner.auctions[a].gone = Some(Gone {
                     at: 4000,
                     reason: GoneReason::Missing,
                 });
-                let price = auction_price(&inner.auctions[a as usize]);
+                let price = auction_price(&inner.auctions[a]);
                 inner.gone.push(GoneEvent {
                     t: 4000,
                     auction: a,
@@ -704,7 +703,7 @@ fn period_limits_chart_and_gone_listings_but_not_current_ones() {
     let recent = add_auction(&mut inner, weapon, "recent", 200, now - 2 * DAY_MS);
     add_auction(&mut inner, weapon, "current", 300, now - 3_600_000);
     for (auction, t) in [(old, now - 59 * DAY_MS), (recent, now - DAY_MS)] {
-        inner.auctions[auction as usize].gone = Some(Gone {
+        inner.auctions[auction].gone = Some(Gone {
             at: t,
             reason: GoneReason::Missing,
         });
@@ -768,9 +767,9 @@ fn period_limits_chart_and_gone_listings_but_not_current_ones() {
     assert_eq!(custom.bucket_hours, 1);
 
     // An id search shows the riven's whole past whatever the period.
-    let id = inner.auctions[old as usize].riven;
+    let id = inner.auctions[old].riven;
     let found = inner.search(&Query {
-        riven_id: Some(inner.rivens[id as usize].clone()),
+        riven_id: Some(inner.rivens[id].clone()),
         period: Period::Today,
         ..all_time()
     });
@@ -797,7 +796,7 @@ fn listing_pages_reach_every_match_beyond_the_old_caps() {
     }
     for i in 0..113 {
         let index = add_auction(&mut inner, weapon, &format!("gone{i:03}"), 100, 1000);
-        inner.auctions[index as usize].gone = Some(Gone {
+        inner.auctions[index].gone = Some(Gone {
             at: 2000 + i,
             reason: GoneReason::Missing,
         });
@@ -861,7 +860,7 @@ fn listing_pages_reach_every_match_beyond_the_old_caps() {
 fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
     let mut inner = Inner::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
-    inner.weapons[weapon as usize].last_scrape = 2000;
+    inner.weapons[weapon].last_scrape = 2000;
     let a = add_auction(&mut inner, weapon, "old", 100, 1000);
     inner.finish_load();
     let query = Query {
@@ -872,7 +871,7 @@ fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
     assert_eq!(result.total, 1);
     assert!(result.listings[0].unconfirmed);
     assert_eq!(result.listings[0].last_seen, 1000);
-    inner.auctions[a as usize].gone = Some(Gone {
+    inner.auctions[a].gone = Some(Gone {
         at: 2000,
         reason: GoneReason::Expired,
     });
@@ -885,17 +884,17 @@ fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
 fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
     let mut inner = Inner::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
-    inner.weapons[weapon as usize].last_scrape = 3000;
+    inner.weapons[weapon].last_scrape = 3000;
     // Still current, though no longer seen (capped pages), and cheaper.
     let old = add_auction(&mut inner, weapon, "old", 100, 1000);
     let new = add_auction(&mut inner, weapon, "new", 300, 3000);
-    let riven = inner.auctions[old as usize].riven;
-    let new_riven = inner.auctions[new as usize].riven;
-    inner.riven_auctions[new_riven as usize].clear();
-    inner.auctions[new as usize].riven = riven;
-    inner.riven_auctions[riven as usize].push(new);
-    inner.auctions[old as usize].created = 500;
-    inner.auctions[new as usize].created = 2500;
+    let riven = inner.auctions[old].riven;
+    let new_riven = inner.auctions[new].riven;
+    inner.riven_auctions[new_riven].clear();
+    inner.auctions[new].riven = riven;
+    inner.riven_auctions[riven].push(new);
+    inner.auctions[old].created = 500;
+    inner.auctions[new].created = 2500;
     inner.finish_load();
     let query = Query {
         weapon: Some("w".into()),
@@ -916,7 +915,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
     assert_eq!((w.listings, w.min_price), (1, Some(300)));
 
     // Once the old auction is gone, it was relisted rather than sold.
-    inner.auctions[old as usize].gone = Some(Gone {
+    inner.auctions[old].gone = Some(Gone {
         at: 2000,
         reason: GoneReason::Missing,
     });
@@ -931,7 +930,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
     assert_eq!((result.total, result.gone_total), (1, 0));
     assert!(result.history.iter().all(|h| h.gone_count == 0));
     // When the relist disappears too, it is the one shown as gone.
-    inner.auctions[new as usize].gone = Some(Gone {
+    inner.auctions[new].gone = Some(Gone {
         at: 4000,
         reason: GoneReason::Missing,
     });
@@ -953,7 +952,7 @@ fn history_uses_latest_price_of_the_newest_copy() {
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     let a = add_auction(&mut inner, weapon, "a", 100, 1000);
     let b = add_auction(&mut inner, weapon, "b", 150, 2000);
-    inner.auctions[b as usize].riven = inner.auctions[a as usize].riven;
+    inner.auctions[b].riven = inner.auctions[a].riven;
     inner
         .observations
         .push(Observation::new(3000, a, Some(200), true));
@@ -1043,9 +1042,9 @@ fn invalid_prices_stay_out_of_listings_charts_and_medians() {
 #[test]
 fn riven_id_search_shows_an_invalid_price_with_its_chart() {
     let inner = store_with_outlier();
-    let id = inner.auctions[inner.auction_index["joke"] as usize].riven;
+    let id = inner.auctions[inner.auction_index["joke"]].riven;
     let result = inner.search(&Query {
-        riven_id: Some(inner.rivens[id as usize].clone()),
+        riven_id: Some(inner.rivens[id].clone()),
         ..all_time()
     });
     assert_eq!(result.total, 1);
@@ -1121,8 +1120,8 @@ fn feed_sightings_do_not_make_other_listings_unconfirmed() -> anyhow::Result<()>
     let weapon = Weapon {
         slug: "kulstar".into(),
         game_ref: String::new(),
-        group: "secondary".into(),
-        riven_type: "pistol".into(),
+        group: WeaponGroup::Secondary,
+        riven_type: RivenType::Pistol,
         disposition: Some(1.3),
         i18n: serde_json::json!({"en":{"name":"Kulstar"}}),
     };
@@ -1140,7 +1139,8 @@ fn feed_sightings_do_not_make_other_listings_unconfirmed() -> anyhow::Result<()>
             "pc".into(),
             vec![RawPage {
                 buyout_policy: None,
-                sort_by: id.into(),
+                sort_by: wfmt_types::Feed::from_id(id)
+                    .map_or(wfmt_types::SortBy::PriceAsc.into(), Into::into),
                 body,
             }],
             Vec::new(),
@@ -1153,7 +1153,7 @@ fn feed_sightings_do_not_make_other_listings_unconfirmed() -> anyhow::Result<()>
         std::slice::from_ref(&weapon),
         &raw(
             swept_at + chrono::TimeDelta::hours(1),
-            wfmt_types::FEED_RECENT,
+            wfmt_types::Feed::Recent.as_str(),
             feed,
         ),
         &mut sink,
@@ -1163,7 +1163,10 @@ fn feed_sightings_do_not_make_other_listings_unconfirmed() -> anyhow::Result<()>
     store.refresh();
     {
         let inner = store.read();
-        assert_eq!(inner.weapons[0].last_scrape, swept_at.timestamp_millis());
+        assert_eq!(
+            inner.weapons[WeaponId::from_index(0)].last_scrape,
+            swept_at.timestamp_millis()
+        );
         assert!(
             inner
                 .auctions
@@ -1181,7 +1184,7 @@ fn feed_sightings_do_not_make_other_listings_unconfirmed() -> anyhow::Result<()>
         std::slice::from_ref(&weapon),
         &raw(
             withdrawn_at,
-            wfmt_types::FEED_RECENT,
+            wfmt_types::Feed::Recent.as_str(),
             serde_json::json!({"payload": {"auctions": [sighted]}}).to_string(),
         ),
         &mut sink,
@@ -1192,7 +1195,7 @@ fn feed_sightings_do_not_make_other_listings_unconfirmed() -> anyhow::Result<()>
     {
         let inner = reloaded.read();
         let index = inner.auction_index[sighted["id"].as_str().unwrap()];
-        let auction = &inner.auctions[index as usize];
+        let auction = &inner.auctions[index];
         assert_eq!(auction_price(auction), None);
         assert_eq!(auction.last_seen, withdrawn_at.timestamp_millis());
         assert!(inner.is_current(auction), "withdrawal is not a sale");
@@ -1215,8 +1218,8 @@ fn cache_reloads_compacted_history_without_duplicate_observations() -> anyhow::R
     let weapon = Weapon {
         slug: "kulstar".into(),
         game_ref: String::new(),
-        group: "secondary".into(),
-        riven_type: "pistol".into(),
+        group: WeaponGroup::Secondary,
+        riven_type: RivenType::Pistol,
         disposition: Some(1.3),
         i18n: serde_json::json!({"en":{"name":"Kulstar"}}),
     };
@@ -1233,7 +1236,7 @@ fn cache_reloads_compacted_history_without_duplicate_observations() -> anyhow::R
             "pc".into(),
             vec![RawPage {
                 buyout_policy: None,
-                sort_by: "price_asc".into(),
+                sort_by: wfmt_types::SortBy::PriceAsc.into(),
                 body: body.clone(),
             }],
             Vec::new(),
@@ -1269,7 +1272,7 @@ fn cache_reloads_compacted_history_without_duplicate_observations() -> anyhow::R
         "pc".into(),
         vec![RawPage {
             buyout_policy: None,
-            sort_by: "price_asc".into(),
+            sort_by: wfmt_types::SortBy::PriceAsc.into(),
             body,
         }],
         Vec::new(),

@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::identity::Registry;
 use crate::normalize::Normalizer;
-use crate::store::{ParquetSink, RawPage, RawResponse};
+use crate::store::{PageKind, ParquetSink, RawPage, RawResponse};
 use crate::tracking::{Coverage, Seen, Tracker, returned_everything};
 use crate::wfm::{self, Auction, Weapon};
 
@@ -35,7 +35,7 @@ pub fn parse_pages(pages: &[RawPage]) -> Result<Pages> {
     let mut skipped = 0;
     let mut present = HashSet::new();
     // (sort order, entries, listing ids) of each unfiltered page, to tell if they hold everything.
-    let mut unfiltered: Vec<(&str, usize, HashSet<String>)> = Vec::new();
+    let mut unfiltered: Vec<(PageKind, usize, HashSet<String>)> = Vec::new();
     for page in pages {
         let (auctions, bad, ids) = match wfm::parse_auction_page(&page.body) {
             Ok(page) => page,
@@ -53,8 +53,8 @@ pub fn parse_pages(pages: &[RawPage]) -> Result<Pages> {
         buyouts.extend(std::iter::repeat_n(None, bad));
         // A filtered page says nothing about auctions outside its search scope, even if short.
         if page.buyout_policy.is_none() {
-            coverage.add_page(&page.sort_by, &buyouts);
-            unfiltered.push((&page.sort_by, buyouts.len(), ids.clone()));
+            coverage.add_page(page.sort_by, &buyouts);
+            unfiltered.push((page.sort_by, buyouts.len(), ids.clone()));
         }
         present.extend(ids);
         for auction in auctions {
@@ -66,11 +66,11 @@ pub fn parse_pages(pages: &[RawPage]) -> Result<Pages> {
                         out[i].0 = auction;
                     }
                     out[i].1.push(',');
-                    out[i].1.push_str(&page.sort_by);
+                    out[i].1.push_str(page.sort_by.as_str());
                 }
                 None => {
                     index.insert(auction.id.clone(), out.len());
-                    out.push((auction, page.sort_by.clone()));
+                    out.push((auction, page.sort_by.as_str().to_owned()));
                 }
             }
         }

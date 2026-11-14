@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use wfmt_types::layout::{DATE_PREFIX, PARQUET_DIR, Table};
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
@@ -91,26 +92,26 @@ pub fn maintain(root: &Path, now: DateTime<Utc>, args: &MaintenanceArgs) -> Resu
         .compact_target_mb
         .checked_mul(MIB)
         .context("compaction target is too large")?;
-    let parquet = root.join("parquet");
+    let parquet = root.join(PARQUET_DIR);
     // Keep today's append-only parts untouched. Group by schema as well as date so older
     // schema versions remain readable without inventing values for missing columns.
-    let mut days = dated_dirs(&parquet.join("auctions"), "date=")?;
-    days.extend(dated_dirs(&parquet.join("gone"), "date=")?);
+    let mut days = dated_dirs(&parquet.join(Table::Auctions.as_str()), DATE_PREFIX)?;
+    days.extend(dated_dirs(
+        &parquet.join(Table::Gone.as_str()),
+        DATE_PREFIX,
+    )?);
     days.sort();
     days.dedup();
     for date in days.into_iter().filter(|d| *d < now.date_naive()) {
-        for tables in [&["auctions", "attributes"][..], &["gone"][..]] {
-            let partition = PathBuf::from("parquet")
-                .join(tables[0])
-                .join(format!("date={date}"));
+        for tables in Table::GROUPS {
+            let partition = Path::new(PARQUET_DIR).join(tables[0].day_folder(date));
             let mut schemas: BTreeMap<String, Vec<Vec<PathBuf>>> = BTreeMap::new();
             for path in parquet_files(&root.join(&partition))? {
                 let mut bundle = Vec::new();
                 let mut schema_key = String::new();
                 for table in tables {
-                    let relative = PathBuf::from("parquet")
-                        .join(table)
-                        .join(format!("date={date}"))
+                    let relative = Path::new(PARQUET_DIR)
+                        .join(table.day_folder(date))
                         .join(path.file_name().unwrap());
                     ensure!(
                         root.join(&relative).exists(),
@@ -172,7 +173,7 @@ pub fn maintain(root: &Path, now: DateTime<Utc>, args: &MaintenanceArgs) -> Resu
 fn compact_group(
     root: &Path,
     date: NaiveDate,
-    tables: &[&str],
+    tables: &[Table],
     bundles: &[Vec<PathBuf>],
     report: &mut Report,
 ) -> Result<()> {
@@ -182,9 +183,8 @@ fn compact_group(
     let id = unique_id();
     let mut tx = Transaction::new(root)?;
     for (i, table) in tables.iter().enumerate() {
-        let destination = PathBuf::from("parquet")
-            .join(table)
-            .join(format!("date={date}"))
+        let destination = Path::new(PARQUET_DIR)
+            .join(table.day_folder(date))
             .join(format!("compact-{id}.parquet"));
         let stage = tx.stage(destination);
         let mut writer: Option<ArrowWriter<File>> = None;
@@ -244,7 +244,7 @@ fn confirmed_archives(receipts: &[PathBuf]) -> Result<HashSet<String>> {
 /// When a feed archive was fetched, in unix ms. `None` for anything that isn't a feed archive.
 fn feed_archive_time(name: &str) -> Option<i64> {
     let (id, time) = name.strip_suffix(".json.gz")?.rsplit_once('-')?;
-    wfmt_types::is_feed(id).then(|| time.parse().ok())?
+    wfmt_types::Feed::from_id(id).and_then(|_| time.parse().ok())
 }
 
 /// Deletes committed feed archives older than `retention`, returning how many. They overlap
@@ -551,11 +551,11 @@ mod tests {
         let store = Store::new(root.clone());
         let mut sink = ParquetSink::new(root.join("parquet"));
         let now: DateTime<Utc> = "2026-11-03T12:00:00Z".parse()?;
-        let expired = raw("2026-11-03T05:59:59Z", wfmt_types::FEED_RECENT)?;
-        let yesterday = raw("2026-11-02T23:00:00Z", wfmt_types::FEED_POPULAR)?;
-        let fresh = raw("2026-11-03T06:00:01Z", wfmt_types::FEED_RECENT)?;
+        let expired = raw("2026-11-03T05:59:59Z", wfmt_types::Feed::Recent.as_str())?;
+        let yesterday = raw("2026-11-02T23:00:00Z", wfmt_types::Feed::Popular.as_str())?;
+        let fresh = raw("2026-11-03T06:00:01Z", wfmt_types::Feed::Recent.as_str())?;
         let weapon = raw("2026-11-03T01:00:00Z", "kulstar")?;
-        let uncommitted = raw("2026-11-03T02:00:00Z", wfmt_types::FEED_POPULAR)?;
+        let uncommitted = raw("2026-11-03T02:00:00Z", wfmt_types::Feed::Popular.as_str())?;
         for raw in [&yesterday, &expired, &fresh, &weapon] {
             store.save_raw(raw)?;
             sink.prepare(raw.scraped_at)?;

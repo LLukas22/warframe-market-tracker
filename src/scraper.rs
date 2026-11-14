@@ -543,10 +543,10 @@ fn RecentFetches(entries: Vec<FetchLog>, now: i64) -> Element {
 }
 
 fn weapon_name(slug: &str) -> String {
-    match slug {
-        wfmt_types::FEED_RECENT => return "Most recent feed".into(),
-        wfmt_types::FEED_POPULAR => return "Popular feed".into(),
-        _ => {}
+    match wfmt_types::Feed::from_id(slug) {
+        Some(wfmt_types::Feed::Recent) => return "Most recent feed".into(),
+        Some(wfmt_types::Feed::Popular) => return "Popular feed".into(),
+        None => {}
     }
     slug.split('_')
         .map(|word| {
@@ -632,7 +632,7 @@ mod tests {
                 settings: Settings {
                     sweep_interval_hours: 12.0,
                     request_interval_secs: 3.0,
-                    sort_by: vec!["price_asc".into(), "price_desc".into()],
+                    sort_by: vec![wfmt_types::SortBy::PriceAsc, wfmt_types::SortBy::PriceDesc],
                     verify_missing: 0,
                     weapons: 100,
                 },

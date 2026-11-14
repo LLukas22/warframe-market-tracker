@@ -50,7 +50,7 @@ pub fn check_fit(riven: &ScannedRiven) -> String {
     else {
         return "no weapon".into();
     };
-    let Some(class) = WeaponClass::from_wfm(&weapon.riven_type, &weapon.group) else {
+    let Some(class) = WeaponClass::of(weapon.riven_type, weapon.group) else {
         return format!("unknown riven type {}", weapon.riven_type);
     };
     let inputs: Vec<AttrInput> = riven

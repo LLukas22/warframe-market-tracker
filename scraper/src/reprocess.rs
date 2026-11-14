@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use wfmt_types::layout::PARQUET_DIR;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -57,7 +58,7 @@ pub fn reprocess(
         registry: Registry::open(result.registry_path())?,
         tracker: Tracker::open(result.seen_dir()),
     };
-    let mut sink = ParquetSink::new(result.root().join("parquet"));
+    let mut sink = ParquetSink::new(result.root().join(PARQUET_DIR));
 
     // Chronological order matters for ids and gone detection.
     let mut files = store.raw_files()?;
@@ -79,7 +80,7 @@ pub fn reprocess(
     let mut gone = 0;
     for (i, path) in files.iter().enumerate() {
         let raw = RawResponse::read(path)?;
-        if wfmt_types::is_feed(&raw.weapon) {
+        if raw.feed().is_some() {
             pipeline
                 .process_feed(&all_weapons, &raw, &mut sink)
                 .with_context(|| format!("processing {}", path.display()))?;
@@ -116,7 +117,7 @@ pub fn reprocess(
             .root()
             .join(format!("backup-{}", Utc::now().format("%Y%m%dT%H%M%S")));
         std::fs::create_dir_all(&backup)?;
-        for name in ["parquet", "rivens.jsonl", "seen"] {
+        for name in [PARQUET_DIR, "rivens.jsonl", "seen"] {
             let current = store.root().join(name);
             if current.exists() {
                 std::fs::rename(&current, backup.join(name))?;
@@ -213,7 +214,7 @@ mod tests {
             "pc".into(),
             vec![RawPage {
                 buyout_policy: None,
-                sort_by: "price_asc".into(),
+                sort_by: wfmt_types::SortBy::PriceAsc.into(),
                 body: r#"{"payload":{"auctions":[]}}"#.into(),
             }],
             Vec::new(),

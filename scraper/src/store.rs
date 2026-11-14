@@ -15,6 +15,10 @@
 //! parquet/gone/date=<date>/*.parquet         auctions that disappeared (sold or removed)
 //! ```
 
+use wfmt_types::layout::{PARQUET_DIR, Table};
+use wfmt_types::{Feed, SortBy};
+
+use crate::wfm::BuyoutPolicy;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Read;
@@ -239,11 +243,43 @@ fn default_complete() -> bool {
 
 #[derive(Serialize, Deserialize)]
 pub struct RawPage {
-    pub sort_by: String,
+    /// Named `sort_by` in archives since feeds were added; a feed page has its feed's id.
+    pub sort_by: PageKind,
     /// Search scope; absent in archives made before supplemental direct-sale sampling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub buyout_policy: Option<String>,
+    pub buyout_policy: Option<BuyoutPolicy>,
     pub body: String,
+}
+
+/// What a raw page came from. Stored as the plain name of either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PageKind {
+    /// A weapon's search, in this order.
+    Search(SortBy),
+    Feed(Feed),
+}
+
+impl PageKind {
+    /// How rows name the page they were seen on (their `source`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Search(order) => order.as_str(),
+            Self::Feed(feed) => feed.as_str(),
+        }
+    }
+}
+
+impl From<SortBy> for PageKind {
+    fn from(order: SortBy) -> Self {
+        Self::Search(order)
+    }
+}
+
+impl From<Feed> for PageKind {
+    fn from(feed: Feed) -> Self {
+        Self::Feed(feed)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,6 +289,11 @@ pub struct Verified {
 }
 
 impl RawResponse {
+    /// The feed this is a poll of, `None` for a weapon's search.
+    pub fn feed(&self) -> Option<Feed> {
+        Feed::from_id(&self.weapon)
+    }
+
     pub fn file_name(&self) -> String {
         format!(
             "{}-{}.json.gz",
@@ -290,7 +331,7 @@ impl RawResponse {
         {
             raw.pages.push(RawPage {
                 buyout_policy: None,
-                sort_by: "price_asc".into(),
+                sort_by: SortBy::PriceAsc.into(),
                 body,
             });
         }
@@ -360,11 +401,11 @@ impl ParquetSink {
         let mut tables = Vec::new();
         // Auctions and attributes are always written as a pair (the web UI joins them).
         if !self.auctions.is_empty() || !self.attributes.is_empty() {
-            tables.push(("auctions", auctions_batch(&self.auctions)?));
-            tables.push(("attributes", attributes_batch(&self.attributes)?));
+            tables.push((Table::Auctions, auctions_batch(&self.auctions)?));
+            tables.push((Table::Attributes, attributes_batch(&self.attributes)?));
         }
         if !self.gone.is_empty() {
-            tables.push(("gone", gone_batch(&self.gone)?));
+            tables.push((Table::Gone, gone_batch(&self.gone)?));
         }
         let receipt = PathBuf::from("raw")
             .join(date.to_string())
@@ -373,9 +414,8 @@ impl ParquetSink {
         let destinations: Vec<_> = tables
             .iter()
             .map(|(table, _)| {
-                PathBuf::from("parquet")
-                    .join(table)
-                    .join(format!("date={date}"))
+                Path::new(PARQUET_DIR)
+                    .join(table.day_folder(date))
                     .join(format!("part-{stamp}.parquet"))
             })
             .collect();

@@ -4,6 +4,7 @@
 //! sequential client that keeps a fixed gap between calls and backs off on 429/5xx.
 
 use std::time::{Duration, Instant};
+use wfmt_types::{Feed, RivenType, SortBy, WeaponClass, WeaponGroup};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -140,7 +141,7 @@ impl Client {
     }
 
     /// Raw riven auction search body for one weapon.
-    pub async fn auctions_raw(&mut self, weapon: &str, sort_by: &str) -> Result<String> {
+    pub async fn auctions_raw(&mut self, weapon: &str, sort_by: SortBy) -> Result<String> {
         self.auctions_raw_scoped(weapon, sort_by, None).await
     }
 
@@ -148,25 +149,43 @@ impl Client {
     pub async fn auctions_raw_scoped(
         &mut self,
         weapon: &str,
-        sort_by: &str,
-        buyout_policy: Option<&str>,
+        sort_by: SortBy,
+        buyout_policy: Option<BuyoutPolicy>,
     ) -> Result<String> {
         let mut path =
             format!("/v1/auctions/search?type=riven&weapon_url_name={weapon}&sort_by={sort_by}");
         if let Some(policy) = buyout_policy {
-            path.push_str(&format!("&buyout_policy={policy}"));
+            path.push_str(&format!("&buyout_policy={}", policy.as_str()));
         }
         self.get(&path).await
     }
 
     /// Raw body of a site-wide feed. Same shape as a search, but mixes weapons and item types.
-    pub async fn feed_raw(&mut self, feed: &str) -> Result<String> {
+    pub async fn feed_raw(&mut self, feed: Feed) -> Result<String> {
         let path = match feed {
-            wfmt_types::FEED_RECENT => "/v1/auctions",
-            wfmt_types::FEED_POPULAR => "/v1/auctions/popular",
-            _ => bail!("unknown feed {feed}"),
+            Feed::Recent => "/v1/auctions",
+            Feed::Popular => "/v1/auctions/popular",
         };
         self.get(path).await
+    }
+}
+
+/// Which auctions a search returns, besides all of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuyoutPolicy {
+    /// Direct sales: a fixed price, no bidding.
+    Direct,
+    /// Bidding auctions that also have a buyout price.
+    With,
+}
+
+impl BuyoutPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::With => "with",
+        }
     }
 }
 
@@ -192,8 +211,8 @@ pub struct Weapon {
     #[serde(default)]
     pub game_ref: String,
     #[serde(default)]
-    pub group: String,
-    pub riven_type: String,
+    pub group: WeaponGroup,
+    pub riven_type: RivenType,
     /// Stale on warframe.market since the rework; only useful as the legacy value.
     #[serde(default)]
     pub disposition: Option<f64>,
@@ -207,7 +226,12 @@ impl Weapon {
     }
 
     pub fn is_bow(&self) -> bool {
-        self.riven_type != "melee" && self.game_ref.to_ascii_lowercase().contains("bow")
+        wfmt_types::market::is_bow(self.riven_type, &self.game_ref)
+    }
+
+    /// `None` for a riven type the stat model doesn't know.
+    pub fn class(&self) -> Option<WeaponClass> {
+        WeaponClass::of(self.riven_type, self.group)
     }
 }
 

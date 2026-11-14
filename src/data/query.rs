@@ -2,19 +2,27 @@
 
 use super::*;
 
-/// A weapon class as the browser gets it.
-pub(super) fn class_name(class: Option<WeaponClass>) -> &'static str {
+/// Each riven's newest current auction, see [`Inner::newest_current`].
+pub(super) type Newest = Table<RivenId, Option<AuctionId>>;
+
+/// One bit per weapon class, and one for weapons without a class.
+fn class_bit(class: Option<WeaponClass>) -> u8 {
+    1 << class.map_or(WeaponClass::ALL.len(), |c| c as usize)
+}
+
+/// Classes in the order the browser lists them: by name, the unknown one where "unknown" goes.
+fn class_order(class: &Option<WeaponClass>) -> &'static str {
     class.map_or("unknown", WeaponClass::as_str)
 }
 
-/// A map from dense indexes (auctions, rivens) to an optional value, for one chart bucket.
-/// A vector with a list of the slots in use, so a bucket costs what it holds, not the size.
-pub(super) struct BucketSlots {
+/// A map from ids (auctions, rivens) to an optional value, for one chart bucket. A vector
+/// with a list of the slots in use, so a bucket costs what it holds, not the size.
+pub(super) struct BucketSlots<I> {
     pub(super) slots: Vec<i64>,
-    pub(super) touched: Vec<u32>,
+    pub(super) touched: Vec<I>,
 }
 
-impl BucketSlots {
+impl<I: Id> BucketSlots<I> {
     const EMPTY: i64 = i64::MIN;
     /// Present without a price.
     const NONE: i64 = i64::MIN + 1;
@@ -26,23 +34,23 @@ impl BucketSlots {
         }
     }
 
-    fn slot(&mut self, index: u32) -> &mut i64 {
-        let slot = &mut self.slots[index as usize];
+    fn slot(&mut self, index: I) -> &mut i64 {
+        let slot = &mut self.slots[index.index()];
         if *slot == Self::EMPTY {
             self.touched.push(index);
         }
         slot
     }
 
-    fn set(&mut self, index: u32, price: Option<i64>) {
+    fn set(&mut self, index: I, price: Option<i64>) {
         *self.slot(index) = price.unwrap_or(Self::NONE);
     }
 
     /// The entries in insertion order, leaving the map empty.
-    fn drain(&mut self) -> impl Iterator<Item = (u32, Option<i64>)> + '_ {
+    fn drain(&mut self) -> impl Iterator<Item = (I, Option<i64>)> + '_ {
         let slots = &mut self.slots;
         self.touched.drain(..).map(move |index| {
-            let value = std::mem::replace(&mut slots[index as usize], Self::EMPTY);
+            let value = std::mem::replace(&mut slots[index.index()], Self::EMPTY);
             (index, (value != Self::NONE).then_some(value))
         })
     }
@@ -71,7 +79,13 @@ pub(super) fn bucket_hours_for(span_ms: i64) -> u32 {
 
 impl Inner {
     /// `matches` on the row; only stat filters look at the auction itself.
-    pub(super) fn row_matches(&self, r: &Row, a: &Auction, q: &Query, weapon: Option<u16>) -> bool {
+    pub(super) fn row_matches(
+        &self,
+        r: &Row,
+        a: &Auction,
+        q: &Query,
+        weapon: Option<WeaponId>,
+    ) -> bool {
         if q.riven_id.is_some() {
             return self.matches(a, q, weapon);
         }
@@ -79,20 +93,20 @@ impl Inner {
             return false;
         }
         if q.price_changed || q.owner_changed {
-            let changes = self.riven_changes[r.riven as usize];
+            let changes = self.riven_changes[r.riven];
             if (q.price_changed && !changes.price) || (q.owner_changed && !changes.owner) {
                 return false;
             }
         }
-        if (!q.include_unfit && !r.has(Row::FIT_OK))
-            || (!q.include_legacy && r.has(Row::LEGACY))
+        if (!q.include_unfit && !r.has(RowFlags::FIT_OK))
+            || (!q.include_legacy && r.has(RowFlags::LEGACY))
             || (q.min_quality > 0.0 && (r.mean_quality.is_nan() || r.mean_quality < q.min_quality))
         {
             return false;
         }
         match &q.curse {
-            CurseFilter::None if r.has(Row::CURSED) => return false,
-            CurseFilter::Required if !r.has(Row::CURSED) => return false,
+            CurseFilter::None if r.has(RowFlags::CURSED) => return false,
+            CurseFilter::Required if !r.has(RowFlags::CURSED) => return false,
             _ => {}
         }
         if !q.positives.is_empty() || matches!(q.curse, CurseFilter::Attr(_)) {
@@ -101,8 +115,8 @@ impl Inner {
         true
     }
 
-    pub(super) fn price_outlier(&self, weapon: u16, price: Option<i64>) -> bool {
-        match (self.weapons[weapon as usize].price_limit, price) {
+    pub(super) fn price_outlier(&self, weapon: WeaponId, price: Option<i64>) -> bool {
+        match (self.weapons[weapon].price_limit, price) {
             (Some(limit), Some(price)) => price > limit,
             _ => false,
         }
@@ -110,7 +124,7 @@ impl Inner {
 
     /// A gone event still holds if the auction wasn't seen again afterwards.
     pub(super) fn gone_valid(&self, g: &GoneEvent) -> bool {
-        self.auctions[g.auction as usize].last_seen <= g.t
+        self.auctions[g.auction].last_seen <= g.t
     }
 
     pub(super) fn is_current(&self, a: &Auction) -> bool {
@@ -118,35 +132,34 @@ impl Inner {
         a.gone.is_none_or(|g| a.last_seen > g.at)
     }
 
-    pub(super) fn newer(&self, a: u32, b: u32) -> bool {
-        recency(&self.auctions[a as usize]) > recency(&self.auctions[b as usize])
+    pub(super) fn newer(&self, a: AuctionId, b: AuctionId) -> bool {
+        recency(&self.auctions[a]) > recency(&self.auctions[b])
     }
 
-    /// Each riven's newest current auction, or `u32::MAX`. A relist replaces the auction
-    /// before it, so only this copy stands for the riven, whatever the others ask.
-    pub(super) fn newest_current(&self, rows: &[Row]) -> Vec<u32> {
-        let mut newest = vec![u32::MAX; self.rivens.len()];
-        for (index, r) in rows.iter().enumerate() {
-            if !r.has(Row::CURRENT) {
+    /// Each riven's newest current auction. A relist replaces the auction before it, so only
+    /// this copy stands for the riven, whatever the others ask.
+    pub(super) fn newest_current(&self, rows: &Table<AuctionId, Row>) -> Newest {
+        let mut newest = self.rivens.same_ids(None);
+        for (index, r) in rows.enumerate() {
+            if !r.has(RowFlags::CURRENT) {
                 continue;
             }
-            let slot = &mut newest[r.riven as usize];
-            if *slot == u32::MAX || self.newer(index as u32, *slot) {
-                *slot = index as u32;
+            let slot = &mut newest[r.riven];
+            if slot.is_none_or(|n| self.newer(index, n)) {
+                *slot = Some(index);
             }
         }
         newest
     }
 
     /// The auction disappeared but its riven is listed again in a newer one: relisted, not sold.
-    pub(super) fn superseded(&self, newest: &[u32], auction: u32) -> bool {
-        let n = newest[self.auctions[auction as usize].riven as usize];
-        n != u32::MAX && n != auction && self.newer(n, auction)
+    pub(super) fn superseded(&self, newest: &Newest, auction: AuctionId) -> bool {
+        newest[self.auctions[auction].riven].is_some_and(|n| n != auction && self.newer(n, auction))
     }
 
     pub(super) fn thumb(&self, slug: &str) -> Option<String> {
         let index = *self.weapon_index.get(slug)?;
-        self.weapons[index as usize].thumb.clone()
+        self.weapons[index].thumb.clone()
     }
 
     pub fn live(&self) -> (u32, u64) {
@@ -154,39 +167,25 @@ impl Inner {
     }
 
     pub fn overview(&self) -> Overview {
-        let mut listings = vec![0u32; self.weapons.len()];
+        let mut listings = self.weapons.same_ids(0u32);
         // Sane current prices per weapon, for the median/cheapest shown in the weapon list.
-        let mut prices: Vec<Vec<i64>> = vec![Vec::new(); self.weapons.len()];
-        // Which weapon classes each attribute was seen on, as a bitmask over the few classes:
-        // this visits every attribute of every auction.
-        let mut class_names: Vec<Option<WeaponClass>> = Vec::new();
-        let weapon_class: Vec<usize> = self
-            .weapons
-            .iter()
-            .map(|w| match class_names.iter().position(|c| *c == w.class) {
-                Some(i) => i,
-                None => {
-                    class_names.push(w.class);
-                    class_names.len() - 1
-                }
-            })
-            .collect();
-        assert!(
-            class_names.len() <= u128::BITS as usize,
-            "class bitmask overflow"
-        );
-        let mut classes = vec![0u128; self.attrs.len()];
+        let mut prices = self.weapons.same_ids(Vec::new());
+        // Which weapon classes each attribute was seen on, as a bitmask: this visits every
+        // attribute of every auction.
+        let weapon_class: Table<WeaponId, u8> =
+            self.weapons.iter().map(|w| class_bit(w.class)).collect();
+        let mut classes = self.attrs.same_ids(0u8);
         let newest = self.newest_current(&self.rows());
-        for (index, a) in self.auctions.iter().enumerate() {
-            let class = 1u128 << weapon_class[a.weapon as usize];
+        for (index, a) in self.auctions.enumerate() {
+            let class = weapon_class[a.weapon];
             for attr in &a.attrs {
-                classes[attr.attr as usize] |= class;
+                classes[attr.attr] |= class;
             }
             // One listing per riven: its newest current copy.
-            if newest[a.riven as usize] != index as u32 {
+            if newest[a.riven] != Some(index) {
                 continue;
             }
-            listings[a.weapon as usize] += 1;
+            listings[a.weapon] += 1;
             let price = price_of(a.buyout_price, a.top_bid, a.starting_price);
             if let Some(p) = price.filter(|p| *p >= MIN_PRICE)
                 && !self.price_outlier(a.weapon, price)
@@ -194,22 +193,22 @@ impl Inner {
                 && a.fit_ok
                 && a.legacy_stats != Some(true)
             {
-                prices[a.weapon as usize].push(p);
+                prices[a.weapon].push(p);
             }
         }
         let week_ago = now_ms() - WEEK_MS;
-        let mut gone_prices: Vec<Vec<i64>> = vec![Vec::new(); self.weapons.len()];
+        let mut gone_prices = self.weapons.same_ids(Vec::new());
         for g in self.gone.iter().filter(|g| {
             g.t >= week_ago && self.gone_valid(g) && !self.superseded(&newest, g.auction)
         }) {
-            let a = &self.auctions[g.auction as usize];
+            let a = &self.auctions[g.auction];
             if let Some(p) = g.price.filter(|p| *p >= MIN_PRICE)
                 && !self.price_outlier(a.weapon, g.price)
                 && g.direct_sell
                 && a.fit_ok
                 && a.legacy_stats != Some(true)
             {
-                gone_prices[a.weapon as usize].push(p);
+                gone_prices[a.weapon].push(p);
             }
         }
         let mut weapons: Vec<WeaponInfo> = self
@@ -225,8 +224,8 @@ impl Inner {
                     gone_median_7d: median(gone),
                     slug: w.slug.clone(),
                     name: w.name.clone(),
-                    class: class_name(w.class).to_owned(),
-                    group: w.group.clone(),
+                    class: w.class,
+                    group: w.group,
                     has_image: w.thumb.is_some(),
                     listings,
                     median_price: prices.get(prices.len() / 2).copied(),
@@ -241,13 +240,11 @@ impl Inner {
             .iter()
             .zip(classes)
             .map(|(slug, mask)| {
-                let mut classes: Vec<String> = class_names
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| mask & (1 << i) != 0)
-                    .map(|(_, c)| class_name(*c).to_owned())
+                let mut classes: Vec<Option<WeaponClass>> = std::iter::once(None)
+                    .chain(WeaponClass::ALL.iter().copied().map(Some))
+                    .filter(|c| mask & class_bit(*c) != 0)
                     .collect();
-                classes.sort();
+                classes.sort_by_key(class_order);
                 AttrInfo {
                     slug: slug.clone(),
                     name: crate::api::attribute_name(slug),
@@ -265,14 +262,14 @@ impl Inner {
         }
     }
 
-    pub(super) fn matches(&self, a: &Auction, q: &Query, weapon: Option<u16>) -> bool {
+    pub(super) fn matches(&self, a: &Auction, q: &Query, weapon: Option<WeaponId>) -> bool {
         if let Some(prefix) = &q.riven_id {
-            return self.rivens[a.riven as usize].starts_with(prefix.as_str());
+            return self.rivens[a.riven].starts_with(prefix.as_str());
         }
         if weapon.is_some_and(|w| w != a.weapon) {
             return false;
         }
-        let changes = self.riven_changes[a.riven as usize];
+        let changes = self.riven_changes[a.riven];
         if (q.price_changed && !changes.price) || (q.owner_changed && !changes.owner) {
             return false;
         }
@@ -314,15 +311,15 @@ impl Inner {
     }
 
     pub(super) fn listing(&self, a: &Auction) -> Listing {
-        let w = &self.weapons[a.weapon as usize];
-        let copies = &self.riven_auctions[a.riven as usize];
+        let w = &self.weapons[a.weapon];
+        let copies = &self.riven_auctions[a.riven];
         let sellers: HashSet<&str> = copies
             .iter()
-            .map(|&i| self.auctions[i as usize].owner_name.as_str())
+            .map(|&i| self.auctions[i].owner_name.as_str())
             .collect();
         Listing {
             auction_id: a.id.clone(),
-            riven_id: self.rivens[a.riven as usize].clone(),
+            riven_id: self.rivens[a.riven].clone(),
             price_outlier: self.price_outlier(a.weapon, auction_price(a)),
             price_limit: w.price_limit,
             copies: copies.len() as u32,
@@ -354,7 +351,7 @@ impl Inner {
                 .attrs
                 .iter()
                 .map(|x| AttrView {
-                    slug: self.attrs[x.attr as usize].clone(),
+                    slug: self.attrs[x.attr].clone(),
                     positive: x.positive,
                     value: x.value,
                     value_rank8: x.value_rank8,
@@ -437,14 +434,14 @@ impl Inner {
             None => None,
         };
         let rows = self.rows();
-        let matching: Vec<bool> = match &q.riven_id {
+        let matching: Table<AuctionId, bool> = match &q.riven_id {
             // Ignores all other filters: find the rivens, then mark their auctions.
             Some(prefix) => {
-                let mut matching = vec![false; self.auctions.len()];
-                for (riven, id) in self.rivens.iter().enumerate() {
+                let mut matching = self.auctions.same_ids(false);
+                for (riven, id) in self.rivens.enumerate() {
                     if id.starts_with(prefix.as_str()) {
                         for &a in &self.riven_auctions[riven] {
-                            matching[a as usize] = true;
+                            matching[a] = true;
                         }
                     }
                 }
@@ -460,22 +457,23 @@ impl Inner {
         // Current listings, one per riven: its newest copy, which must match by itself; an
         // older copy it replaced never stands in, even when that one is cheaper or matches.
         // Indexed by riven rather than hashed: this visits every auction, ~100k.
-        let price = |i: u32| rows[i as usize].price().unwrap_or(0);
+        let price = |i: AuctionId| rows[i].price().unwrap_or(0);
         let newest = self.newest_current(&rows);
         // Invalid prices are hidden unless asked for. An id search shows everything, and the
         // charts below only count them for that one riven: they'd swamp any analysis.
         let id_search = q.riven_id.is_some();
         let show_outliers = q.include_outliers || id_search;
-        let (mut current, hidden): (Vec<u32>, Vec<u32>) = newest
+        let (mut current, hidden): (Vec<AuctionId>, Vec<AuctionId>) = newest
             .iter()
             .copied()
+            .flatten()
             .filter(|&i| {
-                i != u32::MAX && matching[i as usize] && {
-                    let r = &rows[i as usize];
-                    Self::price_ok(q, r.price(), r.has(Row::DIRECT))
+                matching[i] && {
+                    let r = &rows[i];
+                    Self::price_ok(q, r.price(), r.has(RowFlags::DIRECT))
                 }
             })
-            .partition(|&i| show_outliers || !rows[i as usize].outlier());
+            .partition(|&i| show_outliers || !rows[i].outlier());
         let outliers_hidden = hidden.len();
         let total = current.len();
         let page = |gone: bool| {
@@ -490,13 +488,13 @@ impl Inner {
         // A total order (ids are unique), so selecting the page and sorting only it gives
         // the same rows as sorting everything.
         // Compares rows first and reads the ids only for ties.
-        let id = |i: u32| self.auctions[i as usize].id.as_str();
-        let quality = |i: u32| {
-            let q = rows[i as usize].mean_quality;
+        let id = |i: AuctionId| self.auctions[i].id.as_str();
+        let quality = |i: AuctionId| {
+            let q = rows[i].mean_quality;
             if q.is_nan() { -1.0 } else { q }
         };
-        let order = |&a: &u32, &b: &u32| {
-            let (ra, rb) = (&rows[a as usize], &rows[b as usize]);
+        let order = |&a: &AuctionId, &b: &AuctionId| {
+            let (ra, rb) = (&rows[a], &rows[b]);
             match q.sort {
                 Sort::PriceAsc => price(a).cmp(&price(b)),
                 Sort::PriceDesc => price(b).cmp(&price(a)),
@@ -514,7 +512,7 @@ impl Inner {
         let listings = current
             .into_iter()
             .skip(offset)
-            .map(|i| self.listing(&self.auctions[i as usize]))
+            .map(|i| self.listing(&self.auctions[i]))
             .collect();
 
         // The period limits the chart and the disappeared listings; current listings are current.
@@ -534,19 +532,19 @@ impl Inner {
             .iter()
             .filter(|g| {
                 in_period(g.t)
-                    && matching[g.auction as usize]
+                    && matching[g.auction]
                     && self.gone_valid(g)
                     && !self.superseded(&newest, g.auction)
                     && Self::price_ok(q, g.price, g.direct_sell)
             })
             .collect();
-        let gone_outlier = |g: &GoneEvent| rows[g.auction as usize].outlier_price(g.price);
+        let gone_outlier = |g: &GoneEvent| rows[g.auction].outlier_price(g.price);
         let mut seen_rivens = HashSet::default();
         let recent_gone: Vec<&GoneEvent> = gone_events
             .iter()
             .rev()
             .filter(|g| show_outliers || !gone_outlier(g))
-            .filter(|g| seen_rivens.insert(self.auctions[g.auction as usize].riven))
+            .filter(|g| seen_rivens.insert(self.auctions[g.auction].riven))
             .copied()
             .collect();
         let gone_total = recent_gone.len();
@@ -554,7 +552,7 @@ impl Inner {
             .into_iter()
             .skip(offset)
             .take(page(true))
-            .map(|g| self.listing(&self.auctions[g.auction as usize]))
+            .map(|g| self.listing(&self.auctions[g.auction]))
             .collect();
 
         if gone_tab.is_some() {
@@ -564,7 +562,7 @@ impl Inner {
                 gone,
                 gone_total,
                 outliers_hidden,
-                price_limit: weapon.and_then(|w| self.weapons[w as usize].price_limit),
+                price_limit: weapon.and_then(|w| self.weapons[w].price_limit),
                 history: Vec::new(),
                 bucket_hours: DAY_BUCKET_HOURS,
                 server_time: now,
@@ -587,13 +585,13 @@ impl Inner {
         // plus the last prices of rivens that disappeared in that bucket.
         let bucket = i64::from(bucket_hours) * HOUR_MS;
         let bucket_of = |t: i64| t - t.rem_euclid(bucket);
-        let mut gone_by_bucket: HashMap<i64, HashMap<u32, i64>> = HashMap::default();
+        let mut gone_by_bucket: HashMap<i64, HashMap<RivenId, i64>> = HashMap::default();
         for g in gone_events.iter().filter(|g| id_search || !gone_outlier(g)) {
             if let Some(p) = g.price {
                 gone_by_bucket
                     .entry(bucket_of(g.t))
                     .or_default()
-                    .insert(self.auctions[g.auction as usize].riven, p);
+                    .insert(self.auctions[g.auction].riven, p);
             }
         }
         let mut history = Vec::new();
@@ -604,16 +602,18 @@ impl Inner {
         // falls outside the filter, the riven does too.
         // Indexed by auction and riven rather than hashed, since a long period visits
         // a million observations; `touched` lists the slots to read and reset.
-        let mut prices = BucketSlots::new(self.auctions.len());
+        let mut prices = BucketSlots::<AuctionId>::new(self.auctions.len());
         // Per riven, the position of its newest copy in `seen`.
-        let mut newest_seen = BucketSlots::new(self.rivens.len());
-        let mut seen: Vec<(u32, Option<i64>)> = Vec::new();
-        let mut flush = |t: i64, prices: &mut BucketSlots| {
+        let mut newest_seen = BucketSlots::<RivenId>::new(self.rivens.len());
+        let mut seen: Vec<(AuctionId, Option<i64>)> = Vec::new();
+        let mut flush = |t: i64, prices: &mut BucketSlots<AuctionId>| {
             seen.clear();
             seen.extend(prices.drain());
             for (pos, &(auction, _)) in seen.iter().enumerate() {
-                let slot = newest_seen.slot(rows[auction as usize].riven);
-                if *slot == BucketSlots::EMPTY || self.newer(auction, seen[*slot as usize].0) {
+                let slot = newest_seen.slot(rows[auction].riven);
+                if *slot == BucketSlots::<RivenId>::EMPTY
+                    || self.newer(auction, seen[*slot as usize].0)
+                {
                     *slot = pos as i64;
                 }
             }
@@ -660,7 +660,7 @@ impl Inner {
         // every one of up to a million observations would cost more than the rest.
         let mut bucket_end = i64::MIN;
         for o in observations {
-            if !matching[o.auction as usize] {
+            if !matching[o.auction] {
                 continue;
             }
             if o.t >= bucket_end {
@@ -673,7 +673,7 @@ impl Inner {
             }
             let price = o.price();
             let eligible = Self::price_ok(q, price, o.direct_sell)
-                && (id_search || !rows[o.auction as usize].outlier_price(price));
+                && (id_search || !rows[o.auction].outlier_price(price));
             prices.set(o.auction, price.filter(|_| eligible));
         }
         if let Some(prev) = current_bucket {
@@ -686,7 +686,7 @@ impl Inner {
             gone,
             gone_total,
             outliers_hidden,
-            price_limit: weapon.and_then(|w| self.weapons[w as usize].price_limit),
+            price_limit: weapon.and_then(|w| self.weapons[w].price_limit),
             history,
             bucket_hours,
             server_time: now,
@@ -702,7 +702,7 @@ impl Inner {
         };
         // Verified buyouts only, one per riven: the cheapest copy, ordered by the riven's hash so
         // the held-out rivens are an arbitrary but repeatable selection.
-        let mut cheapest: HashMap<u32, (&Auction, i64)> = HashMap::default();
+        let mut cheapest: HashMap<RivenId, (&Auction, i64)> = HashMap::default();
         // Find the weapon's auctions on the compact rows rather than reading every auction.
         let rows = self.rows();
         let auctions = rows
@@ -726,9 +726,9 @@ impl Inner {
                 *entry = (a, price);
             }
         }
-        let mut rivens: Vec<(u32, &Auction, i64)> =
+        let mut rivens: Vec<(RivenId, &Auction, i64)> =
             cheapest.into_iter().map(|(r, (a, p))| (r, a, p)).collect();
-        rivens.sort_by(|a, b| self.rivens[a.0 as usize].cmp(&self.rivens[b.0 as usize]));
+        rivens.sort_by(|a, b| self.rivens[a.0].cmp(&self.rivens[b.0]));
 
         let mut result = StatEffects {
             rivens: rivens.len() as u32,
@@ -740,7 +740,7 @@ impl Inner {
             return result;
         }
 
-        let mut counts: HashMap<(u16, bool), u32> = HashMap::default();
+        let mut counts: HashMap<(AttrId, bool), u32> = HashMap::default();
         for (_, a, _) in &rivens {
             for attr in &a.attrs {
                 *counts.entry((attr.attr, attr.positive)).or_default() += 1;
@@ -750,7 +750,7 @@ impl Inner {
             .values()
             .filter(|c| **c < EFFECT_MIN_STAT_RIVENS)
             .count() as u32;
-        let mut stats: Vec<(u16, bool)> = counts
+        let mut stats: Vec<(AttrId, bool)> = counts
             .iter()
             .filter(|(_, c)| **c >= EFFECT_MIN_STAT_RIVENS)
             .map(|(s, _)| *s)
@@ -787,7 +787,7 @@ impl Inner {
         for (i, (attr, positive)) in stats.iter().enumerate() {
             let (b, se) = (model.coefficients[i], model.standard_errors[i]);
             let effect = StatEffect {
-                slug: self.attrs[*attr as usize].clone(),
+                slug: self.attrs[*attr].clone(),
                 effect: b.exp_m1(),
                 low: (b - INTERVAL * se).exp_m1(),
                 high: (b + INTERVAL * se).exp_m1(),

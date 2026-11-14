@@ -334,7 +334,7 @@ pub fn ScanEditor(scan: RivenScan, onchange: EventHandler<RivenScan>) -> Element
         .weapon
         .as_ref()
         .and_then(|slug| overview.weapons.iter().find(|w| &w.slug == slug))
-        .map(|w| w.class.clone());
+        .map(|w| w.class);
     // Stats this weapon can roll, plus any the scan has that it can't, so nothing vanishes.
     let mut stats: Vec<(String, String, bool)> = overview
         .attributes

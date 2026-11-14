@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use wfmt_types::layout::{DATE_PREFIX, PARQUET_DIR, Table};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
@@ -30,7 +31,6 @@ use crate::api::HubStatus;
 
 mod pull;
 
-const TABLES: [&str; 3] = ["auctions", "attributes", "gone"];
 const STATE: &str = "hub/upload.json";
 /// Hard links to the files being uploaded, so compaction can't delete them midway.
 const SNAPSHOT: &str = "hub/snapshot";
@@ -346,8 +346,8 @@ fn fingerprint(bytes: &[u8]) -> u64 {
 /// The dates with data in any table.
 fn dates(root: &Path) -> Result<BTreeSet<NaiveDate>> {
     let mut dates = BTreeSet::new();
-    for table in TABLES {
-        let dir = root.join("parquet").join(table);
+    for table in Table::ALL {
+        let dir = root.join(PARQUET_DIR).join(table.as_str());
         if !dir.is_dir() {
             continue;
         }
@@ -356,7 +356,7 @@ fn dates(root: &Path) -> Result<BTreeSet<NaiveDate>> {
             if let Some(date) = entry
                 .file_name()
                 .to_str()
-                .and_then(|name| name.strip_prefix("date="))
+                .and_then(|name| name.strip_prefix(DATE_PREFIX))
                 .and_then(|date| date.parse().ok())
                 && entry.file_type()?.is_dir()
             {
@@ -369,9 +369,9 @@ fn dates(root: &Path) -> Result<BTreeSet<NaiveDate>> {
 
 fn day_files(root: &Path, date: &str) -> Result<BTreeMap<String, u64>> {
     let mut files = BTreeMap::new();
-    for table in TABLES {
-        let folder = format!("{table}/date={date}");
-        let dir = root.join("parquet").join(&folder);
+    for table in Table::ALL {
+        let folder = table.day_folder(date);
+        let dir = root.join(PARQUET_DIR).join(&folder);
         if !dir.is_dir() {
             continue;
         }
@@ -427,7 +427,7 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
         for path in files.keys() {
             let link = snapshot.join(path);
             fs::create_dir_all(link.parent().unwrap())?;
-            let source = root.join("parquet").join(path);
+            let source = root.join(PARQUET_DIR).join(path);
             if fs::hard_link(&source, &link).is_err() {
                 fs::copy(&source, &link)
                     .with_context(|| format!("copying {} for upload", source.display()))?;
@@ -478,7 +478,10 @@ fn day_operations(
         .filter(|(path, size)| remote.get(*path) != Some(*size))
         .map(|(path, _)| CommitOperation::add_file(path, snapshot.join(path)))
         .collect();
-    let folders = TABLES.map(|table| format!("{table}/date={}/", day.date));
+    let folders: Vec<String> = Table::ALL
+        .iter()
+        .map(|table| format!("{}/", table.day_folder(&day.date)))
+        .collect();
     operations.extend(
         remote
             .keys()
@@ -516,10 +519,10 @@ fn dataset_card(dataset: &str, settings: &[String]) -> String {
         header.push("pretty_name: Warframe riven auctions".into());
     }
     header.push("configs:".into());
-    for table in TABLES {
+    for &table in Table::ALL {
         header.push(format!("- config_name: {table}"));
         header.push(format!("  data_files: \"{table}/*/*.parquet\""));
-        if table == "auctions" {
+        if table == Table::Auctions {
             header.push("  default: true".into());
         }
     }
@@ -928,7 +931,7 @@ mod tests {
     #[test]
     fn card_lists_every_table_and_links_back() {
         let card = dataset_card("LLukas22/wf-riven-data", &[]);
-        for table in TABLES {
+        for table in Table::ALL {
             assert!(card.contains(&format!("data_files: \"{table}/*/*.parquet\"")));
         }
         assert!(card.starts_with("---\npretty_name: Warframe riven auctions\nconfigs:\n"));

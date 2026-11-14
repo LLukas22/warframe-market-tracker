@@ -2,31 +2,33 @@
 
 use dioxus::prelude::*;
 
+use wfmt_types::{WeaponClass, WeaponGroup};
+
 use crate::api::{WeaponInfo, looks_like_riven_id};
 use crate::ui::{Route, format_age, format_plat};
 
-pub fn group_label(group: &str) -> &str {
+pub fn group_label(group: WeaponGroup) -> &'static str {
     match group {
-        "primary" => "Primary",
-        "secondary" => "Secondary",
-        "melee" => "Melee",
-        "archgun" => "Archgun",
-        "zaw" => "Zaw",
-        "kitgun" => "Kitgun",
-        "sentinel" => "Companion",
-        "" => "Unknown",
-        other => other,
+        WeaponGroup::Primary => "Primary",
+        WeaponGroup::Secondary => "Secondary",
+        WeaponGroup::Melee => "Melee",
+        WeaponGroup::Archgun => "Archgun",
+        WeaponGroup::Zaw => "Zaw",
+        WeaponGroup::Kitgun => "Kitgun",
+        WeaponGroup::Sentinel => "Companion",
+        WeaponGroup::Unknown => "Unknown",
     }
 }
 
-const GROUPS: &[&str] = &[
-    "primary",
-    "secondary",
-    "melee",
-    "archgun",
-    "zaw",
-    "kitgun",
-    "sentinel",
+/// The weapon list's tabs, in order.
+const GROUPS: &[WeaponGroup] = &[
+    WeaponGroup::Primary,
+    WeaponGroup::Secondary,
+    WeaponGroup::Melee,
+    WeaponGroup::Archgun,
+    WeaponGroup::Zaw,
+    WeaponGroup::Kitgun,
+    WeaponGroup::Sentinel,
 ];
 
 /// Suggestions the weapon picker lists.
@@ -251,7 +253,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                                 }
                                 div { class: "picker-name",
                                     div { "{w.name}" }
-                                    div { class: "muted small", "{group_label(&w.group)}" }
+                                    div { class: "muted small", "{group_label(w.group)}" }
                                 }
                                 div { class: "picker-stats",
                                     if let Some(m) = w.median_price {
@@ -293,7 +295,7 @@ pub fn WeaponHeader(weapon: WeaponInfo, now: Option<i64>) -> Element {
             div { class: "weapon-header-title",
                 h2 { "{w.name}" }
                 div { class: "muted",
-                    "{group_label(&w.group)} · {w.class} riven"
+                    "{group_label(w.group)} · {w.class.map_or(\"unknown\", WeaponClass::as_str)} riven"
                     if let Some(now) = now.filter(|_| w.last_scrape > 0) {
                         " · scraped {format_age(now, w.last_scrape)} ago"
                     }
@@ -340,11 +342,32 @@ enum GridSort {
     Name,
 }
 
+impl GridSort {
+    const ALL: [Self; 3] = [Self::Value, Self::Listings, Self::Name];
+
+    /// How the `<select>` names it.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Value => "value",
+            Self::Listings => "listings",
+            Self::Name => "name",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Value => "Most valuable",
+            Self::Listings => "Most listed",
+            Self::Name => "Name",
+        }
+    }
+}
+
 /// The grid's tab, sort and expansion. Owned by the app shell so they survive visiting a
 /// weapon and coming back.
 #[derive(Clone, Copy)]
 pub struct GridState {
-    group: Signal<Option<&'static str>>,
+    group: Signal<Option<WeaponGroup>>,
     sort: Signal<GridSort>,
     show_all: Signal<bool>,
 }
@@ -402,7 +425,7 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                 }
                 for g in GROUPS.iter().copied() {
                     button {
-                        key: "{g}",
+                        key: "{g.as_str()}",
                         class: if group() == Some(g) { "tab active" } else { "tab" },
                         onclick: move |_| group.set(Some(g)),
                         "{group_label(g)}"
@@ -412,17 +435,17 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
             select {
                 class: "compact",
                 onchange: move |e| {
-                    sort.set(
-                        match e.value().as_str() {
-                            "listings" => GridSort::Listings,
-                            "name" => GridSort::Name,
-                            _ => GridSort::Value,
-                        },
-                    );
+                    let key = e.value();
+                    sort.set(GridSort::ALL.into_iter().find(|s| s.key() == key).unwrap_or(GridSort::Value));
                 },
-                option { value: "value", selected: sort() == GridSort::Value, "Most valuable" }
-                option { value: "listings", selected: sort() == GridSort::Listings, "Most listed" }
-                option { value: "name", selected: sort() == GridSort::Name, "Name" }
+                for option_sort in GridSort::ALL {
+                    option {
+                        key: "{option_sort.key()}",
+                        value: option_sort.key(),
+                        selected: sort() == option_sort,
+                        "{option_sort.label()}"
+                    }
+                }
             }
         }
         div { class: "weapon-grid",
@@ -445,7 +468,7 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                             size: "md",
                         }
                         div { class: "weapon-card-name", "{w.name}" }
-                        div { class: "muted small", "{group_label(&w.group)}" }
+                        div { class: "muted small", "{group_label(w.group)}" }
                         div { class: "weapon-card-stats",
                             if let Some(m) = w.median_price {
                                 span { class: "plat-small", "{format_plat(m)}p" }

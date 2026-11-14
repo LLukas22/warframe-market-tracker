@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 
 use crate::identity::{IdAttr, IdInput, Registry};
-use crate::riven::{self, AttrInput, RivenInput, WeaponClass};
+use wfmt_types::{RivenType, WeaponClass};
+
+use crate::riven::{self, AttrInput, RivenInput};
 use crate::wfm::{Auction, Weapon};
 
 /// Dispositions as listed on warframe.market right after the rework (still pre-rework values).
@@ -22,7 +24,7 @@ pub struct AuctionRow {
     pub weapon_slug: String,
     pub weapon_name: String,
     pub weapon_class: Option<&'static str>,
-    pub riven_type: String,
+    pub riven_type: RivenType,
     pub is_bow: bool,
     pub riven_name: String,
     pub polarity: String,
@@ -114,7 +116,7 @@ impl Normalizer {
         auction_rows: &mut Vec<AuctionRow>,
         attribute_rows: &mut Vec<AttributeRow>,
     ) {
-        let class = WeaponClass::from_wfm(&weapon.riven_type, &weapon.group);
+        let class = weapon.class();
         let legacy = self.legacy_disposition(weapon);
 
         for (auction, source) in auctions {
@@ -209,7 +211,7 @@ impl Normalizer {
                 weapon_slug: weapon.slug.clone(),
                 weapon_name: weapon.name().to_owned(),
                 weapon_class: class.map(WeaponClass::as_str),
-                riven_type: weapon.riven_type.clone(),
+                riven_type: weapon.riven_type,
                 is_bow: weapon.is_bow(),
                 riven_name: item.name.clone(),
                 polarity: item.polarity.clone(),
@@ -270,14 +272,14 @@ mod tests {
         assert_eq!(skipped, 0);
         let auctions: Vec<(Auction, String)> = auctions
             .into_iter()
-            .map(|a| (a, "price_asc".to_owned()))
+            .map(|a| (a, wfmt_types::SortBy::PriceAsc.as_str().to_owned()))
             .collect();
 
         let weapon = Weapon {
             slug: "kulstar".into(),
             game_ref: "/Lotus/Weapons/Grineer/Pistols/GrnTorpedoPistol/GrnTorpedoPistol".into(),
-            group: "secondary".into(),
-            riven_type: "pistol".into(),
+            group: wfmt_types::WeaponGroup::Secondary,
+            riven_type: RivenType::Pistol,
             disposition: Some(1.3),
             i18n: serde_json::json!({"en": {"name": "Kulstar"}}),
         };

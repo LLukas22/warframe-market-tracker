@@ -1071,7 +1071,7 @@ fn Filters(
     let class = weapon
         .as_ref()
         .and_then(|slug| overview.weapons.iter().find(|w| &w.slug == slug))
-        .map(|w| w.class.clone());
+        .map(|w| w.class);
     let available = |slug: &str| {
         class.as_ref().is_none_or(|c| {
             overview
@@ -1097,12 +1097,7 @@ fn Filters(
         .map(|p| (p.clone(), available(p)))
         .collect();
 
-    let curse_value = match &q.curse {
-        CurseFilter::Any => "any".to_owned(),
-        CurseFilter::None => "none".to_owned(),
-        CurseFilter::Required => "required".to_owned(),
-        CurseFilter::Attr(s) => format!("attr:{s}"),
-    };
+    let curse_value = q.curse.key();
     let price_input = |v: Option<i64>| v.map(|v| v.to_string()).unwrap_or_default();
 
     // The date fields show the days a preset covers, and editing one keeps the other as shown.
@@ -1239,23 +1234,19 @@ fn Filters(
                     aria_label: "Negative stat",
                     value: "{curse_value}",
                     onchange: move |e| {
-                        let v = e.value();
-                        let curse = match v.as_str() {
-                            "none" => CurseFilter::None,
-                            "required" => CurseFilter::Required,
-                            s => match s.strip_prefix("attr:") {
-                                Some(slug) => CurseFilter::Attr(slug.to_owned()),
-                                None => CurseFilter::Any,
-                            },
-                        };
+                        let curse = CurseFilter::from_key(&e.value());
                         query.with_mut(|q| q.curse = curse);
                     },
-                    option { value: "any", "Any negative" }
-                    option { value: "none", "No negative" }
-                    option { value: "required", "Has a negative" }
+                    option { value: CurseFilter::Any.key(), "Any negative" }
+                    option { value: CurseFilter::None.key(), "No negative" }
+                    option { value: CurseFilter::Required.key(), "Has a negative" }
                     optgroup { label: "Specific negative",
                         for a in attrs.iter() {
-                            option { key: "{a.slug}", value: "attr:{a.slug}", "−{a.name}" }
+                            option {
+                                key: "{a.slug}",
+                                value: CurseFilter::Attr(a.slug.clone()).key(),
+                                "−{a.name}"
+                            }
                         }
                     }
                 }
@@ -1449,20 +1440,14 @@ fn Results(
                 select {
                     class: "compact",
                     aria_label: "Sort listings",
-                    value: "{sort_value(search_query.sort)}",
+                    value: search_query.sort.key(),
                     onchange: move |e| {
-                        let sort = match e.value().as_str() {
-                            "price_desc" => Sort::PriceDesc,
-                            "quality" => Sort::QualityDesc,
-                            "newest" => Sort::Newest,
-                            _ => Sort::PriceAsc,
-                        };
+                        let sort = Sort::from_key(&e.value()).unwrap_or_default();
                         query.with_mut(|q| q.sort = sort);
                     },
-                    option { value: "price_asc", "Cheapest first" }
-                    option { value: "price_desc", "Most expensive first" }
-                    option { value: "quality", "Best rolls first" }
-                    option { value: "newest", "Newest first" }
+                    for sort in Sort::ALL {
+                        option { key: "{sort.key()}", value: sort.key(), "{sort_label(sort)}" }
+                    }
                 }
             }
         }
@@ -1598,12 +1583,12 @@ fn LoadMore(onload: EventHandler<()>) -> Element {
     }
 }
 
-fn sort_value(sort: Sort) -> &'static str {
+fn sort_label(sort: Sort) -> &'static str {
     match sort {
-        Sort::PriceAsc => "price_asc",
-        Sort::PriceDesc => "price_desc",
-        Sort::QualityDesc => "quality",
-        Sort::Newest => "newest",
+        Sort::PriceAsc => "Cheapest first",
+        Sort::PriceDesc => "Most expensive first",
+        Sort::QualityDesc => "Best rolls first",
+        Sort::Newest => "Newest first",
     }
 }
 

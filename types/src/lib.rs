@@ -57,15 +57,237 @@ pub mod riven {
     }
 }
 
-/// warframe.market's site-wide "most recent" listings. Feed ids name the raw archive, the fetch
-/// log entry and the `source` of the rows they produce.
-pub const FEED_RECENT: &str = "feed_recent";
-/// warframe.market's site-wide "popular" listings.
-pub const FEED_POPULAR: &str = "feed_popular";
+/// Implements `as_str`, `Display` and `FromStr` from a list of variants and their names.
+macro_rules! names {
+    ($ty:ident { $($variant:ident => $name:literal),* $(,)? }) => {
+        impl $ty {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),*];
 
-/// Whether an archive name, log entry or row source is a feed rather than a weapon search.
-pub fn is_feed(id: &str) -> bool {
-    id == FEED_RECENT || id == FEED_POPULAR
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name),*
+                }
+            }
+        }
+
+        impl ::std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl ::std::str::FromStr for $ty {
+            type Err = $crate::market::UnknownName;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|v| v.as_str() == s)
+                    .ok_or_else(|| $crate::market::UnknownName {
+                        kind: stringify!($ty),
+                        name: s.to_owned(),
+                    })
+            }
+        }
+    };
+}
+
+pub mod attributes;
+pub mod layout;
+
+pub use market::{Feed, RivenType, SortBy, Unit, WeaponClass, WeaponGroup};
+
+/// Names warframe.market uses, as enums. They serialize to warframe.market's own spelling, which
+/// is also how archives and parquet files store them.
+pub mod market {
+    use std::fmt;
+
+    use serde::{Deserialize, Serialize};
+
+    /// A name none of an enum's variants has.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct UnknownName {
+        pub kind: &'static str,
+        pub name: String,
+    }
+
+    impl fmt::Display for UnknownName {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "unknown {}: {:?}", self.kind, self.name)
+        }
+    }
+
+    impl std::error::Error for UnknownName {}
+
+    /// warframe.market's site-wide listings. Their ids name the raw archive, the fetch log
+    /// entry and the `source` of the rows they produce, where weapon searches put a weapon.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    pub enum Feed {
+        /// The most recent listings.
+        #[serde(rename = "feed_recent")]
+        Recent,
+        /// The popular listings.
+        #[serde(rename = "feed_popular")]
+        Popular,
+    }
+
+    names!(Feed {
+        Recent => "feed_recent",
+        Popular => "feed_popular",
+    });
+
+    impl Feed {
+        /// The feed an archive name, log entry or row source stands for, if it's one.
+        pub fn from_id(id: &str) -> Option<Self> {
+            id.parse().ok()
+        }
+    }
+
+    /// The order of a weapon's auction search.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum SortBy {
+        PriceAsc,
+        PriceDesc,
+    }
+
+    names!(SortBy {
+        PriceAsc => "price_asc",
+        PriceDesc => "price_desc",
+    });
+
+    /// warframe.market's `rivenType` of a weapon, which is also what attributes' `exclusiveTo`
+    /// lists name. Archguns report `rifle`; only `exclusiveTo` says `archgun`.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum RivenType {
+        Rifle,
+        Shotgun,
+        Pistol,
+        Kitgun,
+        Melee,
+        Zaw,
+        Archgun,
+        /// Anything warframe.market adds later.
+        #[default]
+        #[serde(other)]
+        Unknown,
+    }
+
+    names!(RivenType {
+        Rifle => "rifle",
+        Shotgun => "shotgun",
+        Pistol => "pistol",
+        Kitgun => "kitgun",
+        Melee => "melee",
+        Zaw => "zaw",
+        Archgun => "archgun",
+        Unknown => "unknown",
+    });
+
+    /// warframe.market's weapon `group`, what the weapon list is organized by.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum WeaponGroup {
+        Primary,
+        Secondary,
+        Melee,
+        Archgun,
+        Zaw,
+        Kitgun,
+        /// Companion weapons.
+        Sentinel,
+        /// Missing, or anything warframe.market adds later.
+        #[default]
+        #[serde(other)]
+        Unknown,
+    }
+
+    names!(WeaponGroup {
+        Primary => "primary",
+        Secondary => "secondary",
+        Melee => "melee",
+        Archgun => "archgun",
+        Zaw => "zaw",
+        Kitgun => "kitgun",
+        Sentinel => "sentinel",
+        Unknown => "unknown",
+    });
+
+    /// Which column of the riven stat tables a weapon uses.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum WeaponClass {
+        Rifle,
+        Shotgun,
+        Pistol,
+        Archgun,
+        Melee,
+    }
+
+    names!(WeaponClass {
+        Rifle => "rifle",
+        Shotgun => "shotgun",
+        Pistol => "pistol",
+        Archgun => "archgun",
+        Melee => "melee",
+    });
+
+    impl WeaponClass {
+        /// Kitguns use pistol values, zaws use melee values, archguns have their own column
+        /// even though warframe.market reports them as `rifle`.
+        pub fn of(riven_type: RivenType, group: WeaponGroup) -> Option<Self> {
+            if group == WeaponGroup::Archgun {
+                return Some(Self::Archgun);
+            }
+            match riven_type {
+                RivenType::Rifle => Some(Self::Rifle),
+                RivenType::Shotgun => Some(Self::Shotgun),
+                RivenType::Pistol | RivenType::Kitgun => Some(Self::Pistol),
+                RivenType::Melee | RivenType::Zaw => Some(Self::Melee),
+                RivenType::Archgun => Some(Self::Archgun),
+                RivenType::Unknown => None,
+            }
+        }
+    }
+
+    /// The riven type an attribute's `exclusiveTo` list would name for this weapon.
+    pub fn riven_kind(riven_type: RivenType, group: WeaponGroup) -> RivenType {
+        if group == WeaponGroup::Archgun {
+            RivenType::Archgun
+        } else {
+            riven_type
+        }
+    }
+
+    /// Bows show their fire rate doubled, which the stat model needs to know. `game_ref` is the
+    /// weapon's internal path.
+    pub fn is_bow(riven_type: RivenType, game_ref: &str) -> bool {
+        riven_type != RivenType::Melee && game_ref.to_ascii_lowercase().contains("bow")
+    }
+
+    /// How an attribute's value is shown.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Unit {
+        /// A change in percent, `+12.3%`.
+        Percent,
+        /// Faction damage, a factor: `x1.07`.
+        Multiply,
+        /// Seconds, meters, combo counts, as they are.
+        Raw,
+    }
+
+    impl Unit {
+        /// From an attribute's `unit` on warframe.market, which leaves it out for raw values.
+        pub fn from_wfm(unit: Option<&str>) -> Self {
+            match unit {
+                Some("percent") => Self::Percent,
+                Some("multiply") => Self::Multiply,
+                _ => Self::Raw,
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -145,7 +367,7 @@ pub struct FetchLog {
 pub struct Settings {
     pub sweep_interval_hours: f64,
     pub request_interval_secs: f64,
-    pub sort_by: Vec<String>,
+    pub sort_by: Vec<SortBy>,
     pub verify_missing: usize,
     pub weapons: usize,
 }
@@ -169,6 +391,33 @@ pub struct ScraperStatus {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn names_round_trip_and_match_serde() {
+        for feed in Feed::ALL {
+            assert_eq!(feed.as_str().parse::<Feed>(), Ok(*feed));
+            assert_eq!(serde_json::to_value(feed).unwrap(), feed.as_str());
+        }
+        for order in SortBy::ALL {
+            assert_eq!(order.as_str().parse::<SortBy>(), Ok(*order));
+            assert_eq!(serde_json::to_value(order).unwrap(), order.as_str());
+        }
+        assert!("price".parse::<SortBy>().is_err());
+        for class in WeaponClass::ALL {
+            assert_eq!(class.as_str().parse::<WeaponClass>(), Ok(*class));
+        }
+        // New names from warframe.market must not break the weapon list.
+        let group: WeaponGroup = serde_json::from_str("\"spacegun\"").unwrap();
+        assert_eq!(group, WeaponGroup::Unknown);
+        let riven_type: RivenType = serde_json::from_str("\"spacegun\"").unwrap();
+        assert_eq!(WeaponClass::of(riven_type, group), None);
+        assert_eq!(
+            WeaponClass::of(RivenType::Rifle, WeaponGroup::Archgun),
+            Some(WeaponClass::Archgun)
+        );
+    }
+
     #[test]
     fn user_agent_names_the_project_version_and_repository() {
         assert_eq!(

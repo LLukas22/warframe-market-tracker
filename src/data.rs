@@ -32,8 +32,10 @@ use crate::api::{
 };
 use crate::effects;
 use wfmt_scraper::identity::{IdAttr, IdInput, Registry};
-use wfmt_scraper::riven::{self, AttrInput, RivenInput, WeaponClass};
+use wfmt_scraper::riven::{self, AttrInput, RivenInput};
 use wfmt_scraper::tracking::GoneReason;
+use wfmt_types::layout::PARQUET_DIR;
+use wfmt_types::{RivenType, WeaponClass, WeaponGroup};
 
 const RESCAN_EVERY: Duration = Duration::from_secs(5);
 const LISTING_PAGE_SIZE: usize = 50;
@@ -246,7 +248,7 @@ impl Store {
         if let Some(catalog) = self.changed_catalog() {
             apply_catalog(&mut self.write(), catalog);
         }
-        let parquet = self.dir.join("parquet");
+        let parquet = self.dir.join(PARQUET_DIR);
         let has_new = {
             let inner = self.read();
             part_files(&parquet)
@@ -265,7 +267,7 @@ impl Store {
 
     /// Loads the parts `inner` hasn't loaded yet.
     fn load_pending(dir: &Path, inner: &mut Inner) {
-        let parquet = dir.join("parquet");
+        let parquet = dir.join(PARQUET_DIR);
         let pending: Vec<(PathBuf, PathBuf)> = part_files(&parquet)
             .into_iter()
             .filter(|(a, _)| !inner.loaded.contains(a))
@@ -324,8 +326,7 @@ struct Weapon {
     name: String,
     /// `None` when warframe.market's weapon type is one the stat model doesn't know.
     class: Option<WeaponClass>,
-    /// warframe.market group: primary, secondary, melee, archgun, zaw, kitgun, sentinel.
-    group: String,
+    group: WeaponGroup,
     /// Bows show fire rate doubled, which the stat model needs to know.
     is_bow: bool,
     thumb: Option<String>,
@@ -335,7 +336,7 @@ struct Weapon {
 }
 
 struct Attr {
-    attr: u16,
+    attr: AttrId,
     positive: bool,
     value: f64,
     value_rank8: Option<f64>,
@@ -345,9 +346,8 @@ struct Attr {
 /// Latest known state of an auction.
 struct Auction {
     id: String,
-    weapon: u16,
-    /// Index into `Inner::rivens`.
-    riven: u32,
+    weapon: WeaponId,
+    riven: RivenId,
     gone: Option<Gone>,
     riven_name: String,
     polarity: String,
@@ -391,14 +391,14 @@ struct Observation {
     t: i64,
     /// The price, or `Observation::NO_PRICE`.
     price: i64,
-    auction: u32,
+    auction: AuctionId,
     direct_sell: bool,
 }
 
 impl Observation {
     const NO_PRICE: i64 = i64::MIN;
 
-    fn new(t: i64, auction: u32, price: Option<i64>, direct_sell: bool) -> Self {
+    fn new(t: i64, auction: AuctionId, price: Option<i64>, direct_sell: bool) -> Self {
         Self {
             t,
             price: price.unwrap_or(Self::NO_PRICE),
@@ -415,7 +415,7 @@ impl Observation {
 /// An auction that disappeared (sold or removed).
 struct GoneEvent {
     t: i64,
-    auction: u32,
+    auction: AuctionId,
     price: Option<i64>,
     direct_sell: bool,
 }
@@ -444,23 +444,25 @@ pub struct Inner {
     /// Bumped whenever the loaded data changes, so clients know when to fetch again.
     version: u64,
     loaded: HashSet<PathBuf>,
-    weapons: Vec<Weapon>,
-    weapon_index: HashMap<String, u16>,
-    attrs: Vec<String>,
-    attr_index: HashMap<String, u16>,
-    auctions: Vec<Auction>,
-    auction_index: HashMap<String, u32>,
+    weapons: Table<WeaponId, Weapon>,
+    weapon_index: HashMap<String, WeaponId>,
+    /// Attribute slugs.
+    attrs: Table<AttrId, String>,
+    attr_index: HashMap<String, AttrId>,
+    auctions: Table<AuctionId, Auction>,
+    auction_index: HashMap<String, AuctionId>,
     observations: Vec<Observation>,
-    rivens: Vec<String>,
-    riven_index: HashMap<String, u32>,
+    /// Riven ids, as the scraper's registry gives them.
+    rivens: Table<RivenId, String>,
+    riven_index: HashMap<String, RivenId>,
     /// Auctions per riven.
-    riven_auctions: Vec<Vec<u32>>,
+    riven_auctions: Table<RivenId, Vec<AuctionId>>,
     /// Rebuilt on refresh so history filters don't rescan observations on every page.
-    riven_changes: Vec<RivenChanges>,
+    riven_changes: Table<RivenId, RivenChanges>,
     /// Sorted by time.
     gone: Vec<GoneEvent>,
     /// Per auction, what searches filter on (see `Row`). Rebuilt by `finish_load`.
-    rows: Vec<Row>,
+    rows: Table<AuctionId, Row>,
 }
 
 /// The fields searches filter and sort on, for one auction, packed tight. A search visits
@@ -476,21 +478,38 @@ struct Row {
     created: i64,
     /// NaN when unknown, so no minimum is met.
     mean_quality: f64,
-    riven: u32,
-    weapon: u16,
-    flags: u8,
+    riven: RivenId,
+    weapon: WeaponId,
+    flags: RowFlags,
+}
+
+/// Yes/no facts about an auction, one bit each.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct RowFlags(u8);
+
+impl RowFlags {
+    /// The stats were fitted by the stat model.
+    const FIT_OK: Self = Self(1);
+    /// The stats are from before the disposition rework.
+    const LEGACY: Self = Self(2);
+    const DIRECT: Self = Self(4);
+    /// Still listed (see `Inner::is_current`).
+    const CURRENT: Self = Self(8);
+    /// Has a negative stat.
+    const CURSED: Self = Self(16);
+
+    fn set(&mut self, flag: Self, on: bool) {
+        if on {
+            self.0 |= flag.0;
+        }
+    }
 }
 
 impl Row {
     const NO_PRICE: i64 = i64::MIN;
-    const FIT_OK: u8 = 1;
-    const LEGACY: u8 = 2;
-    const DIRECT: u8 = 4;
-    const CURRENT: u8 = 8;
-    const CURSED: u8 = 16;
 
-    fn has(&self, flag: u8) -> bool {
-        self.flags & flag != 0
+    fn has(&self, flag: RowFlags) -> bool {
+        self.flags.0 & flag.0 != 0
     }
 
     fn price(&self) -> Option<i64> {
@@ -509,8 +528,11 @@ impl Row {
 }
 
 mod detail;
+mod ids;
 mod load;
 mod query;
+
+use ids::{AttrId, AuctionId, Id, RivenId, Table, WeaponId};
 
 use load::{Catalog, apply_catalog, gone_files, part_files};
 

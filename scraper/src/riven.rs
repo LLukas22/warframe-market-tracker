@@ -20,122 +20,40 @@ use wfmt_types::riven::{ROLL_MAX, ROLL_MIN};
 pub const DISPOSITION: f64 = 1.2;
 pub const MAX_RANK: u8 = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WeaponClass {
-    Rifle,
-    Shotgun,
-    Pistol,
-    Archgun,
-    Melee,
-}
+use std::sync::LazyLock;
 
-impl WeaponClass {
-    /// Maps warframe.market's `rivenType` / `group` onto the wiki's coefficient columns.
-    /// Kitguns use pistol values, zaws use melee values, archguns have their own column
-    /// even though warframe.market reports them as `rifle`.
-    pub fn from_wfm(riven_type: &str, group: &str) -> Option<Self> {
-        if group == "archgun" {
-            return Some(Self::Archgun);
-        }
-        match riven_type {
-            "rifle" => Some(Self::Rifle),
-            "shotgun" => Some(Self::Shotgun),
-            "pistol" | "kitgun" => Some(Self::Pistol),
-            "melee" | "zaw" => Some(Self::Melee),
-            _ => None,
-        }
-    }
+use wfmt_types::attributes;
+pub use wfmt_types::{Unit, WeaponClass};
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Rifle => "rifle",
-            Self::Shotgun => "shotgun",
-            Self::Pistol => "pistol",
-            Self::Archgun => "archgun",
-            Self::Melee => "melee",
-        }
-    }
-
-    fn column(self) -> usize {
-        self as usize
+/// Half a unit of the precision listings are entered with, in display units.
+fn rounding_slack(unit: Unit) -> f64 {
+    match unit {
+        Unit::Percent | Unit::Raw => 0.05,
+        Unit::Multiply => 0.005,
     }
 }
 
-impl std::str::FromStr for WeaponClass {
-    type Err = UnknownClass;
-
-    /// Parses what [`WeaponClass::as_str`] writes.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "rifle" => Self::Rifle,
-            "shotgun" => Self::Shotgun,
-            "pistol" => Self::Pistol,
-            "archgun" => Self::Archgun,
-            "melee" => Self::Melee,
-            _ => return Err(UnknownClass),
-        })
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct UnknownClass;
-
-impl std::fmt::Display for UnknownClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("unknown weapon class")
-    }
-}
-
-impl std::error::Error for UnknownClass {}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Display {
-    /// Shown as `100v` percent.
-    Percent,
-    /// Shown as `v` (meters, seconds, combo count).
-    Raw,
-    /// Faction damage, shown as `×(1 + v)`.
-    Multiplier,
-}
-
-impl Display {
-    /// Half a unit of the precision listings are entered with, in display units.
-    fn rounding_slack(self) -> f64 {
-        match self {
-            Self::Percent | Self::Raw => 0.05,
-            Self::Multiplier => 0.005,
-        }
-    }
-}
-
+/// An attribute the stat model can fit: the shared description plus its coefficients.
 pub struct AttributeSpec {
     /// warframe.market attribute slug.
     pub slug: &'static str,
-    pub display: Display,
+    pub unit: Unit,
     /// Only obtainable through the Riven Splicer.
     pub spliced: bool,
     /// |b| per class: rifle, shotgun, pistol/kitgun, archgun, melee/zaw.
-    pub coefficients: [Option<f64>; 5],
+    pub coefficients: Coefficients,
 }
+
+type Coefficients = [Option<f64>; 5];
 
 impl AttributeSpec {
     pub fn coefficient(&self, class: WeaponClass) -> Option<f64> {
-        self.coefficients[class.column()]
+        self.coefficients[class as usize]
     }
 }
 
-const fn spec(
-    slug: &'static str,
-    display: Display,
-    spliced: bool,
-    coefficients: [Option<f64>; 5],
-) -> AttributeSpec {
-    AttributeSpec {
-        slug,
-        display,
-        spliced,
-        coefficients,
-    }
+const fn spec(slug: &'static str, coefficients: Coefficients) -> (&'static str, Coefficients) {
+    (slug, coefficients)
 }
 
 const N: Option<f64> = None;
@@ -152,169 +70,127 @@ const fn melee(v: f64) -> [Option<f64>; 5] {
     [N, N, N, N, c(v)]
 }
 
-use Display::{Multiplier as Mul, Percent as Pct, Raw};
-
-/// Base coefficients (magnitudes) from the wiki tables. Signs are irrelevant because
-/// warframe.market reports the sign through `positive` and we fit on magnitudes.
-pub static ATTRIBUTES: &[AttributeSpec] = &[
-    spec(
-        "chance_to_gain_extra_combo_count",
-        Pct,
-        false,
-        melee(0.00653),
-    ),
-    spec("chance_to_gain_combo_count", Pct, false, melee(0.01165)),
-    spec(
-        "ammo_maximum",
-        Pct,
-        false,
-        [c(0.00555), c(0.01), c(0.01), c(0.0111), N],
-    ),
-    spec("damage_vs_corpus", Mul, false, all(0.005)),
-    spec("damage_vs_grineer", Mul, false, all(0.005)),
-    spec("damage_vs_infested", Mul, false, all(0.005)),
+/// Base coefficients (magnitudes) from the wiki tables, for every attribute in
+/// `wfmt_types::attributes`. Signs are irrelevant because warframe.market reports the sign
+/// through `positive` and we fit on magnitudes.
+static COEFFICIENTS: &[(&str, Coefficients)] = &[
+    spec("chance_to_gain_extra_combo_count", melee(0.00653)),
+    spec("chance_to_gain_combo_count", melee(0.01165)),
+    spec("ammo_maximum", [c(0.00555), c(0.01), c(0.01), c(0.0111), N]),
+    spec("damage_vs_corpus", all(0.005)),
+    spec("damage_vs_grineer", all(0.005)),
+    spec("damage_vs_infested", all(0.005)),
     spec(
         "cold_damage",
-        Pct,
-        false,
         [c(0.01), c(0.01), c(0.01), c(0.0133), c(0.01)],
     ),
-    spec("combo_duration", Raw, false, melee(0.09)),
+    spec("combo_duration", melee(0.09)),
     spec(
         "critical_chance",
-        Pct,
-        false,
         [c(0.016666), c(0.01), c(0.016666), c(0.0111), c(0.02)],
     ),
-    spec(
-        "critical_chance_on_slide_attack",
-        Pct,
-        false,
-        melee(0.013334),
-    ),
+    spec("critical_chance_on_slide_attack", melee(0.013334)),
     spec(
         "critical_damage",
-        Pct,
-        false,
         [c(0.013333), c(0.01), c(0.01), c(0.0089), c(0.01)],
     ),
     spec(
         "base_damage_/_melee_damage",
-        Pct,
-        false,
         [c(0.0183333), c(0.0183), c(0.0244), c(0.0111), c(0.0183)],
     ),
     spec(
         "electric_damage",
-        Pct,
-        false,
         [c(0.01), c(0.01), c(0.01), c(0.0133), c(0.01)],
     ),
     spec(
         "heat_damage",
-        Pct,
-        false,
         [c(0.01), c(0.01), c(0.01), c(0.0133), c(0.01)],
     ),
-    spec("finisher_damage", Pct, false, melee(0.0133)),
+    spec("finisher_damage", melee(0.0133)),
     spec(
         "fire_rate_/_attack_speed",
-        Pct,
-        false,
         [c(0.00667), c(0.01), c(0.0083), c(0.00667), c(0.0061)],
     ),
-    spec(
-        "projectile_speed",
-        Pct,
-        false,
-        [c(0.01), c(0.01), c(0.01), N, N],
-    ),
-    spec("channeling_damage", Raw, false, melee(0.27224)),
+    spec("projectile_speed", [c(0.01), c(0.01), c(0.01), N, N]),
+    spec("channeling_damage", melee(0.27224)),
     spec(
         "impact_damage",
-        Pct,
-        false,
         [c(0.013333), c(0.013333), c(0.013333), c(0.01), c(0.0133)],
     ),
     spec(
         "magazine_capacity",
-        Pct,
-        false,
         [c(0.005555), c(0.005555), c(0.005555), c(0.0067), N],
     ),
-    spec("channeling_efficiency", Pct, false, melee(0.00816)),
-    spec(
-        "multishot",
-        Pct,
-        false,
-        [c(0.01), c(0.0133), c(0.0133), c(0.0067), N],
-    ),
+    spec("channeling_efficiency", melee(0.00816)),
+    spec("multishot", [c(0.01), c(0.0133), c(0.0133), c(0.0067), N]),
     spec(
         "toxin_damage",
-        Pct,
-        false,
         [c(0.01), c(0.01), c(0.01), c(0.0133), c(0.01)],
     ),
-    spec("punch_through", Raw, false, guns(0.03)),
+    spec("punch_through", guns(0.03)),
     spec(
         "puncture_damage",
-        Pct,
-        false,
         [c(0.01333), c(0.01333), c(0.01333), c(0.01), c(0.0133)],
     ),
     spec(
         "reload_speed",
-        Pct,
-        false,
         [c(0.005555), c(0.005555), c(0.005555), c(0.0111), N],
     ),
-    spec("range", Raw, false, melee(0.02158)),
+    spec("range", melee(0.02158)),
     spec(
         "slash_damage",
-        Pct,
-        false,
         [c(0.013333), c(0.013333), c(0.013333), c(0.01), c(0.0133)],
     ),
     spec(
         "status_chance",
-        Pct,
-        false,
         [c(0.01), c(0.01), c(0.01), c(0.0067), c(0.01)],
     ),
-    spec("status_duration", Pct, false, all(0.01111)),
-    spec("recoil", Pct, false, guns(0.01)),
+    spec("status_duration", all(0.01111)),
+    spec("recoil", guns(0.01)),
     spec(
         "zoom",
-        Pct,
-        false,
         [c(0.006666), c(0.004666), c(0.0089), c(0.006666), N],
     ),
     // Spliced attributes (Riven Splicer), always positive.
-    spec("ammo_efficiency", Pct, true, guns(0.005)),
-    spec("blast", Pct, true, all(0.01)),
-    spec("corrosive", Pct, true, all(0.01)),
-    spec("damage_to_orokin", Mul, true, all(0.005)),
-    spec("damage_to_scaldra", Mul, true, all(0.005)),
-    spec("damage_to_techrot", Mul, true, all(0.005)),
-    spec("gas", Pct, true, all(0.01)),
-    spec("heavy_attack_wind_up_speed", Pct, true, melee(0.0133)),
-    spec("magnetic", Pct, true, all(0.01)),
-    spec("melee_damage_on_heavy_attack", Pct, true, melee(0.0133)),
+    spec("ammo_efficiency", guns(0.005)),
+    spec("blast", all(0.01)),
+    spec("corrosive", all(0.01)),
+    spec("damage_to_orokin", all(0.005)),
+    spec("damage_to_scaldra", all(0.005)),
+    spec("damage_to_techrot", all(0.005)),
+    spec("gas", all(0.01)),
+    spec("heavy_attack_wind_up_speed", melee(0.0133)),
+    spec("magnetic", all(0.01)),
+    spec("melee_damage_on_heavy_attack", melee(0.0133)),
     // Shown without a percent sign in game, but it is a percentage.
-    spec("parry_angle", Pct, true, melee(0.009)),
-    spec("radiation", Pct, true, all(0.01)),
+    spec("parry_angle", melee(0.009)),
+    spec("radiation", all(0.01)),
     spec(
         "magazine_reloaded_s_when_holstered",
-        Pct,
-        true,
         [c(0.01), c(0.01), c(0.01), N, N],
     ),
-    spec("slam_attack_damage", Pct, true, melee(0.0133)),
-    spec("status_damage", Pct, true, all(0.01)),
-    spec("viral", Pct, true, all(0.01)),
-    spec("weak_point_damage", Pct, true, guns(0.025)),
-    spec("weak_point_critical_chance", Pct, true, guns(0.0275)),
+    spec("slam_attack_damage", melee(0.0133)),
+    spec("status_damage", all(0.01)),
+    spec("viral", all(0.01)),
+    spec("weak_point_damage", guns(0.025)),
+    spec("weak_point_critical_chance", guns(0.0275)),
 ];
+
+pub static ATTRIBUTES: LazyLock<Vec<AttributeSpec>> = LazyLock::new(|| {
+    COEFFICIENTS
+        .iter()
+        .map(|&(slug, coefficients)| {
+            let info = attributes::attribute(slug)
+                .unwrap_or_else(|| panic!("{slug} is missing from wfmt_types::attributes"));
+            AttributeSpec {
+                slug,
+                unit: info.unit,
+                spliced: info.spliced,
+                coefficients,
+            }
+        })
+        .collect()
+});
 
 pub fn attribute(slug: &str) -> Option<&'static AttributeSpec> {
     ATTRIBUTES.iter().find(|a| a.slug == slug)
@@ -401,20 +277,20 @@ impl std::fmt::Display for FitError {
 }
 
 /// Magnitude of the modifier `v` in formula units, plus the rounding slack in the same units.
-fn magnitude(display: Display, value: f64) -> (f64, f64) {
-    let slack = display.rounding_slack();
-    match display {
-        Display::Percent => (value.abs() / 100.0, slack / 100.0),
-        Display::Raw => (value.abs(), slack),
+fn magnitude(unit: Unit, value: f64) -> (f64, f64) {
+    let slack = rounding_slack(unit);
+    match unit {
+        Unit::Percent => (value.abs() / 100.0, slack / 100.0),
+        Unit::Raw => (value.abs(), slack),
         // Negative faction damage is listed as e.g. 0.95; tolerate a raw delta too.
-        Display::Multiplier if value > 0.0 => ((value - 1.0).abs(), slack),
-        Display::Multiplier => (value.abs(), slack),
+        Unit::Multiply if value > 0.0 => ((value - 1.0).abs(), slack),
+        Unit::Multiply => (value.abs(), slack),
     }
 }
 
-fn rescale(display: Display, value: f64, factor: f64) -> f64 {
-    match display {
-        Display::Multiplier if value > 0.0 => 1.0 + (value - 1.0) * factor,
+fn rescale(unit: Unit, value: f64, factor: f64) -> f64 {
+    match unit {
+        Unit::Multiply if value > 0.0 => 1.0 + (value - 1.0) * factor,
         _ => value * factor,
     }
 }
@@ -450,7 +326,7 @@ fn try_fit(attrs: &[Resolved], rank: u8, disposition: f64) -> Option<Vec<AttrFit
                     roll,
                     roll_tolerance: a.slack / expected,
                     quality: ((roll - ROLL_MIN) / (ROLL_MAX - ROLL_MIN)).clamp(0.0, 1.0),
-                    value_rank8: rescale(a.spec.display, a.input.value, to_rank8),
+                    value_rank8: rescale(a.spec.unit, a.input.value, to_rank8),
                 })
             })
         })
@@ -478,8 +354,8 @@ pub fn fit(input: &RivenInput) -> Result<Fit, FitError> {
             let coefficient = spec
                 .coefficient(input.class)
                 .ok_or_else(|| FitError::NotForClass(a.slug.to_owned()))?;
-            let (magnitude, slack) = magnitude(spec.display, a.value);
-            let bow_factors: &[f64] = if input.is_bow && a.slug == "fire_rate_/_attack_speed" {
+            let (magnitude, slack) = magnitude(spec.unit, a.value);
+            let bow_factors: &[f64] = if input.is_bow && a.slug == attributes::FIRE_RATE {
                 &[2.0, 1.0]
             } else {
                 &[1.0]
@@ -539,6 +415,18 @@ pub fn fit(input: &RivenInput) -> Result<Fit, FitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_known_attribute_has_coefficients() {
+        for a in attributes::ATTRIBUTES {
+            assert!(
+                attribute(a.slug).is_some(),
+                "{} has no coefficients",
+                a.slug
+            );
+        }
+        assert_eq!(ATTRIBUTES.len(), attributes::ATTRIBUTES.len());
+    }
 
     fn input<'a>(attrs: &'a [AttrInput<'a>], class: WeaponClass, rank: i64) -> RivenInput<'a> {
         RivenInput {

@@ -6,8 +6,8 @@ use super::*;
 #[derive(Debug)]
 pub(super) struct Similarity {
     pub(super) shared: usize,
-    pub(super) missing: Vec<u16>,
-    pub(super) added: Vec<u16>,
+    pub(super) missing: Vec<AttrId>,
+    pub(super) added: Vec<AttrId>,
     pub(super) same_negative: bool,
     pub(super) roll_distance: Option<f64>,
 }
@@ -68,10 +68,10 @@ impl Inner {
         comparisons: Comparisons,
     ) -> Option<RivenDetail> {
         let riven = *self.riven_index.get(id)?;
-        let copies = &self.riven_auctions[riven as usize];
+        let copies = &self.riven_auctions[riven];
         let selected = if let Some(id) = auction_id {
             let index = *self.auction_index.get(id)?;
-            let auction = &self.auctions[index as usize];
+            let auction = &self.auctions[index];
             if auction.riven != riven {
                 return None;
             }
@@ -79,7 +79,7 @@ impl Inner {
         } else {
             copies
                 .iter()
-                .map(|&i| &self.auctions[i as usize])
+                .map(|&i| &self.auctions[i])
                 .max_by(|a, b| recency(a).cmp(&recency(b)))?
         };
         let (similar, similar_total, comparisons_hidden) = self.similar_to(selected, comparisons);
@@ -107,7 +107,7 @@ impl Inner {
         // Pick a representative before scoring, so old relists cannot win twice or
         // make a riven appear closer than its latest eligible observation.
         let mut hidden = HashSet::default();
-        let mut representatives: HashMap<u32, &Auction> = HashMap::default();
+        let mut representatives: HashMap<RivenId, &Auction> = HashMap::default();
         for a in &self.auctions {
             if a.weapon != selected.weapon || a.riven == selected.riven {
                 continue;
@@ -173,13 +173,9 @@ impl Inner {
                 missing_positives: score
                     .missing
                     .iter()
-                    .map(|&i| self.attrs[i as usize].clone())
+                    .map(|&i| self.attrs[i].clone())
                     .collect(),
-                added_positives: score
-                    .added
-                    .iter()
-                    .map(|&i| self.attrs[i as usize].clone())
-                    .collect(),
+                added_positives: score.added.iter().map(|&i| self.attrs[i].clone()).collect(),
                 same_negative: score.same_negative,
                 roll_distance: score.roll_distance,
             })
@@ -195,7 +191,7 @@ impl Inner {
         scan: &RivenScan,
     ) -> Option<(Auction, Option<riven::Fit>)> {
         let weapon = *self.weapon_index.get(scan.weapon.as_deref()?)?;
-        let w = &self.weapons[weapon as usize];
+        let w = &self.weapons[weapon];
         let class = w.class?;
         let inputs: Vec<AttrInput> = scan
             .attributes
@@ -240,7 +236,7 @@ impl Inner {
         let auction = Auction {
             id: String::new(),
             weapon,
-            riven: u32::MAX,
+            riven: RivenId::UNLISTED,
             gone: None,
             riven_name: scan.name.clone().unwrap_or_default().to_lowercase(),
             polarity: String::new(),
@@ -283,7 +279,7 @@ impl Inner {
             })
             .collect();
         let input = IdInput {
-            weapon: &self.weapons[auction.weapon as usize].slug,
+            weapon: &self.weapons[auction.weapon].slug,
             polarity: "",
             mastery_level: auction.mastery_level,
             re_rolls: auction.re_rolls,
@@ -310,7 +306,7 @@ impl Inner {
     ) -> Option<RivenDetail> {
         let (auction, fit) = self.scanned_auction(scan)?;
         let (similar, similar_total, comparisons_hidden) = self.similar_to(&auction, comparisons);
-        let w = &self.weapons[auction.weapon as usize];
+        let w = &self.weapons[auction.weapon];
         let listing = Listing {
             auction_id: String::new(),
             riven_id: String::new(),
@@ -371,8 +367,8 @@ impl Inner {
         let Some(&riven) = self.riven_index.get(riven_id) else {
             return Vec::new();
         };
-        let auctions = &self.riven_auctions[riven as usize];
-        let mut points: HashMap<u32, Vec<PricePoint>> = HashMap::default();
+        let auctions = &self.riven_auctions[riven];
+        let mut points: HashMap<AuctionId, Vec<PricePoint>> = HashMap::default();
         for o in self
             .observations
             .iter()
@@ -386,7 +382,7 @@ impl Inner {
         let mut out: Vec<RivenAuction> = auctions
             .iter()
             .map(|&i| {
-                let a = &self.auctions[i as usize];
+                let a = &self.auctions[i];
                 RivenAuction {
                     auction_id: a.id.clone(),
                     owner_name: a.owner_name.clone(),

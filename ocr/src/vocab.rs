@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use wfmt_types::{RivenType, WeaponGroup};
 
 use crate::text::{self, key};
 
@@ -43,9 +44,9 @@ struct Names {
 struct WfmWeapon {
     slug: String,
     #[serde(default)]
-    group: String,
+    group: WeaponGroup,
     #[serde(default)]
-    riven_type: String,
+    riven_type: RivenType,
     #[serde(default)]
     i18n: HashMap<String, Names>,
 }
@@ -63,38 +64,26 @@ struct WfmAttribute {
     #[serde(default)]
     positive_is_negative: Option<bool>,
     #[serde(default)]
-    exclusive_to: Option<Vec<String>>,
+    exclusive_to: Option<Vec<RivenType>>,
     #[serde(default)]
     i18n: HashMap<String, Names>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unit {
-    Percent,
-    /// Faction damage, shown as `x1.07`.
-    Multiply,
-    /// Seconds, meters, combo counts.
-    Raw,
-}
+pub use wfmt_types::Unit;
 
 #[derive(Clone, Debug)]
 pub struct Weapon {
     pub slug: String,
-    /// warframe.market's `rivenType`: rifle, shotgun, pistol, kitgun, melee or zaw.
-    pub riven_type: String,
-    pub group: String,
+    pub riven_type: RivenType,
+    pub group: WeaponGroup,
     pub names: Vec<String>,
     keys: Vec<Vec<char>>,
 }
 
 impl Weapon {
     /// The riven type `exclusiveTo` lists use; archguns report `rifle` but have their own.
-    pub fn kind(&self) -> &str {
-        if self.group == "archgun" {
-            "archgun"
-        } else {
-            &self.riven_type
-        }
+    pub fn kind(&self) -> RivenType {
+        wfmt_types::market::riven_kind(self.riven_type, self.group)
     }
 }
 
@@ -105,7 +94,7 @@ pub struct Attribute {
     /// A lower value is the bonus (recoil).
     pub positive_is_negative: bool,
     /// Riven types the attribute can roll on, `None` for all.
-    pub exclusive_to: Option<Vec<String>>,
+    pub exclusive_to: Option<Vec<RivenType>>,
     pub names: Vec<String>,
     keys: Vec<Vec<char>>,
 }
@@ -114,7 +103,7 @@ impl Attribute {
     pub fn rolls_on(&self, weapon: &Weapon) -> bool {
         self.exclusive_to
             .as_ref()
-            .is_none_or(|kinds| kinds.iter().any(|k| k == weapon.kind()))
+            .is_none_or(|kinds| kinds.contains(&weapon.kind()))
     }
 }
 
@@ -213,11 +202,7 @@ impl Vocabulary {
                     .collect();
                 let (names, keys) = names_and_keys(a.i18n, &aliases);
                 Attribute {
-                    unit: match a.unit.as_deref() {
-                        Some("percent") => Unit::Percent,
-                        Some("multiply") => Unit::Multiply,
-                        _ => Unit::Raw,
-                    },
+                    unit: Unit::from_wfm(a.unit.as_deref()),
                     positive_is_negative: a.positive_is_negative.unwrap_or(false),
                     exclusive_to: a.exclusive_to,
                     slug: a.slug,

@@ -8,6 +8,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
+use wfmt_types::layout::PARQUET_DIR;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
@@ -31,7 +32,7 @@ const FORMAT: u32 = 1;
 /// Everything that makes up a dataset. The scraper's status and locks stay with their server.
 const RETENTION: &str = "storage/raw-retention.json";
 const ENTRIES: [&str; 7] = [
-    "parquet",
+    PARQUET_DIR,
     "raw",
     "seen",
     "cache",
@@ -88,7 +89,7 @@ fn files_below(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// Writes the dataset at `root` to `out`. Nothing may be writing to it meanwhile.
 fn write_archive(root: &Path, out: &Path) -> Result<()> {
     ensure!(
-        root.join("parquet").is_dir()
+        root.join(PARQUET_DIR).is_dir()
             && root.join("rivens.jsonl").is_file()
             && root.join("state.json").is_file(),
         "There is no scraped data to export yet."
@@ -175,14 +176,14 @@ fn validate(stage: &Path) -> Result<()> {
         "This export has a format this version can't read"
     );
     ensure!(
-        stage.join("parquet").is_dir()
+        stage.join(PARQUET_DIR).is_dir()
             && stage.join("rivens.jsonl").is_file()
             && stage.join("state.json").is_file(),
         "This export is incomplete"
     );
 
     let mut files = Vec::new();
-    files_below(&stage.join("parquet"), &mut files)?;
+    files_below(&stage.join(PARQUET_DIR), &mut files)?;
     let mut parquet = 0;
     for file in files
         .iter()

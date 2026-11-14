@@ -17,7 +17,8 @@ use parquet::file::reader::SerializedFileReader;
 use serde::{Deserialize, Serialize};
 use wfmt_scraper::dataset::{DatasetLock, Transaction, durable_write};
 
-use super::{CATALOG, Config, LOCAL_CATALOG, TABLES, day_files, every_hour, live, now_ms};
+use super::{CATALOG, Config, LOCAL_CATALOG, day_files, every_hour, live, now_ms};
+use wfmt_types::layout::{DATE_PREFIX, PARQUET_DIR, Table};
 
 const STATE: &str = "hub/pull.json";
 /// Where files are downloaded to before they're moved into the data.
@@ -95,9 +96,9 @@ pub(super) fn start(root: PathBuf, config: Config) {
 fn table_file(path: &str) -> Option<NaiveDate> {
     let mut parts = path.split('/');
     let (table, folder, name) = (parts.next()?, parts.next()?, parts.next()?);
-    let date = folder.strip_prefix("date=")?.parse().ok()?;
+    let date = folder.strip_prefix(DATE_PREFIX)?.parse().ok()?;
     let valid = parts.next().is_none()
-        && TABLES.contains(&table)
+        && table.parse::<Table>().is_ok()
         && name.ends_with(".parquet")
         && !name.starts_with('.');
     valid.then_some(date)
@@ -155,11 +156,11 @@ fn apply(root: &Path, download: &Path, day: &DayPlan) -> Result<()> {
     let _lock = DatasetLock::write(root)?;
     let mut tx = Transaction::new(root)?;
     for path in &day.fetch {
-        let staged = tx.stage(Path::new("parquet").join(path));
+        let staged = tx.stage(Path::new(PARQUET_DIR).join(path));
         fs::rename(download.join(path), staged)?;
     }
     for path in &day.delete {
-        tx.delete(Path::new("parquet").join(path));
+        tx.delete(Path::new(PARQUET_DIR).join(path));
     }
     tx.commit()
 }

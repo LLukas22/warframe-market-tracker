@@ -204,11 +204,11 @@ fn late_gone_failure_does_not_mark_auctions_or_duplicate_events() {
                 .is_err()
         );
         assert!(inner.gone.is_empty());
-        assert!(inner.auctions[0].gone.is_none());
+        assert!(inner.auctions[AuctionId::from_index(0)].gone.is_none());
     }
     inner.load_gone_batches([Ok(gone())]).unwrap();
     assert_eq!(inner.gone.len(), 1);
-    assert!(inner.auctions[0].gone.is_some());
+    assert!(inner.auctions[AuctionId::from_index(0)].gone.is_some());
 }
 
 #[test]
@@ -223,5 +223,5 @@ fn unknown_gone_reasons_reject_the_part_before_anything_changes() {
             .is_err()
     );
     assert!(inner.gone.is_empty());
-    assert!(inner.auctions[0].gone.is_none());
+    assert!(inner.auctions[AuctionId::from_index(0)].gone.is_none());
 }

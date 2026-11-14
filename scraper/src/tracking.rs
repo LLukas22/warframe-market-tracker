@@ -6,6 +6,9 @@
 //! removal. Other missing auctions remain unresolved until they reappear, are verified, or
 //! expire after four days.
 
+use wfmt_types::SortBy;
+
+use crate::store::PageKind;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -42,18 +45,18 @@ pub struct Coverage {
 impl Coverage {
     /// Takes the buyout price of every auction on the page. A short page counts like a full
     /// one here: being short doesn't prove it holds everything.
-    pub fn add_page(&mut self, sort_by: &str, buyouts: &[Option<i64>]) {
+    pub fn add_page(&mut self, kind: PageKind, buyouts: &[Option<i64>]) {
         let known = buyouts.iter().flatten().copied();
-        match sort_by {
-            "price_asc" => self.up_to = known.max().max(self.up_to),
-            "price_desc" => {
+        match kind {
+            PageKind::Search(SortBy::PriceAsc) => self.up_to = known.max().max(self.up_to),
+            PageKind::Search(SortBy::PriceDesc) => {
                 self.from = match (known.min(), self.from) {
                     (Some(a), Some(b)) => Some(a.min(b)),
                     (a, b) => a.or(b),
                 };
                 self.no_buyout |= self.from.is_some();
             }
-            _ => {}
+            PageKind::Feed(_) => {}
         }
     }
 
@@ -81,7 +84,7 @@ impl Coverage {
 /// orders have to come back short with the same listings, which only happens when there are
 /// fewer auctions than one page holds.
 pub fn returned_everything<'a>(
-    pages: impl IntoIterator<Item = (&'a str, usize, &'a HashSet<String>)>,
+    pages: impl IntoIterator<Item = (PageKind, usize, &'a HashSet<String>)>,
 ) -> bool {
     let (mut asc, mut desc) = (false, false);
     let mut listings: Option<&HashSet<String>> = None;
@@ -90,8 +93,8 @@ pub fn returned_everything<'a>(
             return false;
         }
         listings = Some(ids);
-        asc |= sort_by == "price_asc";
-        desc |= sort_by == "price_desc";
+        asc |= sort_by == PageKind::Search(SortBy::PriceAsc);
+        desc |= sort_by == PageKind::Search(SortBy::PriceDesc);
     }
     asc && desc
 }
@@ -344,6 +347,9 @@ impl Tracker {
 mod tests {
     use super::*;
 
+    const ASC: PageKind = PageKind::Search(SortBy::PriceAsc);
+    const DESC: PageKind = PageKind::Search(SortBy::PriceDesc);
+
     fn seen(price: i64, at: DateTime<Utc>) -> Seen {
         Seen {
             riven_id: "r".into(),
@@ -361,7 +367,7 @@ mod tests {
         }
     }
 
-    fn capped(sort: &str, lo: i64, hi: i64) -> Coverage {
+    fn capped(sort: PageKind, lo: i64, hi: i64) -> Coverage {
         let prices: Vec<Option<i64>> = (0..PAGE_CAP as i64)
             .map(|i| Some(lo + (hi - lo) * i / (PAGE_CAP as i64 - 1)))
             .collect();
@@ -385,8 +391,8 @@ mod tests {
         // Real shape: bidding auctions starting at 1p head the most-expensive page.
         let asc: Vec<_> = (0..PAGE_CAP as i64).map(|i| Some(5 + i / 3)).collect();
         let mut c = Coverage::default();
-        c.add_page("price_asc", &asc);
-        c.add_page("price_desc", &desc_page(14, 9000, 400));
+        c.add_page(ASC, &asc);
+        c.add_page(DESC, &desc_page(14, 9000, 400));
 
         assert!(!c.is_complete());
         assert!(c.covers(Some(10)) && c.covers(Some(5000)));
@@ -400,22 +406,22 @@ mod tests {
     #[test]
     fn a_page_of_only_auctions_without_a_buyout_proves_nothing_about_them() {
         let mut c = Coverage::default();
-        c.add_page("price_desc", &[None; PAGE_CAP]);
+        c.add_page(DESC, &[None; PAGE_CAP]);
         assert!(!c.covers(None) && !c.covers(Some(500)));
         assert!(!c.is_complete());
     }
 
     #[test]
     fn buyouts_exactly_at_a_page_edge_are_uncertain() {
-        let mut c = capped("price_asc", 10, 50);
+        let mut c = capped(ASC, 10, 50);
         assert!(c.covers(Some(49)) && !c.covers(Some(50)));
-        c.add_page("price_desc", &desc_page(0, 900, 50));
+        c.add_page(DESC, &desc_page(0, 900, 50));
         // Both pages stop at 50, so more 50p listings can sit between them.
         assert!(!c.is_complete() && !c.covers(Some(50)));
         assert!(c.covers(Some(51)));
 
-        let mut overlap = capped("price_asc", 10, 60);
-        overlap.add_page("price_desc", &desc_page(0, 900, 50));
+        let mut overlap = capped(ASC, 10, 60);
+        overlap.add_page(DESC, &desc_page(0, 900, 50));
         assert!(
             !overlap.is_complete(),
             "sequential pages are not an atomic snapshot"
@@ -434,12 +440,9 @@ mod tests {
 
     #[test]
     fn coverage_ranges() {
-        let mut c = capped("price_asc", 10, 100);
+        let mut c = capped(ASC, 10, 100);
         assert!(c.covers(Some(50)) && !c.covers(Some(500)));
-        c.add_page(
-            "price_desc",
-            &(0..PAGE_CAP).map(|_| Some(900)).collect::<Vec<_>>(),
-        );
+        c.add_page(DESC, &(0..PAGE_CAP).map(|_| Some(900)).collect::<Vec<_>>());
         assert!(c.covers(Some(950)) && !c.covers(Some(500)));
         let full = Coverage {
             complete: true,
@@ -456,35 +459,29 @@ mod tests {
     fn a_page_just_short_of_the_cap_is_not_everything() {
         // Real shape: the site returns 99 cheapest and 99 most expensive of 1800 listings.
         let (cheap, pricey) = (ids(0..99), ids(1700..1799));
-        assert!(!returned_everything([("price_asc", 99, &cheap)]));
+        assert!(!returned_everything([(ASC, 99, &cheap)]));
         assert!(!returned_everything([
-            ("price_asc", 99, &cheap),
-            ("price_desc", 99, &pricey),
+            (ASC, 99, &cheap),
+            (DESC, 99, &pricey),
         ]));
     }
 
     #[test]
     fn both_orders_returning_the_same_short_page_is_everything() {
         let all = ids(0..40);
-        assert!(returned_everything([
-            ("price_asc", 40, &all),
-            ("price_desc", 40, &all),
-        ]));
+        assert!(returned_everything([(ASC, 40, &all), (DESC, 40, &all),]));
         let empty = HashSet::new();
-        assert!(returned_everything([
-            ("price_asc", 0, &empty),
-            ("price_desc", 0, &empty),
-        ]));
+        assert!(returned_everything([(ASC, 0, &empty), (DESC, 0, &empty),]));
         // A listing added between the two requests: not a consistent snapshot.
         assert!(!returned_everything([
-            ("price_asc", 40, &all),
-            ("price_desc", 41, &ids(0..41)),
+            (ASC, 40, &all),
+            (DESC, 41, &ids(0..41)),
         ]));
         // One order alone, however short, proves nothing.
-        assert!(!returned_everything([("price_asc", 5, &ids(0..5))]));
+        assert!(!returned_everything([(ASC, 5, &ids(0..5))]));
         assert!(!returned_everything([
-            ("price_asc", 100, &ids(0..100)),
-            ("price_desc", 100, &ids(0..100)),
+            (ASC, 100, &ids(0..100)),
+            (DESC, 100, &ids(0..100)),
         ]));
     }
 
@@ -492,8 +489,8 @@ mod tests {
     fn missing_auction_in_the_unseen_middle_is_not_gone() {
         let t0 = Utc::now();
         let mut tracker = Tracker::in_memory();
-        let mut coverage = capped("price_asc", 10, 50);
-        coverage.add_page("price_desc", &desc_page(14, 9000, 400));
+        let mut coverage = capped(ASC, 10, 50);
+        coverage.add_page(DESC, &desc_page(14, 9000, 400));
         let none = HashMap::new();
         let middle = ("middle".to_owned(), seen(100, t0));
         tracker.update("w", t0, vec![middle], &coverage, &none);
@@ -515,7 +512,7 @@ mod tests {
         let t0 = Utc::now();
         let t1 = t0 + TimeDelta::hours(12);
         let mut tracker = Tracker::in_memory();
-        let coverage = capped("price_asc", 10, 100);
+        let coverage = capped(ASC, 10, 100);
         let none = HashMap::new();
         tracker.update(
             "w",
@@ -548,7 +545,7 @@ mod tests {
     fn entry_checks_go_to_the_latest_drop_outs_and_skip_recent_confirmations() {
         let t0 = Utc::now();
         let mut tracker = Tracker::in_memory();
-        let coverage = capped("price_asc", 10, 100);
+        let coverage = capped(ASC, 10, 100);
         let none = HashMap::new();
         tracker.update(
             "w",
@@ -633,7 +630,7 @@ mod tests {
     fn expires_and_keeps_first_seen() {
         let t0 = Utc::now();
         let mut tracker = Tracker::in_memory();
-        let coverage = capped("price_asc", 10, 100);
+        let coverage = capped(ASC, 10, 100);
         let none = HashMap::new();
         tracker.update(
             "w",
