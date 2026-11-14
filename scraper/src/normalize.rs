@@ -4,84 +4,14 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
-use crate::identity::{IdAttr, IdInput, Registry};
-use wfmt_types::{RivenType, WeaponClass};
+use wfmt_dataset::identity::{IdAttr, IdInput, Registry};
+use wfmt_dataset::schema::{AttributeRow, AuctionRow};
+use wfmt_model::{self as riven, AttrInput, RivenInput};
 
-use crate::riven::{self, AttrInput, RivenInput};
 use crate::wfm::{Auction, Weapon};
 
 /// Dispositions as listed on warframe.market right after the rework (still pre-rework values).
 const LEGACY_DISPOSITIONS: &str = include_str!("../assets/legacy_dispositions.json");
-
-pub struct AuctionRow {
-    pub scraped_at: DateTime<Utc>,
-    pub platform: String,
-    pub auction_id: String,
-    /// Stable identity of the riven itself, shared by relists and resales (see `identity`).
-    pub riven_id: String,
-    /// Which sort order(s) of the search returned this auction, e.g. `price_asc`.
-    pub source: String,
-    pub weapon_slug: String,
-    pub weapon_name: String,
-    pub weapon_class: Option<&'static str>,
-    pub riven_type: RivenType,
-    pub is_bow: bool,
-    pub riven_name: String,
-    pub polarity: String,
-    pub mastery_level: Option<i64>,
-    pub re_rolls: Option<i64>,
-    pub n_positive: i32,
-    pub n_negative: i32,
-    pub has_spliced: bool,
-    pub listed_rank: i64,
-    pub rank: Option<i32>,
-    pub disposition: Option<f64>,
-    pub legacy_stats: Option<bool>,
-    pub fit_ok: bool,
-    pub fit_ambiguous: Option<bool>,
-    pub fit_error: Option<String>,
-    pub mean_positive_quality: Option<f64>,
-    pub buyout_price: Option<i64>,
-    pub starting_price: Option<i64>,
-    pub top_bid: Option<i64>,
-    pub is_direct_sell: bool,
-    pub minimal_reputation: Option<i64>,
-    pub visible: bool,
-    pub closed: bool,
-    pub private: bool,
-    pub crossplay: bool,
-    pub created: DateTime<Utc>,
-    pub updated: DateTime<Utc>,
-    pub owner_id: String,
-    pub owner_name: String,
-    pub owner_reputation: Option<i64>,
-    pub owner_status: String,
-    pub owner_last_seen: Option<DateTime<Utc>>,
-    pub note: String,
-}
-
-impl AuctionRow {
-    /// Same as `Auction::price`.
-    pub fn price(&self) -> Option<i64> {
-        self.buyout_price.or(self.top_bid).or(self.starting_price)
-    }
-}
-
-pub struct AttributeRow {
-    pub scraped_at: DateTime<Utc>,
-    pub auction_id: String,
-    pub weapon_slug: String,
-    pub position: i32,
-    pub attribute: String,
-    pub positive: bool,
-    pub spliced: Option<bool>,
-    pub value: f64,
-    pub value_rank8: Option<f64>,
-    pub roll: Option<f64>,
-    pub quality: Option<f64>,
-    pub coefficient: Option<f64>,
-    pub layout_multiplier: Option<f64>,
-}
 
 pub struct Normalizer {
     legacy: HashMap<String, f64>,
@@ -210,7 +140,7 @@ impl Normalizer {
                 auction_id: auction.id.clone(),
                 weapon_slug: weapon.slug.clone(),
                 weapon_name: weapon.name().to_owned(),
-                weapon_class: class.map(WeaponClass::as_str),
+                weapon_class: class,
                 riven_type: weapon.riven_type,
                 is_bow: weapon.is_bow(),
                 riven_name: item.name.clone(),
@@ -279,7 +209,7 @@ mod tests {
             slug: "kulstar".into(),
             game_ref: "/Lotus/Weapons/Grineer/Pistols/GrnTorpedoPistol/GrnTorpedoPistol".into(),
             group: wfmt_types::WeaponGroup::Secondary,
-            riven_type: RivenType::Pistol,
+            riven_type: wfmt_types::RivenType::Pistol,
             disposition: Some(1.3),
             i18n: serde_json::json!({"en": {"name": "Kulstar"}}),
         };

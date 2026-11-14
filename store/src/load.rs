@@ -1,7 +1,8 @@
-//! Reading the scraper's parquet parts into [`Inner`].
+//! Reading the scraper's parquet parts into [`Data`].
 
 use super::*;
-use wfmt_types::layout;
+use wfmt_dataset::layout;
+use wfmt_dataset::schema::{attributes, auctions, gone};
 
 /// Prices above this are invalid. `None` when there are too few listings to tell.
 pub(super) fn price_limit(prices: &mut [i64]) -> Option<i64> {
@@ -19,7 +20,7 @@ pub(super) fn price_limit(prices: &mut [i64]) -> Option<i64> {
     )
 }
 
-pub(super) fn apply_catalog(inner: &mut Inner, catalog: Catalog) {
+pub(super) fn apply_catalog(inner: &mut Data, catalog: Catalog) {
     for w in catalog.data {
         let class = WeaponClass::of(w.riven_type, w.group);
         let index = inner.intern_weapon(&w.slug, &w.i18n.en.name, class);
@@ -117,12 +118,13 @@ pub(super) fn read_batches(path: &Path) -> LoadResult<ParquetRecordBatchReader> 
         .build()?)
 }
 
+/// A column of a batch as its array type, by its name from `wfmt_dataset::schema`.
 macro_rules! column {
-    ($batch:expr, $name:literal, $ty:ty) => {
+    ($batch:expr, $name:expr, $ty:ty) => {
         $batch
             .column_by_name($name)
             .and_then(|c| c.as_any().downcast_ref::<$ty>())
-            .context(concat!("missing column ", $name))?
+            .with_context(|| format!("missing column {}", $name))?
     };
 }
 
@@ -143,47 +145,47 @@ pub(super) fn checked_batches(
 }
 
 pub(super) fn validate_attributes(b: &RecordBatch) -> LoadResult<()> {
-    let _ = column!(b, "scraped_at", TimestampMillisecondArray);
-    let _ = column!(b, "auction_id", StringArray);
-    let _ = column!(b, "position", Int32Array);
-    let _ = column!(b, "attribute", StringArray);
-    let _ = column!(b, "positive", BooleanArray);
-    let _ = column!(b, "value", Float64Array);
-    let _ = column!(b, "value_rank8", Float64Array);
-    let _ = column!(b, "quality", Float64Array);
+    let _ = column!(b, attributes::SCRAPED_AT, TimestampMillisecondArray);
+    let _ = column!(b, attributes::AUCTION_ID, StringArray);
+    let _ = column!(b, attributes::POSITION, Int32Array);
+    let _ = column!(b, attributes::ATTRIBUTE, StringArray);
+    let _ = column!(b, attributes::POSITIVE, BooleanArray);
+    let _ = column!(b, attributes::VALUE, Float64Array);
+    let _ = column!(b, attributes::VALUE_RANK8, Float64Array);
+    let _ = column!(b, attributes::QUALITY, Float64Array);
     Ok(())
 }
 
 pub(super) fn validate_auctions(b: &RecordBatch) -> LoadResult<()> {
-    let _ = column!(b, "scraped_at", TimestampMillisecondArray);
-    let _ = column!(b, "auction_id", StringArray);
-    let _ = column!(b, "weapon_slug", StringArray);
-    let _ = column!(b, "weapon_name", StringArray);
-    let _ = column!(b, "weapon_class", StringArray);
-    let _ = column!(b, "riven_name", StringArray);
-    let _ = column!(b, "polarity", StringArray);
-    let _ = column!(b, "mastery_level", Int64Array);
-    let _ = column!(b, "re_rolls", Int64Array);
-    let _ = column!(b, "rank", Int32Array);
-    let _ = column!(b, "legacy_stats", BooleanArray);
-    let _ = column!(b, "fit_ok", BooleanArray);
-    let _ = column!(b, "mean_positive_quality", Float64Array);
-    let _ = column!(b, "buyout_price", Int64Array);
-    let _ = column!(b, "starting_price", Int64Array);
-    let _ = column!(b, "top_bid", Int64Array);
-    let _ = column!(b, "is_direct_sell", BooleanArray);
-    let _ = column!(b, "visible", BooleanArray);
-    let _ = column!(b, "closed", BooleanArray);
-    let _ = column!(b, "created", TimestampMillisecondArray);
-    let _ = column!(b, "owner_name", StringArray);
-    let _ = column!(b, "owner_reputation", Int64Array);
+    let _ = column!(b, auctions::SCRAPED_AT, TimestampMillisecondArray);
+    let _ = column!(b, auctions::AUCTION_ID, StringArray);
+    let _ = column!(b, auctions::WEAPON_SLUG, StringArray);
+    let _ = column!(b, auctions::WEAPON_NAME, StringArray);
+    let _ = column!(b, auctions::WEAPON_CLASS, StringArray);
+    let _ = column!(b, auctions::RIVEN_NAME, StringArray);
+    let _ = column!(b, auctions::POLARITY, StringArray);
+    let _ = column!(b, auctions::MASTERY_LEVEL, Int64Array);
+    let _ = column!(b, auctions::RE_ROLLS, Int64Array);
+    let _ = column!(b, auctions::RANK, Int32Array);
+    let _ = column!(b, auctions::LEGACY_STATS, BooleanArray);
+    let _ = column!(b, auctions::FIT_OK, BooleanArray);
+    let _ = column!(b, auctions::MEAN_POSITIVE_QUALITY, Float64Array);
+    let _ = column!(b, auctions::BUYOUT_PRICE, Int64Array);
+    let _ = column!(b, auctions::STARTING_PRICE, Int64Array);
+    let _ = column!(b, auctions::TOP_BID, Int64Array);
+    let _ = column!(b, auctions::IS_DIRECT_SELL, BooleanArray);
+    let _ = column!(b, auctions::VISIBLE, BooleanArray);
+    let _ = column!(b, auctions::CLOSED, BooleanArray);
+    let _ = column!(b, auctions::CREATED, TimestampMillisecondArray);
+    let _ = column!(b, auctions::OWNER_NAME, StringArray);
+    let _ = column!(b, auctions::OWNER_REPUTATION, Int64Array);
     Ok(())
 }
 
 pub(super) fn validate_gone(b: &RecordBatch) -> LoadResult<()> {
-    let _ = column!(b, "detected_at", TimestampMillisecondArray);
-    let _ = column!(b, "auction_id", StringArray);
-    let reason = column!(b, "reason", StringArray);
+    let _ = column!(b, gone::DETECTED_AT, TimestampMillisecondArray);
+    let _ = column!(b, gone::AUCTION_ID, StringArray);
+    let reason = column!(b, gone::REASON, StringArray);
     if let Some(unknown) = reason
         .iter()
         .flatten()
@@ -191,8 +193,8 @@ pub(super) fn validate_gone(b: &RecordBatch) -> LoadResult<()> {
     {
         anyhow::bail!("unknown gone reason {unknown:?}");
     }
-    let _ = column!(b, "last_price", Int64Array);
-    let _ = column!(b, "direct_sell", BooleanArray);
+    let _ = column!(b, gone::LAST_PRICE, Int64Array);
+    let _ = column!(b, gone::DIRECT_SELL, BooleanArray);
     Ok(())
 }
 
@@ -208,7 +210,7 @@ pub(super) fn opt<A: Array, T>(a: &A, i: usize, get: impl Fn(&A, usize) -> T) ->
     a.is_valid(i).then(|| get(a, i))
 }
 
-impl Inner {
+impl Data {
     pub(super) fn intern_attr(&mut self, slug: &str) -> AttrId {
         if let Some(i) = self.attr_index.get(slug) {
             return *i;
@@ -271,14 +273,14 @@ impl Inner {
         // aren't kept. Keyed by the id alone so lookups borrow it instead of allocating.
         let mut attrs: HashMap<String, (i64, Vec<Attr>)> = HashMap::default();
         for b in attributes {
-            let scraped = column!(b, "scraped_at", TimestampMillisecondArray);
-            let id = column!(b, "auction_id", StringArray);
-            let position = column!(b, "position", Int32Array);
-            let attr = column!(b, "attribute", StringArray);
-            let positive = column!(b, "positive", BooleanArray);
-            let value = column!(b, "value", Float64Array);
-            let rank8 = column!(b, "value_rank8", Float64Array);
-            let quality = column!(b, "quality", Float64Array);
+            let scraped = column!(b, attributes::SCRAPED_AT, TimestampMillisecondArray);
+            let id = column!(b, attributes::AUCTION_ID, StringArray);
+            let position = column!(b, attributes::POSITION, Int32Array);
+            let attr = column!(b, attributes::ATTRIBUTE, StringArray);
+            let positive = column!(b, attributes::POSITIVE, BooleanArray);
+            let value = column!(b, attributes::VALUE, Float64Array);
+            let rank8 = column!(b, attributes::VALUE_RANK8, Float64Array);
+            let quality = column!(b, attributes::QUALITY, Float64Array);
             let mut rows: Vec<usize> = (0..b.num_rows()).collect();
             rows.sort_by_key(|&i| position.value(i));
             for i in rows {
@@ -306,34 +308,34 @@ impl Inner {
         }
 
         for b in auctions {
-            let scraped = column!(b, "scraped_at", TimestampMillisecondArray);
-            let id = column!(b, "auction_id", StringArray);
-            let weapon_slug = column!(b, "weapon_slug", StringArray);
-            let weapon_name = column!(b, "weapon_name", StringArray);
-            let weapon_class = column!(b, "weapon_class", StringArray);
-            let riven_name = column!(b, "riven_name", StringArray);
-            let polarity = column!(b, "polarity", StringArray);
-            let mastery = column!(b, "mastery_level", Int64Array);
-            let re_rolls = column!(b, "re_rolls", Int64Array);
-            let rank = column!(b, "rank", Int32Array);
-            let legacy = column!(b, "legacy_stats", BooleanArray);
-            let fit_ok = column!(b, "fit_ok", BooleanArray);
-            let mean_q = column!(b, "mean_positive_quality", Float64Array);
-            let buyout = column!(b, "buyout_price", Int64Array);
-            let starting = column!(b, "starting_price", Int64Array);
-            let top_bid = column!(b, "top_bid", Int64Array);
-            let direct = column!(b, "is_direct_sell", BooleanArray);
-            let visible = column!(b, "visible", BooleanArray);
-            let closed = column!(b, "closed", BooleanArray);
-            let created = column!(b, "created", TimestampMillisecondArray);
-            let owner_name = column!(b, "owner_name", StringArray);
-            let owner_rep = column!(b, "owner_reputation", Int64Array);
+            let scraped = column!(b, auctions::SCRAPED_AT, TimestampMillisecondArray);
+            let id = column!(b, auctions::AUCTION_ID, StringArray);
+            let weapon_slug = column!(b, auctions::WEAPON_SLUG, StringArray);
+            let weapon_name = column!(b, auctions::WEAPON_NAME, StringArray);
+            let weapon_class = column!(b, auctions::WEAPON_CLASS, StringArray);
+            let riven_name = column!(b, auctions::RIVEN_NAME, StringArray);
+            let polarity = column!(b, auctions::POLARITY, StringArray);
+            let mastery = column!(b, auctions::MASTERY_LEVEL, Int64Array);
+            let re_rolls = column!(b, auctions::RE_ROLLS, Int64Array);
+            let rank = column!(b, auctions::RANK, Int32Array);
+            let legacy = column!(b, auctions::LEGACY_STATS, BooleanArray);
+            let fit_ok = column!(b, auctions::FIT_OK, BooleanArray);
+            let mean_q = column!(b, auctions::MEAN_POSITIVE_QUALITY, Float64Array);
+            let buyout = column!(b, auctions::BUYOUT_PRICE, Int64Array);
+            let starting = column!(b, auctions::STARTING_PRICE, Int64Array);
+            let top_bid = column!(b, auctions::TOP_BID, Int64Array);
+            let direct = column!(b, auctions::IS_DIRECT_SELL, BooleanArray);
+            let visible = column!(b, auctions::VISIBLE, BooleanArray);
+            let closed = column!(b, auctions::CLOSED, BooleanArray);
+            let created = column!(b, auctions::CREATED, TimestampMillisecondArray);
+            let owner_name = column!(b, auctions::OWNER_NAME, StringArray);
+            let owner_rep = column!(b, auctions::OWNER_REPUTATION, Int64Array);
             // Older parts predate riven ids; fall back to one riven per auction.
             let riven_ids = b
-                .column_by_name("riven_id")
+                .column_by_name(auctions::RIVEN_ID)
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
             let sources = b
-                .column_by_name("source")
+                .column_by_name(auctions::SOURCE)
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
             for i in 0..b.num_rows() {
@@ -464,11 +466,11 @@ impl Inner {
         batches: impl IntoIterator<Item = LoadResult<RecordBatch>>,
     ) -> LoadResult<()> {
         for b in checked_batches(batches, validate_gone)? {
-            let detected = column!(b, "detected_at", TimestampMillisecondArray);
-            let id = column!(b, "auction_id", StringArray);
-            let reason = column!(b, "reason", StringArray);
-            let price = column!(b, "last_price", Int64Array);
-            let direct = column!(b, "direct_sell", BooleanArray);
+            let detected = column!(b, gone::DETECTED_AT, TimestampMillisecondArray);
+            let id = column!(b, gone::AUCTION_ID, StringArray);
+            let reason = column!(b, gone::REASON, StringArray);
+            let price = column!(b, gone::LAST_PRICE, Int64Array);
+            let direct = column!(b, gone::DIRECT_SELL, BooleanArray);
             for i in 0..b.num_rows() {
                 let Some(&auction) = self.auction_index.get(id.value(i)) else {
                     continue;

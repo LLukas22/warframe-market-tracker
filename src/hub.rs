@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use wfmt_types::layout::{DATE_PREFIX, PARQUET_DIR, Table};
+use wfmt_dataset::layout::{DATE_PREFIX, PARQUET_DIR, Table};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
@@ -24,8 +24,8 @@ use hf_hub::repository::{AddSource, CommitOperation, RepoTreeEntry};
 use hf_hub::{HFClient, HFRepository, RepoTypeDataset};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
-use wfmt_scraper::dataset::{DatasetLock, durable_write};
-use wfmt_scraper::maintenance;
+use wfmt_dataset::maintenance;
+use wfmt_dataset::{DatasetLock, durable_write};
 
 use crate::api::HubStatus;
 

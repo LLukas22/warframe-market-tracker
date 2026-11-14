@@ -22,15 +22,14 @@ use wfmt_types::{
     ScraperStatus, Settings, SortBy, SweepProgress, SweepSummary, Trigger,
 };
 
-use crate::identity::Registry;
-use crate::maintenance::{self, MaintenanceArgs};
+use crate::archive::{Meta, PersistedSweep, RawPage, RawResponse, State, Store, Verified};
 use crate::normalize::Normalizer;
 use crate::pipeline::Pipeline;
-use crate::store::{
-    Meta, ParquetSink, PersistedSweep, RawPage, RawResponse, State, Store, Verified,
-};
 use crate::tracking::Tracker;
 use crate::wfm::{self, BuyoutPolicy, Client, Weapon};
+use wfmt_dataset::identity::Registry;
+use wfmt_dataset::maintenance::{self, MaintenanceArgs};
+use wfmt_dataset::sink::ParquetSink;
 
 const RECENT: usize = 50;
 const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
@@ -279,7 +278,7 @@ pub struct Engine {
 impl Engine {
     pub fn new(data_dir: PathBuf, rework_cutoff: DateTime<Utc>, args: EngineArgs) -> Result<Self> {
         // Complete interrupted publication before loading tracking/identity state.
-        drop(crate::dataset::DatasetLock::write(&data_dir)?);
+        drop(wfmt_dataset::DatasetLock::write(&data_dir)?);
         let store = Store::new(data_dir.clone());
         let client = Client::new(
             args.platform.clone(),
@@ -288,7 +287,7 @@ impl Engine {
         let now = ms(Utc::now());
         let state = store.load_state()?;
         let mut engine = Self {
-            sink: ParquetSink::new(store.root().join(wfmt_types::layout::PARQUET_DIR)),
+            sink: ParquetSink::new(store.root().join(wfmt_dataset::layout::PARQUET_DIR)),
             meta: store.load_meta()?,
             pipeline: Pipeline {
                 normalizer: Normalizer::new(rework_cutoff),
@@ -524,7 +523,7 @@ impl Engine {
             if raw.feed().is_some() {
                 tracing::info!(feed = %raw.weapon, "recovering uncommitted raw fetch");
                 self.pipeline.process_feed(&tracked, &raw, &mut self.sink)?;
-                self.sink.acknowledge_raw(&raw);
+                self.sink.acknowledge_raw(raw.file_name());
                 self.sink.flush()?;
                 continue;
             }
@@ -536,7 +535,7 @@ impl Engine {
                 })?;
             tracing::info!(weapon = %raw.weapon, "recovering uncommitted raw fetch");
             self.pipeline.process(weapon, &raw, &mut self.sink)?;
-            self.sink.acknowledge_raw(&raw);
+            self.sink.acknowledge_raw(raw.file_name());
             self.sink.flush()?;
         }
         Ok(())
@@ -677,7 +676,7 @@ impl Engine {
             // Without a raw journal, publish before the scheduler can persist progress.
             self.sink.flush()?;
         } else {
-            self.sink.acknowledge_raw(raw);
+            self.sink.acknowledge_raw(raw.file_name());
         }
         Ok(summary)
     }
@@ -723,7 +722,7 @@ impl Engine {
             .pipeline
             .process_feed(&self.weapons, raw, &mut self.sink)?;
         if !self.args.no_raw {
-            self.sink.acknowledge_raw(raw);
+            self.sink.acknowledge_raw(raw.file_name());
         }
         self.sink.flush()?;
         self.since_flush = 0;
@@ -1278,7 +1277,7 @@ mod tests {
         store.save_raw(&raw)?;
         let mut sink = ParquetSink::new(root.join("parquet"));
         sink.prepare(raw.scraped_at)?;
-        sink.acknowledge_raw(&raw);
+        sink.acknowledge_raw(raw.file_name());
         sink.flush()?;
 
         let mut engine = Engine::new(

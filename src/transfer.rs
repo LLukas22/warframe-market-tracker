@@ -8,7 +8,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
-use wfmt_types::layout::PARQUET_DIR;
+use wfmt_dataset::layout::PARQUET_DIR;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
@@ -20,12 +20,11 @@ use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use futures_util::StreamExt;
-use parquet::file::reader::SerializedFileReader;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
-use wfmt_scraper::dataset::{DatasetLock, sync_dir, unique_id};
-use wfmt_scraper::maintenance::RetentionState;
+use wfmt_dataset::maintenance::RetentionState;
+use wfmt_dataset::{DatasetLock, sync_dir, unique_id};
 
 const MANIFEST: &str = "wfmt-export.json";
 const FORMAT: u32 = 1;
@@ -189,7 +188,7 @@ fn validate(stage: &Path) -> Result<()> {
         .iter()
         .filter(|f| f.extension().is_some_and(|e| e == "parquet"))
     {
-        SerializedFileReader::new(File::open(file)?)
+        wfmt_dataset::schema::check_parquet(file)
             .with_context(|| format!("Damaged file in the export: {}", file.display()))?;
         parquet += 1;
     }
@@ -252,7 +251,7 @@ fn apply_ready(root: &Path) -> Result<()> {
     }
     let _lock = DatasetLock::write(root)?;
     // Describes the replaced data. The scraper compacts the new data again when it starts.
-    match fs::remove_file(root.join(wfmt_scraper::maintenance::COMPACTION_STATE)) {
+    match fs::remove_file(root.join(wfmt_dataset::maintenance::COMPACTION_STATE)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}
     }

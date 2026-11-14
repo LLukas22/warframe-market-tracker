@@ -5,8 +5,6 @@ mod chart;
 #[cfg(feature = "server")]
 mod data;
 #[cfg(feature = "server")]
-mod effects;
-#[cfg(feature = "server")]
 mod hub;
 #[cfg(feature = "server")]
 mod images;

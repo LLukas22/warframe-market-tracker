@@ -1,0 +1,30 @@
+[package]
+name = "wfmt-store"
+version = "0.1.0"
+edition = "2024"
+description = "The server's read model: the dataset in memory, indexed to answer the web UI's searches and riven pages."
+license = "MIT"
+
+[dependencies]
+wfmt-types.workspace = true
+wfmt-api.workspace = true
+wfmt-model.workspace = true
+wfmt-dataset.workspace = true
+anyhow.workspace = true
+arrow.workspace = true
+parquet.workspace = true
+# Fast hashing for the in-memory indexes; keys are ids from our own dataset.
+rustc-hash = "2"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Tests write their data the way the scraper does.
+wfmt-scraper.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -2,14 +2,13 @@
 //! versions of the code: run it on each and diff the files. Server times are blanked.
 //!
 //! ```sh
-//! WFMT_GOLDEN=/tmp/out.jsonl cargo test --release --no-default-features --features server \
-//!     --bin warframe-market-tracker data::golden -- --ignored
+//! WFMT_GOLDEN=/tmp/out.jsonl cargo test --release -p wfmt-store golden -- --ignored
 //! ```
 
 use std::io::Write;
 
 use super::*;
-use crate::api::Period;
+use wfmt_api::Period;
 
 #[test]
 #[ignore = "writes answers on the real dataset for comparison"]
@@ -20,7 +19,10 @@ fn dump_answers() {
     };
     // A fixed clock: periods slide with time, and the two runs being compared happen apart.
     FROZEN_NOW.store(1_794_600_000_000, Ordering::Relaxed);
-    let store = Store::new(data_dir());
+    let store = Store::new(std::env::var_os("WFMT_DATA_DIR").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../data"),
+        PathBuf::from,
+    ));
     store.refresh();
     let inner = store.inner.read().unwrap();
     let mut file = std::io::BufWriter::new(File::create(out).unwrap());

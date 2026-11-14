@@ -7,12 +7,16 @@ license = "MIT"
 repository = "https://github.com/LLukas22/warframe-market-tracker"
 
 [workspace]
-members = ["ocr", "scraper", "types"]
+members = ["api", "dataset", "model", "ocr", "scraper", "store", "types"]
 
 # Versions shared by the crates. Members add the features they need.
 [workspace.dependencies]
 wfmt-types = { path = "types" }
 wfmt-scraper = { path = "scraper" }
+wfmt-model = { path = "model" }
+wfmt-dataset = { path = "dataset" }
+wfmt-store = { path = "store" }
+wfmt-api = { path = "api" }
 anyhow = "1"
 arrow = { version = "60", default-features = false }
 chrono = "0.4"
@@ -46,7 +50,10 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 wfmt-types.workspace = true
+wfmt-api.workspace = true
 wfmt-scraper = { workspace = true, optional = true }
+wfmt-dataset = { workspace = true, optional = true }
+wfmt-store = { workspace = true, optional = true }
 gloo-timers = { version = "0.3", features = ["futures"] }
 dioxus = { version = "0.7", features = ["fullstack", "router"] }
 serde.workspace = true
@@ -54,8 +61,6 @@ tracing.workspace = true
 
 # Server only
 tower-http = { version = "0.6", features = ["compression-gzip"], optional = true }
-arrow = { workspace = true, optional = true }
-parquet = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "fs", "time", "io-util"], optional = true }
 reqwest = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
@@ -65,21 +70,22 @@ futures-util = { version = "0.3", optional = true }
 tar = { version = "0.4", optional = true }
 tokio-util = { version = "0.7", features = ["io"], optional = true }
 hf-hub = { version = "1", optional = true }
-# Fast hashing for the in-memory indexes; keys are ids from our own dataset.
-rustc-hash = { version = "2", optional = true }
 # Constant-time comparison for the admin token.
 subtle = { version = "2", optional = true }
 
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-server = ["dep:tower-http", "dep:wfmt-scraper", "dioxus/server", "dep:arrow", "dep:parquet", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub", "dep:rustc-hash", "dep:subtle"]
+server = ["dep:tower-http", "dep:wfmt-scraper", "dep:wfmt-store", "dep:wfmt-dataset", "dioxus/server", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub", "dep:subtle"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true
 js-sys = "0.3"
 
 [dev-dependencies]
+# Tests write small parquet files to move around.
+arrow.workspace = true
+parquet.workspace = true
 flate2.workspace = true
 tempfile.workspace = true
 

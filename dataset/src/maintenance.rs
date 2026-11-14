@@ -3,30 +3,49 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use wfmt_types::layout::{DATE_PREFIX, PARQUET_DIR, Table};
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
-use clap::Args;
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::{DatasetLock, PARQUET_ZSTD_LEVEL, Transaction, durable_write, unique_id};
+use crate::layout::{DATE_PREFIX, PARQUET_DIR, RAW_DIR, RECEIPTS_DIR, Table};
+use crate::tx::{DatasetLock, PARQUET_ZSTD_LEVEL, Transaction, durable_write, unique_id};
 
-#[derive(Args, Clone, Debug)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct MaintenanceArgs {
     /// Keep raw responses for this many days. 0 disables raw cleanup.
-    #[arg(long, env = "WFMT_RAW_RETENTION_DAYS", default_value_t = 14)]
+    #[cfg_attr(
+        feature = "clap",
+        arg(long, env = "WFMT_RAW_RETENTION_DAYS", default_value_t = 14)
+    )]
     pub raw_retention_days: u32,
 
     /// Hours between local storage maintenance passes (no API requests).
-    #[arg(long, env = "WFMT_MAINTENANCE_INTERVAL_HOURS", default_value_t = 6, value_parser = clap::value_parser!(u64).range(1..=8760))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            env = "WFMT_MAINTENANCE_INTERVAL_HOURS",
+            default_value_t = 6,
+            value_parser = clap::value_parser!(u64).range(1..=8760)
+        )
+    )]
     pub maintenance_interval_hours: u64,
 
     /// Approximate combined input size of a compacted part, in MiB.
-    #[arg(long, env = "WFMT_COMPACT_TARGET_MB", default_value_t = 128, value_parser = clap::value_parser!(u64).range(1..=4096))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            env = "WFMT_COMPACT_TARGET_MB",
+            default_value_t = 128,
+            value_parser = clap::value_parser!(u64).range(1..=4096)
+        )
+    )]
     pub compact_target_mb: u64,
 }
 
@@ -159,7 +178,7 @@ pub fn maintain(root: &Path, now: DateTime<Utc>, args: &MaintenanceArgs) -> Resu
             .date_naive()
             .checked_sub_signed(TimeDelta::days(i64::from(args.raw_retention_days)))
             .context("raw retention window is too large")?;
-        for date in dated_dirs(&root.join("raw"), "")?
+        for date in dated_dirs(&root.join(RAW_DIR), "")?
             .into_iter()
             .filter(|d| *d < cutoff)
         {
@@ -255,8 +274,8 @@ pub fn prune_feeds(root: &Path, now: DateTime<Utc>, retention: TimeDelta) -> Res
     let _lock = DatasetLock::write(root)?;
     let cutoff = (now - retention).timestamp_millis();
     let mut expired = Vec::new();
-    for date in dated_dirs(&root.join("raw"), "")? {
-        let relative = PathBuf::from("raw").join(date.to_string());
+    for date in dated_dirs(&root.join(RAW_DIR), "")? {
+        let relative = PathBuf::from(RAW_DIR).join(date.to_string());
         let directory = root.join(&relative);
         let mut names = Vec::new();
         for entry in fs::read_dir(&directory)? {
@@ -268,7 +287,7 @@ pub fn prune_feeds(root: &Path, now: DateTime<Utc>, retention: TimeDelta) -> Res
         if names.is_empty() {
             continue;
         }
-        let confirmed = confirmed_archives(&json_files(&directory.join(".committed"))?)?;
+        let confirmed = confirmed_archives(&json_files(&directory.join(RECEIPTS_DIR))?)?;
         expired.extend(
             names
                 .into_iter()
@@ -296,9 +315,9 @@ pub fn prune_feeds(root: &Path, now: DateTime<Utc>, retention: TimeDelta) -> Res
 }
 
 fn prune_day(root: &Path, date: NaiveDate, now: DateTime<Utc>, report: &mut Report) -> Result<()> {
-    let relative = PathBuf::from("raw").join(date.to_string());
+    let relative = PathBuf::from(RAW_DIR).join(date.to_string());
     let directory = root.join(&relative);
-    let receipts_dir = directory.join(".committed");
+    let receipts_dir = directory.join(RECEIPTS_DIR);
     let receipts = json_files(&receipts_dir)?;
     let confirmed = confirmed_archives(&receipts)?;
     let mut tx = Transaction::new(root)?;
@@ -394,7 +413,6 @@ fn json_files(dir: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{ParquetSink, RawResponse, Store};
     use arrow::array::{Int64Array, RecordBatch};
     use arrow::compute::concat_batches;
     use std::sync::Arc;
@@ -531,124 +549,6 @@ mod tests {
             let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(file)?)?;
             assert_eq!(reader.metadata().file_metadata().num_rows(), 2);
         }
-        Ok(())
-    }
-
-    fn raw(at: &str, weapon: &str) -> Result<RawResponse> {
-        Ok(RawResponse::new(
-            at.parse()?,
-            weapon.into(),
-            "pc".into(),
-            Vec::new(),
-            Vec::new(),
-        ))
-    }
-
-    #[test]
-    fn feed_archives_expire_in_hours_only_once_committed() -> Result<()> {
-        let temp = TempRoot::new()?;
-        let root = &temp.0;
-        let store = Store::new(root.clone());
-        let mut sink = ParquetSink::new(root.join("parquet"));
-        let now: DateTime<Utc> = "2026-11-03T12:00:00Z".parse()?;
-        let expired = raw("2026-11-03T05:59:59Z", wfmt_types::Feed::Recent.as_str())?;
-        let yesterday = raw("2026-11-02T23:00:00Z", wfmt_types::Feed::Popular.as_str())?;
-        let fresh = raw("2026-11-03T06:00:01Z", wfmt_types::Feed::Recent.as_str())?;
-        let weapon = raw("2026-11-03T01:00:00Z", "kulstar")?;
-        let uncommitted = raw("2026-11-03T02:00:00Z", wfmt_types::Feed::Popular.as_str())?;
-        for raw in [&yesterday, &expired, &fresh, &weapon] {
-            store.save_raw(raw)?;
-            sink.prepare(raw.scraped_at)?;
-            sink.acknowledge_raw(raw);
-            sink.flush()?;
-        }
-        store.save_raw(&uncommitted)?;
-
-        assert_eq!(prune_feeds(root, now, TimeDelta::hours(6))?, 2);
-        let exists = |raw: &RawResponse| {
-            root.join("raw")
-                .join(raw.scraped_at.date_naive().to_string())
-                .join(raw.file_name())
-                .exists()
-        };
-        assert!(!exists(&expired) && !exists(&yesterday));
-        assert!(exists(&fresh), "still inside the window");
-        assert!(exists(&weapon), "weapon archives keep their own retention");
-        assert!(exists(&uncommitted), "still needed for crash recovery");
-        assert_eq!(retention_state(root)?.deleted_files, 2);
-        // A deleted archive stays committed, so a restart doesn't look for it.
-        assert_eq!(store.pending_raw()?.len(), 1);
-        assert_eq!(prune_feeds(root, now, TimeDelta::hours(6))?, 0);
-        assert_eq!(retention_state(root)?.deleted_files, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn retention_requires_a_successful_flush_and_keeps_recent_or_unconfirmed_raw() -> Result<()> {
-        let temp = TempRoot::new()?;
-        let root = &temp.0;
-        let store = Store::new(root.clone());
-        let mut sink = ParquetSink::new(root.join("parquet"));
-        let old = raw("2026-10-01T12:00:00Z", "old")?;
-        let pending = raw("2026-10-01T12:00:01Z", "pending")?;
-        let recent = raw("2026-11-02T12:00:00Z", "recent")?;
-        for raw in [&old, &pending, &recent] {
-            store.save_raw(raw)?;
-        }
-        sink.prepare(old.scraped_at)?;
-        sink.acknowledge_raw(&old);
-        // Force a failure before publication; the archive must remain protected.
-        fs::create_dir_all(root.join("storage"))?;
-        fs::write(root.join("storage/transaction.json"), b"corrupt")?;
-        assert!(sink.flush().is_err());
-        fs::remove_file(root.join("storage/transaction.json"))?;
-        let now = "2026-11-03T12:00:00Z".parse()?;
-        assert_eq!(maintain(root, now, &options())?.raw_deleted, 0);
-        sink.flush()?;
-        sink.prepare(recent.scraped_at)?;
-        sink.acknowledge_raw(&recent);
-        sink.flush()?;
-        let mut disabled = options();
-        disabled.raw_retention_days = 0;
-        assert_eq!(maintain(root, now, &disabled)?.raw_deleted, 0);
-        let report = maintain(root, now, &options())?;
-        assert_eq!(report.raw_deleted, 1);
-        assert_eq!(report.raw_unconfirmed, 1);
-        assert!(
-            root.join("raw/2026-10-01")
-                .join(pending.file_name())
-                .exists()
-        );
-        assert!(
-            root.join("raw/2026-11-02")
-                .join(recent.file_name())
-                .exists()
-        );
-        assert!(!root.join("raw/2026-10-01").join(old.file_name()).exists());
-        assert_eq!(retention_state(root)?.deleted_files, 1);
-        assert_eq!(maintain(root, now, &options())?.raw_deleted, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn broken_compaction_keeps_source_files_and_raw_archives() -> Result<()> {
-        let temp = TempRoot::new()?;
-        let root = &temp.0;
-        let store = Store::new(root.clone());
-        let old = raw("2026-10-01T12:00:00Z", "old")?;
-        store.save_raw(&old)?;
-        let mut sink = ParquetSink::new(root.join("parquet"));
-        sink.prepare(old.scraped_at)?;
-        sink.acknowledge_raw(&old);
-        sink.flush()?;
-        write_part(root, "auctions", "2026-10-01", "part-0.parquet", 1, false)?;
-        // Missing attributes partner: fail closed before publishing or pruning anything.
-        assert!(maintain(root, "2026-11-03T00:00:00Z".parse()?, &options()).is_err());
-        assert!(
-            root.join("parquet/auctions/date=2026-10-01/part-0.parquet")
-                .exists()
-        );
-        assert!(root.join("raw/2026-10-01").join(old.file_name()).exists());
         Ok(())
     }
 }

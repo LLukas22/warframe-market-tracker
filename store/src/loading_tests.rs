@@ -151,7 +151,7 @@ fn gone_with_reason(reason: &str) -> RecordBatch {
 
 #[test]
 fn late_auction_failure_does_not_apply_a_prefix_or_intern_attributes() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     for _ in 0..2 {
         assert!(
             inner
@@ -178,7 +178,7 @@ fn late_auction_failure_does_not_apply_a_prefix_or_intern_attributes() {
 
 #[test]
 fn late_schema_failure_leaves_existing_data_unchanged() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     inner
         .load_parts([Ok(auctions())], [Ok(attributes())])
         .unwrap();
@@ -193,7 +193,7 @@ fn late_schema_failure_leaves_existing_data_unchanged() {
 
 #[test]
 fn late_gone_failure_does_not_mark_auctions_or_duplicate_events() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     inner
         .load_parts([Ok(auctions())], [Ok(attributes())])
         .unwrap();
@@ -213,7 +213,7 @@ fn late_gone_failure_does_not_mark_auctions_or_duplicate_events() {
 
 #[test]
 fn unknown_gone_reasons_reject_the_part_before_anything_changes() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     inner
         .load_parts([Ok(auctions())], [Ok(attributes())])
         .unwrap();

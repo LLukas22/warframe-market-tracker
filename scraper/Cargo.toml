@@ -7,6 +7,8 @@ license = "MIT"
 
 [dependencies]
 wfmt-types.workspace = true
+wfmt-model.workspace = true
+wfmt-dataset = { workspace = true, features = ["clap"] }
 anyhow.workspace = true
 arrow.workspace = true
 chrono = { workspace = true, features = ["serde"] }

@@ -6,13 +6,14 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
 };
+use wfmt_dataset::identity::Registry;
+use wfmt_dataset::maintenance::{self, MaintenanceArgs};
+use wfmt_dataset::sink::ParquetSink;
 use wfmt_scraper::{
+    archive::{PageKind, RawPage, RawResponse, State, Store},
     engine::{Engine, EngineArgs},
-    identity::Registry,
-    maintenance::{self, MaintenanceArgs},
     normalize::Normalizer,
     pipeline::Pipeline,
-    store::{PageKind, ParquetSink, RawPage, RawResponse, State, Store},
     tracking::Tracker,
     wfm,
 };
@@ -112,7 +113,7 @@ fn restart_replays_uncommitted_gone_with_tracking_and_does_not_duplicate_history
     let first = raw(t, vec![auction.clone()]);
     store.save_raw(&first)?;
     pipeline.process(&weapon, &first, &mut sink)?;
-    sink.acknowledge_raw(&first);
+    sink.acknowledge_raw(first.file_name());
     assert!(!store.seen_dir().join("kulstar.json").exists());
     sink.flush()?;
     let seen_before = fs::read(store.seen_dir().join("kulstar.json"))?;
@@ -120,7 +121,7 @@ fn restart_replays_uncommitted_gone_with_tracking_and_does_not_duplicate_history
     let second = raw(t + TimeDelta::hours(4), Vec::<serde_json::Value>::new());
     store.save_raw(&second)?;
     assert_eq!(pipeline.process(&weapon, &second, &mut sink)?.gone, 1);
-    sink.acknowledge_raw(&second);
+    sink.acknowledge_raw(second.file_name());
     // Simulate the scheduler having persisted progress followed by a process crash.
     let mut state = State::default();
     state.last_fetch.insert("kulstar".into(), second.scraped_at);
@@ -371,7 +372,7 @@ fn feed_rows_keep_every_change_and_outlive_their_raw_archives() -> Result<()> {
         store.save_raw(&raw)?;
         let written = pipeline.process_feed(&weapons, &raw, &mut sink)?.auctions;
         assert_eq!(written == 1, *wanted, "poll at +{minutes} min");
-        sink.acknowledge_raw(&raw);
+        sink.acknowledge_raw(raw.file_name());
         sink.flush()?;
         expected += usize::from(*wanted);
         raws.push(raw);
@@ -397,7 +398,7 @@ fn feed_rows_keep_every_change_and_outlive_their_raw_archives() -> Result<()> {
     );
     store.save_raw(&sweep)?;
     pipeline.process(&weapons[0], &sweep, &mut sink)?;
-    sink.acknowledge_raw(&sweep);
+    sink.acknowledge_raw(sweep.file_name());
     sink.flush()?;
     expected += 2;
 
@@ -415,7 +416,7 @@ fn feed_rows_keep_every_change_and_outlive_their_raw_archives() -> Result<()> {
     );
     store.save_raw(&next_day)?;
     pipeline.process_feed(&weapons, &next_day, &mut sink)?;
-    sink.acknowledge_raw(&next_day);
+    sink.acknowledge_raw(next_day.file_name());
     sink.flush()?;
 
     assert_eq!(rows(&root.0, "gone"), 0);

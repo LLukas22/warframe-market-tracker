@@ -7,18 +7,17 @@
 //! stay as they are. The weapon list comes along, for names, groups and images.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use chrono::NaiveDate;
 use hf_hub::{HFRepository, RepoTypeDataset};
-use parquet::file::reader::SerializedFileReader;
 use serde::{Deserialize, Serialize};
-use wfmt_scraper::dataset::{DatasetLock, Transaction, durable_write};
+use wfmt_dataset::{DatasetLock, Transaction, durable_write};
 
 use super::{CATALOG, Config, LOCAL_CATALOG, day_files, every_hour, live, now_ms};
-use wfmt_types::layout::{DATE_PREFIX, PARQUET_DIR, Table};
+use wfmt_dataset::layout::{DATE_PREFIX, PARQUET_DIR, Table};
 
 const STATE: &str = "hub/pull.json";
 /// Where files are downloaded to before they're moved into the data.
@@ -150,7 +149,7 @@ fn plan(root: &Path, remote: &BTreeMap<String, u64>) -> Result<Vec<DayPlan>> {
 fn apply(root: &Path, download: &Path, day: &DayPlan) -> Result<()> {
     for path in &day.fetch {
         let file = download.join(path);
-        SerializedFileReader::new(File::open(&file)?)
+        wfmt_dataset::schema::check_parquet(&file)
             .with_context(|| format!("{path} from the dataset is damaged"))?;
     }
     let _lock = DatasetLock::write(root)?;

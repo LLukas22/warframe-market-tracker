@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Each riven's newest current auction, see [`Inner::newest_current`].
+/// Each riven's newest current auction, see [`Data::newest_current`].
 pub(super) type Newest = Table<RivenId, Option<AuctionId>>;
 
 /// One bit per weapon class, and one for weapons without a class.
@@ -77,7 +77,7 @@ pub(super) fn bucket_hours_for(span_ms: i64) -> u32 {
         .unwrap_or(widest)
 }
 
-impl Inner {
+impl Data {
     /// `matches` on the row; only stat filters look at the auction itself.
     pub(super) fn row_matches(
         &self,
@@ -157,7 +157,8 @@ impl Inner {
         newest[self.auctions[auction].riven].is_some_and(|n| n != auction && self.newer(n, auction))
     }
 
-    pub(super) fn thumb(&self, slug: &str) -> Option<String> {
+    /// A weapon's thumbnail, relative to warframe.market's static assets.
+    pub fn thumb(&self, slug: &str) -> Option<String> {
         let index = *self.weapon_index.get(slug)?;
         self.weapons[index].thumb.clone()
     }
@@ -247,7 +248,7 @@ impl Inner {
                 classes.sort_by_key(class_order);
                 AttrInfo {
                     slug: slug.clone(),
-                    name: crate::api::attribute_name(slug),
+                    name: wfmt_api::attribute_name(slug),
                     classes,
                 }
             })
@@ -365,10 +366,14 @@ impl Inner {
         self.search_page(q, 0, None)
     }
 
-    /// `overview`, reused while the data and the memo are fresh (see `OVERVIEW_MEMO`).
+    /// `overview`, reused while the data and the memo are fresh (see `Memo`).
     pub fn overview_memo(&self) -> Overview {
         // A memo is only ever replaced whole, so one left by a panic is still consistent.
-        let mut memo = OVERVIEW_MEMO.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut memo = self
+            .memo
+            .overview
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if let Some((version, at, overview)) = &*memo
             && *version == self.version
             && at.elapsed() < MEMO_TTL
@@ -380,12 +385,16 @@ impl Inner {
         overview
     }
 
-    /// `search`, reused for the all-weapon searches (see `OVERVIEW_MEMO`).
+    /// `search`, reused for the all-weapon searches (see `Memo`).
     pub fn search_memo(&self, q: &Query) -> SearchResult {
         if q.weapon.is_some() || q.riven_id.is_some() {
             return self.search(q);
         }
-        let mut memo = SEARCH_MEMO.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut memo = self
+            .memo
+            .search
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         memo.retain(|(version, at, _, _)| *version == self.version && at.elapsed() < MEMO_TTL);
         if let Some((_, _, _, result)) = memo.iter().find(|(_, _, query, _)| query == q) {
             return result.clone();

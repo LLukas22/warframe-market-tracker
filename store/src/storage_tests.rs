@@ -3,8 +3,18 @@
 use super::load::price_limit;
 use super::query::bucket_hours_for;
 use super::*;
-use crate::api::{DAY_MS, Period};
 use std::io::Read;
+use wfmt_api::{DAY_MS, Period};
+use wfmt_dataset::identity::Registry;
+use wfmt_dataset::maintenance::{MaintenanceArgs, maintain};
+use wfmt_dataset::sink::ParquetSink;
+use wfmt_scraper::{
+    archive::{RawPage, RawResponse},
+    normalize::Normalizer,
+    pipeline::Pipeline,
+    tracking::Tracker,
+    wfm::Weapon,
+};
 
 /// The fixtures are dated around 1970, outside the default period.
 fn all_time() -> Query {
@@ -13,15 +23,6 @@ fn all_time() -> Query {
         ..Query::default()
     }
 }
-use wfmt_scraper::{
-    identity::Registry,
-    maintenance::{MaintenanceArgs, maintain},
-    normalize::Normalizer,
-    pipeline::Pipeline,
-    store::{ParquetSink, RawPage, RawResponse},
-    tracking::Tracker,
-    wfm::Weapon,
-};
 
 #[test]
 fn price_limit_catches_joke_prices_but_keeps_real_high_ends() {
@@ -51,7 +52,7 @@ fn price_limit_catches_joke_prices_but_keeps_real_high_ends() {
 }
 
 fn add_auction(
-    inner: &mut Inner,
+    inner: &mut Data,
     weapon: WeaponId,
     id: &str,
     price: i64,
@@ -91,7 +92,7 @@ fn add_auction(
 }
 
 fn comparison_auction(
-    inner: &mut Inner,
+    inner: &mut Data,
     weapon: WeaponId,
     id: &str,
     quality: Option<f64>,
@@ -117,7 +118,7 @@ fn comparison_auction(
 
 #[test]
 fn comparisons_rank_stats_then_normalized_rolls_and_ignore_price_and_rank() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     let zoom = inner.intern_attr("zoom");
     let recoil = inner.intern_attr("recoil");
@@ -179,7 +180,7 @@ fn comparisons_rank_stats_then_normalized_rolls_and_ignore_price_and_rank() {
 
 #[test]
 fn partial_matches_rank_overlap_before_curse_quality_and_recency() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     let zoom = inner.intern_attr("zoom");
     let recoil = inner.intern_attr("recoil");
@@ -265,7 +266,7 @@ fn partial_matches_rank_overlap_before_curse_quality_and_recency() {
 
 #[test]
 fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     let other_weapon = inner.intern_weapon("other", "Other", Some(WeaponClass::Rifle));
     comparison_auction(&mut inner, weapon, "source", Some(0.5), None, 1000);
@@ -366,7 +367,7 @@ fn comparisons_include_gone_deduplicate_relists_and_validate_selected_auction() 
 
 #[test]
 fn riven_history_orders_observations_and_clears_stale_removal_status() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     let index = add_auction(&mut inner, weapon, "riven", 200, 3000);
     inner
@@ -387,7 +388,7 @@ fn riven_history_orders_observations_and_clears_stale_removal_status() {
 
 #[test]
 fn comparisons_are_bounded_with_deterministic_recency_ties() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     comparison_auction(&mut inner, weapon, "source", Some(0.5), None, 1000);
     assert!(
@@ -434,8 +435,8 @@ fn comparisons_are_bounded_with_deterministic_recency_ties() {
 }
 
 /// A weapon with normal prices at 100p plus a joke-priced riven, and a joke riven that's gone.
-fn store_with_outlier() -> Inner {
-    let mut inner = Inner::default();
+fn store_with_outlier() -> Data {
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     inner.weapons[weapon].last_scrape = 2000;
     for i in 0..9 {
@@ -459,8 +460,8 @@ fn store_with_outlier() -> Inner {
 
 /// Rivens where +crit doubles the price and -zoom raises it by half, plus a neutral stat
 /// and optional joke prices.
-fn store_with_stat_effects(count: usize, strength: f64) -> Inner {
-    let mut inner = Inner::default();
+fn store_with_stat_effects(count: usize, strength: f64) -> Data {
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     inner.weapons[weapon].last_scrape = 2000;
     let crit = inner.intern_attr("critical_chance");
@@ -548,13 +549,13 @@ fn stat_effects_ignore_invalid_prices_and_hold_back_weak_signals() {
     assert!(flat.positive.is_empty() && flat.negative.is_empty() && flat.rivens == 150);
     assert_eq!(flat.explained.map(|e| e < 0.15), Some(true));
     assert_eq!(clean.rare_stats, 0);
-    assert_eq!(Inner::default().stat_effects("nope").rivens, 0);
+    assert_eq!(Data::default().stat_effects("nope").rivens, 0);
 }
 
 #[test]
 fn history_filters_combine_and_paginate_active_and_gone_rivens() {
     fn pair(
-        inner: &mut Inner,
+        inner: &mut Data,
         weapon: WeaponId,
         id: &str,
         old_price: i64,
@@ -581,7 +582,7 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
             direct_sell: true,
         });
     }
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     pair(&mut inner, weapon, "price", 100, 200, "Alice");
     pair(&mut inner, weapon, "owner", 100, 100, "Bob");
@@ -696,7 +697,7 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
 #[test]
 fn period_limits_chart_and_gone_listings_but_not_current_ones() {
     let now = now_ms();
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     // Seen long ago and gone long ago, seen recently and gone recently, and still listed.
     let old = add_auction(&mut inner, weapon, "old", 100, now - 60 * DAY_MS);
@@ -789,7 +790,7 @@ fn old_search_requests_default_history_filters_to_off() {
 
 #[test]
 fn listing_pages_reach_every_match_beyond_the_old_caps() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     for i in 0..237 {
         add_auction(&mut inner, weapon, &format!("active{i:03}"), 100, 1000);
@@ -858,7 +859,7 @@ fn listing_pages_reach_every_match_beyond_the_old_caps() {
 
 #[test]
 fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     inner.weapons[weapon].last_scrape = 2000;
     let a = add_auction(&mut inner, weapon, "old", 100, 1000);
@@ -882,7 +883,7 @@ fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
 
 #[test]
 fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     inner.weapons[weapon].last_scrape = 3000;
     // Still current, though no longer seen (capped pages), and cheaper.
@@ -948,7 +949,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
 
 #[test]
 fn history_uses_latest_price_of_the_newest_copy() {
-    let mut inner = Inner::default();
+    let mut inner = Data::default();
     let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
     let a = add_auction(&mut inner, weapon, "a", 100, 1000);
     let b = add_auction(&mut inner, weapon, "b", 150, 2000);

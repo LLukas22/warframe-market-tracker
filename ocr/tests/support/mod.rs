@@ -3,8 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
+use wfmt_model::{AttrInput, RivenInput, WeaponClass, fit};
 use wfmt_ocr::{ScannedRiven, Scanner, Vocabulary};
-use wfmt_scraper::riven::{AttrInput, RivenInput, WeaponClass, fit};
+use wfmt_types::{RivenType, WeaponGroup};
 
 pub const WEAPONS: &str = include_str!("../fixtures/riven_weapons.json");
 pub const ATTRIBUTES: &str = include_str!("../fixtures/riven_attributes.json");
@@ -42,7 +43,23 @@ pub fn read_image(path: &Path) -> Vec<u8> {
 
 /// Checks the scanned stats against the riven stat model: a misread value rarely fits any rank.
 pub fn check_fit(riven: &ScannedRiven) -> String {
-    let weapons = wfmt_scraper::wfm::parse_weapons(WEAPONS).unwrap();
+    /// The parts of warframe.market's weapon list the stat model needs.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Weapon {
+        slug: String,
+        #[serde(default)]
+        group: WeaponGroup,
+        riven_type: RivenType,
+        #[serde(default)]
+        game_ref: String,
+        disposition: Option<f64>,
+    }
+    #[derive(serde::Deserialize)]
+    struct List {
+        data: Vec<Weapon>,
+    }
+    let weapons = serde_json::from_str::<List>(WEAPONS).unwrap().data;
     let Some(weapon) = riven
         .weapon
         .as_ref()
@@ -64,7 +81,7 @@ pub fn check_fit(riven: &ScannedRiven) -> String {
         .collect();
     let input = RivenInput {
         class,
-        is_bow: weapon.is_bow(),
+        is_bow: wfmt_types::market::is_bow(weapon.riven_type, &weapon.game_ref),
         listed_rank: 8,
         attributes: &inputs,
         legacy_disposition: weapon.disposition,

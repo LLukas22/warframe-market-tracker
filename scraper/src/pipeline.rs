@@ -5,11 +5,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::identity::Registry;
+use crate::archive::{PageKind, RawPage, RawResponse};
 use crate::normalize::Normalizer;
-use crate::store::{PageKind, ParquetSink, RawPage, RawResponse};
 use crate::tracking::{Coverage, Seen, Tracker, returned_everything};
 use crate::wfm::{self, Auction, Weapon};
+use wfmt_dataset::identity::Registry;
+use wfmt_dataset::sink::ParquetSink;
 
 pub struct Summary {
     pub auctions: usize,

@@ -27,8 +27,8 @@ image = { version = "0.25", default-features = false, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
-# Only for checking scans with the stat model (`riven::fit`) in the example and sample test.
-wfmt-scraper.workspace = true
+# Only for checking scans with the stat model in the example and sample test.
+wfmt-model.workspace = true
 
 [lints]
 workspace = true

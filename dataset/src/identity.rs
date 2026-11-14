@@ -65,7 +65,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    #[cfg(test)]
+    /// A registry that isn't saved anywhere, for tests and dry runs.
     pub fn in_memory() -> Self {
         Self::default()
     }
@@ -127,7 +127,7 @@ impl Registry {
         file.write_all(buf.as_bytes())?;
         file.sync_all()?;
         if let Some(parent) = path.parent() {
-            crate::dataset::sync_dir(parent)?;
+            crate::tx::sync_dir(parent)?;
         }
         self.pending.clear();
         Ok(())
@@ -408,7 +408,7 @@ mod tests {
     fn journal_lookup_ignores_polarity_and_never_registers() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path();
-        let path = dir.join("rivens.jsonl");
+        let path = dir.join(crate::layout::REGISTRY);
         let a = [
             fitted("critical_chance", true, 1.04, 0.0004),
             fitted("multishot", true, 0.95, 0.0005),
@@ -448,7 +448,7 @@ mod tests {
     fn journal_roundtrip() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path();
-        let path = dir.join("rivens.jsonl");
+        let path = dir.join(crate::layout::REGISTRY);
         let a = [
             fitted("critical_chance", true, 1.04, 0.0004),
             fitted("multishot", true, 0.95, 0.0005),

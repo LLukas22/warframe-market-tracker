@@ -8,7 +8,9 @@
 
 use wfmt_types::SortBy;
 
-use crate::store::PageKind;
+use wfmt_dataset::schema::{GoneReason, GoneRow};
+
+use crate::archive::PageKind;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -122,41 +124,6 @@ pub struct Seen {
     /// When the entry endpoint last confirmed the listing still exists.
     #[serde(default)]
     pub verified_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GoneReason {
-    /// Missing from a complete, successfully decoded fetch.
-    Missing,
-    /// The entry endpoint said it no longer exists.
-    Verified,
-    /// Not seen for a long time while outside the covered range.
-    Expired,
-}
-
-impl GoneReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Missing => "missing",
-            Self::Verified => "verified",
-            Self::Expired => "expired",
-        }
-    }
-
-    /// Parses what [`GoneReason::as_str`] writes.
-    pub fn parse(s: &str) -> Option<Self> {
-        [Self::Missing, Self::Verified, Self::Expired]
-            .into_iter()
-            .find(|r| r.as_str() == s)
-    }
-}
-
-pub struct GoneRow {
-    pub detected_at: DateTime<Utc>,
-    pub weapon_slug: String,
-    pub auction_id: String,
-    pub reason: GoneReason,
-    pub seen: Seen,
 }
 
 /// Last known state of every auction per weapon, persisted as `seen/<weapon>.json`.
@@ -301,7 +268,13 @@ impl Tracker {
                     weapon_slug: weapon.to_owned(),
                     auction_id: id,
                     reason,
-                    seen: s,
+                    riven_id: s.riven_id,
+                    last_price: s.price,
+                    direct_sell: s.direct_sell,
+                    owner_name: s.owner_name,
+                    created: s.created,
+                    first_seen: s.first_seen,
+                    last_seen: s.last_seen,
                 }),
                 None => {
                     keep.insert(id, s);

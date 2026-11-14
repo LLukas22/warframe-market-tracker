@@ -94,7 +94,6 @@ macro_rules! names {
 }
 
 pub mod attributes;
-pub mod layout;
 
 pub use market::{Feed, RivenType, SortBy, Unit, WeaponClass, WeaponGroup};
 

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use super::load::read_batches;
 use super::*;
-use crate::api::{Period, RivenScan, ScanAttr};
+use wfmt_api::{Period, RivenScan, ScanAttr};
 
 /// Runs `f` until about 300 ms or 200 runs have passed (at least 3) and prints its timings.
 fn bench<T: serde::Serialize>(name: &str, mut f: impl FnMut() -> T) {
@@ -39,7 +39,10 @@ fn bench<T: serde::Serialize>(name: &str, mut f: impl FnMut() -> T) {
 #[test]
 #[ignore = "benchmark on the real dataset"]
 fn server_computations() {
-    let dir = data_dir();
+    let dir = std::env::var_os("WFMT_DATA_DIR").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../data"),
+        PathBuf::from,
+    );
     if !dir.join("parquet").exists() {
         eprintln!("no dataset at {}, nothing to measure", dir.display());
         return;
@@ -237,7 +240,8 @@ fn server_computations() {
             .collect(),
         warnings: Vec::new(),
     };
-    bench("scan_match", || inner.scan_match(&scan));
+    let registry = dir.join(wfmt_dataset::layout::REGISTRY);
+    bench("scan_match", || inner.scan_match(&scan, &registry));
     bench("scanned_detail", || {
         inner.scanned_detail(&scan, Comparisons::default())
     });

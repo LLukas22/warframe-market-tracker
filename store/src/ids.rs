@@ -33,13 +33,13 @@ macro_rules! ids {
 }
 
 ids! {
-    /// A weapon, in `Inner::weapons`.
+    /// A weapon, in `Data::weapons`.
     WeaponId(u16),
-    /// An attribute slug, in `Inner::attrs`.
+    /// An attribute slug, in `Data::attrs`.
     AttrId(u16),
-    /// A riven: every listing of the same mod, in `Inner::rivens`.
+    /// A riven: every listing of the same mod, in `Data::rivens`.
     RivenId(u32),
-    /// A listing, in `Inner::auctions`.
+    /// A listing, in `Data::auctions`.
     AuctionId(u32),
 }
 

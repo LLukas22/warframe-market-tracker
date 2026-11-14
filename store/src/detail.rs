@@ -60,7 +60,7 @@ pub(super) fn similarity(a: &Auction, b: &Auction) -> Option<Similarity> {
     })
 }
 
-impl Inner {
+impl Data {
     pub fn riven_detail(
         &self,
         id: &str,
@@ -264,7 +264,8 @@ impl Inner {
 
     /// The id of the stored riven a scan shows, if it has been listed before. Matches the way
     /// listings are identified, except that polarity isn't read from screenshots.
-    pub fn scan_match(&self, scan: &RivenScan) -> Option<String> {
+    /// `registry` is the riven registry, see `wfmt_dataset::layout::REGISTRY`.
+    pub fn scan_match(&self, scan: &RivenScan, registry: &Path) -> Option<String> {
         let (auction, fit) = self.scanned_auction(scan)?;
         let fit = fit?;
         let attrs: Vec<IdAttr> = scan
@@ -287,11 +288,10 @@ impl Inner {
             owner: "",
             attributes: &attrs,
         };
-        let journal = data_dir().join("rivens.jsonl");
-        let id = match Registry::find_in_journal(&journal, &input) {
+        let id = match Registry::find_in_journal(registry, &input) {
             Ok(id) => id?,
             Err(e) => {
-                tracing::warn!("failed to read {}: {e:#}", journal.display());
+                tracing::warn!("failed to read {}: {e:#}", registry.display());
                 return None;
             }
         };

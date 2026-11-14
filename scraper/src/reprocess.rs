@@ -2,18 +2,17 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use wfmt_types::layout::PARQUET_DIR;
+use wfmt_dataset::layout::{PARQUET_DIR, RAW_DIR, RECEIPTS_DIR, REGISTRY};
+use wfmt_dataset::sink::ParquetSink;
+use wfmt_dataset::{DatasetLock, identity::Registry, maintenance};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
-use crate::dataset::DatasetLock;
+use crate::archive::{RawResponse, Store};
 use crate::engine;
-use crate::identity::Registry;
-use crate::maintenance;
 use crate::normalize::Normalizer;
 use crate::pipeline::Pipeline;
-use crate::store::{ParquetSink, RawResponse, Store};
 use crate::tracking::Tracker;
 use crate::wfm::{self, Weapon};
 
@@ -84,7 +83,7 @@ pub fn reprocess(
             pipeline
                 .process_feed(&all_weapons, &raw, &mut sink)
                 .with_context(|| format!("processing {}", path.display()))?;
-            sink.acknowledge_raw(&raw);
+            sink.acknowledge_raw(raw.file_name());
             continue;
         }
         let Some(weapon) = weapons.get(raw.weapon.as_str()) else {
@@ -100,7 +99,7 @@ pub fn reprocess(
         let summary = pipeline
             .process(weapon, &raw, &mut sink)
             .with_context(|| format!("processing {}", path.display()))?;
-        sink.acknowledge_raw(&raw);
+        sink.acknowledge_raw(raw.file_name());
         gone += summary.gone;
         if (i + 1) % 250 == 0 {
             sink.flush()?;
@@ -117,7 +116,7 @@ pub fn reprocess(
             .root()
             .join(format!("backup-{}", Utc::now().format("%Y%m%dT%H%M%S")));
         std::fs::create_dir_all(&backup)?;
-        for name in [PARQUET_DIR, "rivens.jsonl", "seen"] {
+        for name in [PARQUET_DIR, REGISTRY, "seen"] {
             let current = store.root().join(name);
             if current.exists() {
                 std::fs::rename(&current, backup.join(name))?;
@@ -128,17 +127,17 @@ pub fn reprocess(
             }
         }
         // The successful rebuild also confirms archives written before receipts existed.
-        let receipts = result.root().join("raw");
+        let receipts = result.root().join(RAW_DIR);
         if receipts.exists() {
             for day in std::fs::read_dir(&receipts)? {
                 let day = day?;
                 let destination = store
                     .root()
-                    .join("raw")
+                    .join(RAW_DIR)
                     .join(day.file_name())
-                    .join(".committed");
+                    .join(RECEIPTS_DIR);
                 std::fs::create_dir_all(&destination)?;
-                for receipt in std::fs::read_dir(day.path().join(".committed"))? {
+                for receipt in std::fs::read_dir(day.path().join(RECEIPTS_DIR))? {
                     let receipt = receipt?;
                     std::fs::rename(receipt.path(), destination.join(receipt.file_name()))?;
                 }
@@ -155,9 +154,9 @@ pub fn reprocess(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::maintenance::MaintenanceArgs;
-    use crate::store::RawPage;
+    use crate::archive::RawPage;
     use std::fs;
+    use wfmt_dataset::maintenance::MaintenanceArgs;
 
     struct TestDir {
         data_dir: PathBuf,
