@@ -268,6 +268,10 @@ impl From<Feed> for PageKind {
 pub struct Verified {
     pub auction_id: String,
     pub exists: bool,
+    /// The auction's weapon, for checks archived as a feed ([`Feed::Check`]), which isn't a
+    /// weapon's fetch. A weapon's own fetch leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weapon: Option<String>,
 }
 
 impl RawResponse {

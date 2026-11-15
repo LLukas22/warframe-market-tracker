@@ -125,12 +125,12 @@ impl Data {
 
     /// A gone event still holds if the auction wasn't seen again afterwards.
     pub(super) fn gone_valid(&self, g: &GoneEvent) -> bool {
-        self.auctions[g.auction].last_seen <= g.t
+        self.auctions[g.auction].seen() <= g.t
     }
 
     pub(super) fn is_current(&self, a: &Auction) -> bool {
         // Absence from capped pages is unresolved, not evidence of removal.
-        a.gone.is_none_or(|g| a.last_seen > g.at)
+        a.current_gone().is_none()
     }
 
     pub(super) fn newer(&self, a: AuctionId, b: AuctionId) -> bool {
@@ -328,8 +328,8 @@ impl Data {
             sellers: sellers.len() as u32,
             gone_at: a.current_gone().map(|g| g.at),
             gone_reason: a.current_gone().map(|g| g.reason.as_str().to_owned()),
-            last_seen: a.last_seen,
-            unconfirmed: a.last_seen < w.last_scrape,
+            last_seen: a.seen(),
+            unconfirmed: a.seen() < w.last_scrape,
             weapon_slug: w.slug.clone(),
             weapon_name: w.name.clone(),
             riven_name: a.riven_name.clone(),

@@ -258,6 +258,7 @@ impl Data {
             created: now,
             first_seen: now,
             last_seen: now,
+            checked_at: 0,
             attrs,
             buyout_price: None,
             starting_price: None,
@@ -394,7 +395,7 @@ impl Data {
                     owner_name: a.owner_name.clone(),
                     created: a.created,
                     first_seen: a.first_seen,
-                    last_seen: a.last_seen,
+                    last_seen: a.seen(),
                     gone_at: a.current_gone().map(|g| g.at),
                     gone_reason: a.current_gone().map(|g| g.reason.as_str().to_owned()),
                     points: {

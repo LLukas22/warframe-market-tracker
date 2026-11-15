@@ -216,6 +216,7 @@ impl Store {
                 || gone_files(&parquet)
                     .iter()
                     .any(|g| !inner.loaded.contains(g))
+                || inner.checks_pending(&self.dir)
         };
         if has_new {
             let mut inner = self.write();
@@ -252,6 +253,8 @@ impl Store {
                 Err(e) => tracing::error!("failed to load {}: {e:#}", path.display()),
             }
         }
+        // Checks go over the dataset: they're newer than most of it.
+        inner.apply_checks(dir);
         inner.finish_load();
     }
 
@@ -321,6 +324,8 @@ struct Auction {
     created: i64,
     first_seen: i64,
     last_seen: i64,
+    /// When a check last found it still listed (see `checks`), 0 if none did.
+    checked_at: i64,
     attrs: Vec<Attr>,
     // Latest prices.
     buyout_price: Option<i64>,
@@ -332,7 +337,12 @@ struct Auction {
 impl Auction {
     /// `gone`, unless the auction has been seen again since.
     fn current_gone(&self) -> Option<Gone> {
-        self.gone.filter(|g| g.at >= self.last_seen)
+        self.gone.filter(|g| g.at >= self.seen())
+    }
+
+    /// When it was last known to be listed: seen by the scraper or found by a check.
+    fn seen(&self) -> i64 {
+        self.last_seen.max(self.checked_at)
     }
 }
 
@@ -421,6 +431,11 @@ pub struct Data {
     riven_changes: Table<RivenId, RivenChanges>,
     /// Sorted by time.
     gone: Vec<GoneEvent>,
+    /// How much of the check log is applied, in bytes (see `checks`).
+    checks_len: u64,
+    /// Removals the check log added, so the dataset's row for the same removal isn't counted
+    /// again.
+    check_gone: HashSet<(AuctionId, i64)>,
     /// Per auction, what searches filter on (see `Row`). Rebuilt by `finish_load`.
     rows: Table<AuctionId, Row>,
     memo: Memo,
@@ -488,12 +503,14 @@ impl Row {
     }
 }
 
+mod checks;
 mod detail;
 mod effects;
 mod ids;
 mod load;
 mod query;
 
+pub use checks::{CHECKS_FILE, ListingStatus};
 use ids::{AttrId, AuctionId, Id, RivenId, Table, WeaponId};
 
 use load::{Catalog, apply_catalog, gone_files, part_files};

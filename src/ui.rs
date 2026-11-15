@@ -583,6 +583,12 @@ fn RivenPageContent(id: String, auction: String) -> Element {
                     rsx! {
                         document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
                         crate::riven_view::RivenSummary { listing: selected.clone(), now: Some(data.server_time) }
+                        crate::riven_view::AvailabilityPanel {
+                            auction_id: selected.auction_id.clone(),
+                            gone_at: selected.gone_at,
+                            gone_reason: selected.gone_reason.clone(),
+                            now: data.server_time,
+                        }
                         div { class: "listing-bar",
                             div { class: "listing-tabs", role: "tablist", aria_label: "Riven sections",
                                 button {
@@ -686,46 +692,63 @@ fn ScannedRivenContent(scan: String) -> Element {
     let listed_before = matched.read().clone().flatten();
 
     rsx! {
-        main { class: "riven-page",
-            crate::scan::ScanNotice { target: original(), matched: false }
-            if let Some(current) = draft() {
-                crate::scan::ScanEditor { scan: current, onchange }
-            } else {
-                h2 { "Riven not found" }
-                p { "This scan link is broken. Try scanning the screenshot again." }
-            }
-            if let Some(id) = listed_before {
-                div { class: "scan-note",
-                    "This riven has been listed on warframe.market before. "
-                    Link { to: Route::RivenPage { id, auction: String::new() }, "Open its page and price history →" }
+        main { class: "riven-page scan-page",
+            div { class: "scan-intro",
+                h2 { "Check your scan" }
+                p { class: "muted",
+                    "Compare what was read with your screenshot and fix anything that's off. "
+                    "The grade and similar rivens below follow your edits."
                 }
             }
-            div { class: if detail.pending() { "scan-results updating" } else { "scan-results" },
-                match shown() {
-                    None => rsx! { p { role: "status", "Grading riven…" } },
-                    Some(Err(error)) => rsx! {
-                        p { class: "error", "Could not grade this riven: {error}" }
-                        button { onclick: move |_| detail.restart(), "Retry" }
-                    },
-                    Some(Ok(None)) => rsx! {
-                        p { class: "muted", "Choose the weapon above to grade this riven." }
-                    },
-                    Some(Ok(Some(data))) => {
-                        let selected = &data.listing;
-                        rsx! {
-                            document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
-                            if !selected.fit_ok {
-                                p { class: "scan-note warn",
-                                    "These values don't fit any rank of this riven, so a number or stat was probably misread. Check them against your riven above. Similar rivens are still shown, without roll comparisons."
+            div { class: "scan-layout",
+                crate::scan::ScanScreenshot { target: original() }
+                div { class: "scan-check",
+                    crate::scan::ScanNotice { target: original(), matched: false }
+                    if let Some(current) = draft() {
+                        crate::scan::ScanEditor { scan: current, onchange }
+                    } else {
+                        div { class: "scan-note warn",
+                            strong { "This scan link is broken." }
+                            " Scan the screenshot again."
+                        }
+                    }
+                    if let Some(id) = listed_before {
+                        div { class: "scan-note scan-listed",
+                            span { "This riven has been listed on warframe.market before." }
+                            Link { to: Route::RivenPage { id, auction: String::new() }, "Open its page and price history →" }
+                        }
+                    }
+                }
+            }
+            if draft().is_some() {
+                div { class: if detail.pending() { "scan-results updating" } else { "scan-results" },
+                    match shown() {
+                        None => rsx! { p { role: "status", "Grading riven…" } },
+                        Some(Err(error)) => rsx! {
+                            p { class: "error", "Could not grade this riven: {error}" }
+                            button { onclick: move |_| detail.restart(), "Retry" }
+                        },
+                        Some(Ok(None)) => rsx! {
+                            p { class: "scan-empty muted", "Choose the weapon above to grade this riven." }
+                        },
+                        Some(Ok(Some(data))) => {
+                            let selected = &data.listing;
+                            rsx! {
+                                document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
+                                h2 { class: "riven-section-title", "Your riven, graded" }
+                                if !selected.fit_ok {
+                                    p { class: "scan-note warn",
+                                        "These values don't fit any rank of this riven, so a number or stat was probably misread. Check them against your screenshot. Similar rivens are still shown, without roll comparisons."
+                                    }
                                 }
-                            }
-                            crate::riven_view::RivenSummary { listing: selected.clone(), now: None }
-                            h2 { class: "riven-section-title", "Similar rivens ({data.similar_total})" }
-                            SimilarRivens {
-                                selected: selected.clone(), similar: data.similar.clone(),
-                                similar_total: data.similar_total, comparisons_hidden: data.comparisons_hidden,
-                                now: data.server_time, updating: detail.pending(),
-                                include_legacy, include_unfit, include_loose,
+                                crate::riven_view::RivenSummary { listing: selected.clone(), now: None }
+                                h2 { class: "riven-section-title", "Similar rivens ({data.similar_total})" }
+                                SimilarRivens {
+                                    selected: selected.clone(), similar: data.similar.clone(),
+                                    similar_total: data.similar_total, comparisons_hidden: data.comparisons_hidden,
+                                    now: data.server_time, updating: detail.pending(),
+                                    include_legacy, include_unfit, include_loose,
+                                }
                             }
                         }
                     }
@@ -1648,7 +1671,6 @@ fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) ->
     };
     let quality = l.mean_quality.map(|q| format!("{:.0}%", q * 100.0));
     let invalid_limit = l.price_limit.map(format_plat).unwrap_or_default();
-    let rolls = l.re_rolls.unwrap_or(0);
     let mr = l.mastery_level.unwrap_or(0);
     let age = format_age(now, l.created);
 
@@ -1671,8 +1693,10 @@ fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) ->
                     div { class: "riven-name",
                         Link { to: target, onclick: move |e: MouseEvent| e.stop_propagation(), "{l.weapon_name} {l.riven_name}" }
                     }
-                    div { class: "muted small",
-                        "MR{mr} · {rolls} rolls · {l.polarity}"
+                    div { class: "riven-meta muted small",
+                        crate::riven_view::Polarity { polarity: l.polarity.clone() }
+                        span { "MR{mr}" }
+                        crate::riven_view::Rerolls { count: l.re_rolls.unwrap_or(0) }
                     }
                     RivenId { id: l.riven_id.clone(), short: true }
                     div {

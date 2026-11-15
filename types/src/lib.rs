@@ -117,11 +117,16 @@ pub mod market {
         /// The popular listings.
         #[serde(rename = "feed_popular")]
         Popular,
+        /// Single listings checked when someone opens them in the web app. Not polled: each
+        /// check is archived and recorded like a feed of one listing.
+        #[serde(rename = "check")]
+        Check,
     }
 
     names!(Feed {
         Recent => "feed_recent",
         Popular => "feed_popular",
+        Check => "check",
     });
 
     impl Feed {
@@ -286,6 +291,19 @@ pub enum Command {
     /// Run storage maintenance now instead of waiting for its interval: compact the closed
     /// days and prune old raw archives. Waits for the current request, not for a sweep.
     Maintain,
+    /// Record what the web app found when it checked a listing on warframe.market.
+    Check(ListingCheck),
+}
+
+/// One listing looked up on warframe.market's entry endpoint, to be recorded in the dataset.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ListingCheck {
+    pub auction_id: String,
+    pub weapon: String,
+    /// When it was checked, unix ms.
+    pub checked_at: i64,
+    /// The entry endpoint's body when the listing is still for sale, `None` when it's gone.
+    pub body: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

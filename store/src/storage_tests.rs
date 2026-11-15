@@ -77,6 +77,7 @@ fn add_auction(
         created: 0,
         first_seen: last_seen,
         last_seen,
+        checked_at: 0,
         attrs: Vec::new(),
         buyout_price: Some(price),
         starting_price: Some(price),
@@ -1309,5 +1310,103 @@ fn cache_reloads_compacted_history_without_duplicate_observations() -> anyhow::R
     *store.last_scan.lock().unwrap() = None;
     store.refresh();
     assert_eq!(store.read().observations.len(), observations + auctions);
+    Ok(())
+}
+
+#[test]
+fn listing_checks_confirm_or_remove_listings_and_count_each_removal_once() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().to_path_buf();
+    let mut body = String::new();
+    flate2::read::GzDecoder::new(
+        &include_bytes!("../../scraper/tests/fixtures/kulstar_auctions.json.gz")[..],
+    )
+    .read_to_string(&mut body)?;
+    let page: serde_json::Value = serde_json::from_str(&body)?;
+    let ids: Vec<String> = page["payload"]["auctions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap().to_owned())
+        .collect();
+    let (kept, sold) = (ids[0].clone(), ids[1].clone());
+    let weapon = Weapon {
+        slug: "kulstar".into(),
+        game_ref: String::new(),
+        group: WeaponGroup::Secondary,
+        riven_type: RivenType::Pistol,
+        disposition: Some(1.3),
+        i18n: serde_json::json!({"en":{"name":"Kulstar"}}),
+    };
+    let mut pipeline = Pipeline {
+        normalizer: Normalizer::new("2026-10-22T00:00:00Z".parse()?),
+        registry: Registry::open(root.join("rivens.jsonl"))?,
+        tracker: Tracker::open(root.join("seen")),
+    };
+    let mut sink = ParquetSink::new(root.join("parquet"));
+    let swept_at: chrono::DateTime<chrono::Utc> = "2026-11-01T00:00:00Z".parse()?;
+    let sweep = RawResponse::new(
+        swept_at,
+        "kulstar".into(),
+        "pc".into(),
+        vec![RawPage {
+            buyout_policy: None,
+            sort_by: wfmt_types::SortBy::PriceAsc.into(),
+            body,
+        }],
+        Vec::new(),
+    );
+    pipeline.process(&weapon, &sweep, &mut sink)?;
+    sink.flush()?;
+
+    let store = Store::new(root.clone());
+    store.refresh();
+    let listed_at = swept_at.timestamp_millis() + HOUR_MS;
+    let gone_at = listed_at + HOUR_MS;
+    store.record_check(&kept, listed_at, true)?;
+    store.record_check(&sold, gone_at, false)?;
+    // Unknown listings are kept in the log but change nothing.
+    store.record_check("unknown", gone_at, false)?;
+    let removals = |data: &Data, id: &str| {
+        let index = data.auction_index[id];
+        data.gone.iter().filter(|g| g.auction == index).count()
+    };
+    let check = |data: &Data| {
+        let status = data.listing_status(&kept).unwrap();
+        assert_eq!(status.checked_at, Some(listed_at));
+        assert_eq!(status.gone, None);
+        assert_eq!(
+            data.listing(&data.auctions[data.auction_index[&kept]])
+                .last_seen,
+            listed_at
+        );
+        let status = data.listing_status(&sold).unwrap();
+        assert_eq!(status.gone, Some((gone_at, "verified".to_owned())));
+        assert!(!data.is_current(&data.auctions[data.auction_index[&sold]]));
+        assert_eq!(removals(data, &sold), 1);
+    };
+    check(&store.read());
+
+    // A scraping server records the same removal in its dataset, at the check's time.
+    let recorded = RawResponse::new(
+        chrono::DateTime::from_timestamp_millis(gone_at).unwrap(),
+        wfmt_types::Feed::Check.as_str().into(),
+        "pc".into(),
+        Vec::new(),
+        vec![wfmt_scraper::archive::Verified {
+            auction_id: sold.clone(),
+            exists: false,
+            weapon: Some("kulstar".into()),
+        }],
+    );
+    pipeline.process_feed(std::slice::from_ref(&weapon), &recorded, &mut sink)?;
+    sink.flush()?;
+    // Loaded after the check, and in a fresh load before it: counted once either way.
+    *store.last_scan.lock().unwrap() = None;
+    store.refresh();
+    check(&store.read());
+    let reloaded = Store::new(root.clone());
+    reloaded.refresh();
+    check(&reloaded.read());
     Ok(())
 }

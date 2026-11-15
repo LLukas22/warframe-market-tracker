@@ -391,7 +391,9 @@ impl Data {
                         let old_riven = a.riven;
                         a.weapon = weapon;
                         a.riven = riven;
-                        a.gone = None;
+                        // Only a removal after this sighting still holds; one a check found can
+                        // be newer than rows that arrive later.
+                        a.gone = a.gone.filter(|g| g.at >= t);
                         set_str(&mut a.riven_name, riven_name.value(i));
                         set_str(&mut a.polarity, polarity.value(i));
                         a.mastery_level = opt(mastery, i, Int64Array::value);
@@ -435,6 +437,7 @@ impl Data {
                             created: created.value(i),
                             first_seen: t,
                             last_seen: t,
+                            checked_at: 0,
                             attrs: take_attrs(),
                             buyout_price,
                             starting_price,
@@ -485,6 +488,9 @@ impl Data {
                             .context("unknown gone reason")?,
                     });
                 }
+                if self.counted_by_check(auction, t) {
+                    continue;
+                }
                 self.gone.push(GoneEvent {
                     t,
                     auction,
@@ -500,14 +506,7 @@ impl Data {
         // Nothing depends on the order of observations at the same time: an auction has at most
         // one per time, and copies of a riven are told apart by `recency`.
         self.observations.sort_by_key(|o| o.t);
-        // Gone events at the same time are ordered by their auction's `recency`, so when copies
-        // of a riven go at once, the newest one speaks for it (see `gone_by_bucket` and the gone
-        // tab), whatever order the files hold them in.
-        let auctions = &self.auctions;
-        self.gone.sort_by(|a, b| {
-            a.t.cmp(&b.t)
-                .then_with(|| recency(&auctions[a.auction]).cmp(&recency(&auctions[b.auction])))
-        });
+        self.sort_gone();
 
         self.riven_changes = self.rivens.same_ids(RivenChanges::default());
         let mut first_prices = self.rivens.same_ids(None);
@@ -538,6 +537,17 @@ impl Data {
             weapon.price_limit = price_limit(&mut prices);
         }
         self.rows = self.build_rows();
+    }
+
+    /// Gone events at the same time are ordered by their auction's `recency`, so when copies of
+    /// a riven go at once, the newest one speaks for it (see `gone_by_bucket` and the gone tab),
+    /// whatever order the files hold them in.
+    pub(super) fn sort_gone(&mut self) {
+        let auctions = &self.auctions;
+        self.gone.sort_by(|a, b| {
+            a.t.cmp(&b.t)
+                .then_with(|| recency(&auctions[a.auction]).cmp(&recency(&auctions[b.auction])))
+        });
     }
 
     pub(super) fn build_rows(&self) -> Table<AuctionId, Row> {

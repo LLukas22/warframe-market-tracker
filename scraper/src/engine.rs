@@ -17,8 +17,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use clap::Args;
 use tokio::sync::{mpsc, watch};
 use wfmt_types::{
-    Command, CurrentFetch, Feed, FetchLog, HOUR_MS, LOCK_FILE, MaintenanceSummary, Phase,
-    ScraperStatus, Settings, SortBy, SweepProgress, SweepSummary, Trigger,
+    Command, CurrentFetch, Feed, FetchLog, HOUR_MS, LOCK_FILE, ListingCheck, MaintenanceSummary,
+    Phase, ScraperStatus, Settings, SortBy, SweepProgress, SweepSummary, Trigger,
 };
 
 use crate::archive::{Meta, PersistedSweep, RawPage, RawResponse, State, Store, Verified};
@@ -473,7 +473,51 @@ impl Engine {
             Command::Cancel => self.finish_sweep(true)?,
             // Taken out at the start of each step, see `Engine::step`.
             Command::Maintain => {}
+            Command::Check(check) => self.record_check(check)?,
         }
+        Ok(())
+    }
+
+    /// Archives and records a listing the web app checked: a sighting if it's still listed, a
+    /// verified removal if not. Fails only when storing it fails.
+    fn record_check(&mut self, check: ListingCheck) -> Result<()> {
+        let Some(at) = DateTime::from_timestamp_millis(check.checked_at) else {
+            return Ok(());
+        };
+        let page = check.body.as_deref().and_then(wfm::entry_as_page);
+        let verified = if check.body.is_none() {
+            vec![Verified {
+                auction_id: check.auction_id,
+                exists: false,
+                weapon: Some(check.weapon),
+            }]
+        } else {
+            Vec::new()
+        };
+        if page.is_none() && verified.is_empty() {
+            return Ok(());
+        }
+        let pages = page
+            .map(|body| RawPage {
+                sort_by: Feed::Check.into(),
+                buyout_policy: None,
+                body,
+            })
+            .into_iter()
+            .collect();
+        let raw = RawResponse::new(
+            at,
+            Feed::Check.as_str().to_owned(),
+            self.client.platform().to_owned(),
+            pages,
+            verified,
+        );
+        let summary = self.process_feed(&raw)?;
+        tracing::info!(
+            auctions = summary.auctions,
+            gone = summary.gone,
+            "recorded a listing check"
+        );
         Ok(())
     }
 
@@ -619,6 +663,7 @@ impl Engine {
                         raw.verified.push(Verified {
                             auction_id: id,
                             exists,
+                            weapon: None,
                         });
                         self.archive_progress(&raw).map_err(FetchError::Storage)?;
                     }
@@ -1483,6 +1528,63 @@ mod tests {
         ));
         assert_eq!(store.raw_files()?.len(), 1);
         server.join().unwrap()?;
+        Ok(())
+    }
+
+    #[test]
+    fn listing_checks_are_archived_and_recorded_right_away() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().to_path_buf();
+        let store = Store::new(root.clone());
+        store.save_weapons_raw(r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#)?;
+        let mut engine = Engine::new(
+            root.clone(),
+            "2026-10-22T00:00:00Z".parse()?,
+            options(false),
+        )?;
+        let mut body = String::new();
+        flate2::read::GzDecoder::new(
+            &include_bytes!("../tests/fixtures/kulstar_auctions.json.gz")[..],
+        )
+        .read_to_string(&mut body)?;
+        let page: serde_json::Value = serde_json::from_str(&body)?;
+        let mut auction = page["payload"]["auctions"][0].clone();
+        auction["item"]["weapon_url_name"] = "kulstar".into();
+        auction["buyout_price"] = 500.into();
+        let id = auction["id"].as_str().unwrap().to_owned();
+        let seen = || -> Result<serde_json::Value> {
+            Ok(serde_json::from_slice(&fs::read(
+                store.seen_dir().join("kulstar.json"),
+            )?)?)
+        };
+        let checked_at = ms(Utc::now());
+
+        engine.handle(Command::Check(ListingCheck {
+            auction_id: id.clone(),
+            weapon: "kulstar".into(),
+            checked_at,
+            body: Some(serde_json::json!({"payload": {"auction": auction}}).to_string()),
+        }))?;
+        assert!(store.pending_raw()?.is_empty(), "committed right away");
+        let archived = store.raw_files()?;
+        assert_eq!(archived.len(), 1);
+        assert!(
+            archived[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("check-")
+        );
+        assert!(seen()?.get(&id).is_some());
+
+        engine.handle(Command::Check(ListingCheck {
+            auction_id: id.clone(),
+            weapon: "kulstar".into(),
+            checked_at: checked_at + 60_000,
+            body: None,
+        }))?;
+        assert!(seen()?.get(&id).is_none());
+        assert!(root.join("parquet/gone").read_dir()?.next().is_some());
         Ok(())
     }
 

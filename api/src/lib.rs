@@ -522,6 +522,23 @@ pub fn looks_like_riven_id(text: &str) -> bool {
         && t.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Whether a listing is still for sale on warframe.market, for the riven page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Availability {
+    pub listed: bool,
+    /// When that was found out, unix ms: the last check, or when a gone listing went.
+    pub checked_at: i64,
+    /// warframe.market was asked just now, rather than answered from the data.
+    pub live: bool,
+    /// Why a gone listing counts as gone: `verified` (warframe.market said so), `missing` or
+    /// `expired` (see the `gone` table).
+    pub gone_reason: Option<String>,
+    pub server_time: i64,
+    /// Asking again before this answers from the last check; 0 for a gone listing, which
+    /// isn't checked again.
+    pub refresh_at: i64,
+}
+
 /// Cheap enough to poll: what the header shows, and when to fetch market data again.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LiveStats {

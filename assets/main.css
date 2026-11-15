@@ -797,12 +797,37 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 .riven-head { display: flex; align-items: center; gap: 18px; }
 .riven-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .riven-title h2 { font-size: 22px; text-transform: capitalize; }
+/* MR and rolls, after the polarity symbol. */
+.riven-meta { display: flex; align-items: center; gap: 8px; }
+.polarity { flex: none; width: 16px; height: 16px; color: var(--text); opacity: .85; }
+.rerolls { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; }
+.rerolls svg { flex: none; width: 13px; height: 13px; }
 .riven-tags .tag { margin-top: 2px; }
 .riven-offer { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; text-align: right; }
 .riven-offer .plat { font-size: 26px; }
 .riven-foot { display: flex; flex-wrap: wrap; gap: 6px 20px; align-items: center; padding-top: 12px; border-top: 1px solid var(--border); }
 .riven-foot .riven-id code { color: var(--text); }
 .riven-section-title { margin: 28px 0 8px; }
+
+/* Whether the listing is still on warframe.market, under the riven's summary. */
+.availability { display: flex; align-items: center; gap: 14px; margin-top: 12px; padding: 12px 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.availability-icon { flex: none; display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); }
+.availability-icon svg { width: 26px; height: 26px; }
+.availability-icon .spinner { width: 20px; height: 20px; }
+.availability-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.availability-text strong { font-size: 15px; }
+.availability.listed { border-color: color-mix(in srgb, var(--positive) 40%, var(--border)); }
+.availability.listed .availability-icon, .availability.listed strong { color: var(--positive); }
+.availability.gone { border-color: color-mix(in srgb, var(--negative) 40%, var(--border)); }
+.availability.gone .availability-icon, .availability.gone strong { color: var(--negative); }
+.availability.failed .availability-icon, .availability.failed strong { color: var(--warn); }
+.availability-refresh { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.availability-refresh svg { width: 14px; height: 14px; }
+.availability-refresh svg.spinning { animation: spin .8s linear infinite; }
+@media (max-width: 600px) {
+  .availability { flex-wrap: wrap; padding: 12px; }
+  .availability-refresh { margin-left: 42px; }
+}
 
 .stat-panel { display: flex; flex-direction: column; gap: 14px; }
 .stat-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -834,28 +859,68 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
   .stat-scale { grid-template-columns: 56px 1fr 56px; }
 }
 
-/* Scanned riven: what the scanner read, editable, above the grading. */
-.scan-editor { display: flex; flex-direction: column; gap: 16px; margin-bottom: 16px; padding: 18px 20px; background: var(--panel); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); border-radius: var(--radius); }
-.scan-editor-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
+/* Scanned riven: the screenshot beside what the scanner read, editable, above the grading. */
+.scan-intro { margin-bottom: 16px; }
+.scan-intro h2 { font-size: 22px; margin-bottom: 4px; }
+.scan-intro p { margin: 0; max-width: 70ch; }
+.scan-layout { display: grid; grid-template-columns: minmax(240px, 340px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.scan-check { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.scan-check > .scan-note { margin: 0; }
+.scan-listed { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; justify-content: space-between; }
+.scan-listed a { font-weight: 600; }
+
+.scan-shot { position: sticky; top: 76px; display: flex; flex-direction: column; gap: 10px; padding: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.scan-shot-frame { position: relative; display: grid; place-items: center; min-height: 220px; overflow: hidden; border-radius: 8px; background: var(--bg); }
+.scan-shot-frame a { display: block; cursor: zoom-in; }
+.scan-shot-frame img { display: block; max-width: 100%; max-height: min(70vh, 640px); object-fit: contain; }
+.scan-shot-frame.empty { border: 1px dashed var(--panel-3); }
+.scan-shot-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 24px; color: var(--muted); text-align: center; }
+.scan-shot-empty svg { opacity: .6; }
+.scan-shot-empty p { margin: 0; max-width: 26ch; }
+.scan-shot-busy, .scan-shot-drop { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 10px; background: color-mix(in srgb, var(--bg) 78%, transparent); backdrop-filter: blur(2px); }
+.scan-shot-drop { display: none; border: 2px dashed var(--accent); border-radius: 8px; color: var(--accent); font-weight: 600; }
+.scan-dragging .scan-shot-drop { display: flex; }
+.scan-shot-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.scan-shot-button { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+
+.scan-editor { display: flex; flex-direction: column; gap: 18px; padding: 18px 20px; background: var(--panel); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); border-radius: var(--radius); }
+.scan-editor-head { display: flex; flex-direction: column; gap: 4px; }
 .scan-editor-head h3 { margin: 0; }
 .scan-fields { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 .scan-fields label { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--muted); font-size: 12px; }
 .scan-fields input, .scan-fields select { width: 100%; min-width: 0; color: var(--text); font-size: 14px; }
-.scan-stats { display: flex; flex-direction: column; gap: 8px; }
-.scan-stats .link-button { align-self: flex-start; font-size: 13px; }
-.scan-stat { display: grid; grid-template-columns: 130px minmax(0, 1fr) 140px auto; gap: 8px; align-items: center; }
+.scan-label { color: var(--muted); font-size: 12px; }
+.scan-stats { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; border-top: 1px solid var(--border); }
+.scan-stats > p { margin: 0; }
+.scan-stats-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; margin-bottom: 2px; }
+.scan-stat { display: grid; grid-template-columns: 38px minmax(0, 1fr) 130px auto; gap: 8px; align-items: center; }
 .scan-stat select, .scan-stat input { width: 100%; min-width: 0; }
-.scan-stat.positive .scan-stat-kind { color: var(--positive); }
-.scan-stat.negative .scan-stat-kind { color: var(--negative); }
+.scan-sign { align-self: stretch; padding: 0; font-size: 18px; font-weight: 700; line-height: 1; }
+.scan-stat.positive .scan-sign { color: var(--positive); background: color-mix(in srgb, var(--positive) 12%, var(--panel-2)); border-color: color-mix(in srgb, var(--positive) 35%, var(--border)); }
+.scan-stat.negative .scan-sign { color: var(--negative); background: color-mix(in srgb, var(--negative) 12%, var(--panel-2)); border-color: color-mix(in srgb, var(--negative) 35%, var(--border)); }
 .scan-stat-value { display: flex; align-items: center; gap: 6px; }
 .scan-stat-value input { text-align: right; font-variant-numeric: tabular-nums; }
 .scan-stat-value span { width: 14px; }
-.scan-results { transition: opacity .15s; }
+.scan-add { align-self: flex-start; margin-top: 2px; border-style: dashed; background: transparent; color: var(--accent); font-size: 13px; }
+.scan-stats .scan-note { margin: 4px 0 0; }
+.scan-results { margin-top: 8px; transition: opacity .15s; }
 .scan-results.updating { opacity: .6; }
+.scan-results > .scan-note { margin: 0 0 12px; }
+.scan-empty { padding: 24px 0; text-align: center; }
 
+@media (max-width: 860px) {
+  .scan-layout { grid-template-columns: minmax(0, 1fr); }
+  .scan-shot { position: static; }
+  .scan-shot-frame { min-height: 140px; }
+  .scan-shot-frame img { max-height: 300px; }
+}
 @media (max-width: 760px) {
+  .scan-intro h2 { font-size: 18px; }
   .scan-editor { padding: 14px; }
   .scan-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .scan-stat { grid-template-columns: 110px minmax(0, 1fr) auto; }
-  .scan-stat-name { grid-column: 1 / -1; grid-row: 1; }
+  .scan-stat { grid-template-columns: 40px minmax(0, 1fr) auto; row-gap: 6px; }
+  .scan-sign { grid-row: 1; grid-column: 1; }
+  .scan-stat-name { grid-row: 1; grid-column: 2; }
+  .scan-stat-remove { grid-row: 1; grid-column: 3; }
+  .scan-stat-value { grid-row: 2; grid-column: 2; }
 }

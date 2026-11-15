@@ -547,10 +547,14 @@ hours and follows the site's newest listings in between. Each finished UTC day i
 ## Tables
 
 - `auctions`: one row per sighting of a listing, at `scraped_at`. Prices are asking prices or
-  bids, not confirmed sales.
+  bids, not confirmed sales. `source` says where it was seen: a weapon's search (`price_asc`,
+  `price_desc`), a site-wide feed (`feed_recent`, `feed_popular`), or a `check` of that one
+  listing when someone opened it in the tracker.
 - `attributes`: the riven's stats for each `auctions` row, joined on `scraped_at` and
   `auction_id`.
-- `gone`: listings that disappeared (sold or removed), at `detected_at`.
+- `gone`: listings that disappeared (sold or removed), at `detected_at`. `reason` is `missing`
+  (absent from a search that returned everything), `verified` (warframe.market said it no longer
+  exists) or `expired` (not seen for four days).
 
 `riven_weapons.json` is warframe.market's weapon list, with names, groups and images. It isn't a
 table, it's there for trackers that use this dataset instead of scraping.

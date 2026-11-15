@@ -248,7 +248,7 @@ fn DataTransfer(token: String) -> Element {
     }
 }
 
-fn error_message(error: ServerFnError) -> String {
+pub(crate) fn error_message(error: ServerFnError) -> String {
     match error {
         ServerFnError::ServerError { message, .. } => message,
         other => other.to_string(),
@@ -666,6 +666,7 @@ fn weapon_name(slug: &str) -> String {
     match wfmt_types::Feed::from_id(slug) {
         Some(wfmt_types::Feed::Recent) => return "Most recent feed".into(),
         Some(wfmt_types::Feed::Popular) => return "Popular feed".into(),
+        Some(wfmt_types::Feed::Check) => return "Listing checks".into(),
         None => {}
     }
     slug.split('_')

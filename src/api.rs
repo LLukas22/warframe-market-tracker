@@ -47,6 +47,20 @@ pub async fn riven_detail(
         .await
 }
 
+/// Whether the listing with this auction id is still on warframe.market. Answers from the last
+/// check for a while, see `availability`; `refresh` shortens that to a few seconds.
+#[post("/api/availability")]
+pub async fn listing_availability(
+    auction: String,
+    refresh: bool,
+) -> Result<Availability, ServerFnError> {
+    let app = crate::app::get();
+    app.availability
+        .check(app, &auction, refresh)
+        .await
+        .map_err(|e| ServerFnError::new(format!("{e:#}")))
+}
+
 /// The riven a scan was matched to, if it has been listed before.
 #[post("/api/scan/match")]
 pub async fn scan_match(scan: RivenScan) -> Result<Option<String>, ServerFnError> {

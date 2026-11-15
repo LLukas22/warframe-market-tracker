@@ -131,13 +131,7 @@ impl Client {
     /// answers `app.form.not_exist` for them.
     pub async fn auction_exists(&mut self, id: &str) -> Result<bool> {
         let (status, body) = self.request(&format!("/v1/auctions/entry/{id}")).await?;
-        if status.is_success() {
-            return Ok(entry_is_listed(&body));
-        }
-        if body.contains("not_exist") {
-            return Ok(false);
-        }
-        bail!("auction entry {id} returned {status}: {body}")
+        entry_status(id, status, &body).map(|entry| matches!(entry, Entry::Listed))
     }
 
     /// Raw riven auction search body for one weapon.
@@ -165,6 +159,7 @@ impl Client {
         let path = match feed {
             Feed::Recent => "/v1/auctions",
             Feed::Popular => "/v1/auctions/popular",
+            Feed::Check => bail!("listing checks aren't polled"),
         };
         self.get(path).await
     }
@@ -336,6 +331,70 @@ struct AuctionsPayload {
     auctions: Vec<serde_json::Value>,
 }
 
+/// What the entry endpoint says about one auction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entry {
+    /// Still for sale.
+    Listed,
+    /// Sold, removed, closed or hidden.
+    Gone,
+}
+
+/// Reads an entry endpoint answer. Fails on anything but a listing or a deleted one.
+fn entry_status(id: &str, status: StatusCode, body: &str) -> Result<Entry> {
+    if status.is_success() {
+        return Ok(if entry_is_listed(body) {
+            Entry::Listed
+        } else {
+            Entry::Gone
+        });
+    }
+    if status.is_client_error() && body.contains("not_exist") {
+        return Ok(Entry::Gone);
+    }
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        bail!("warframe.market is rate limiting requests, try again in a minute");
+    }
+    bail!("auction entry {id} returned {status}")
+}
+
+/// Looks one auction up once, without the scraper's queue or retries: for the web app, where
+/// someone waits for the answer. Returns the body too, to record a listing that's still there.
+pub async fn check_entry(
+    http: &reqwest::Client,
+    platform: &str,
+    id: &str,
+) -> Result<(Entry, String)> {
+    // Auction ids are hex; anything else would change the URL.
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        bail!("not an auction id: {id:?}");
+    }
+    let response = http
+        .get(format!("{API}/v1/auctions/entry/{id}"))
+        .header("Accept", "application/json")
+        .header("Platform", platform)
+        .header("Language", "en")
+        .send()
+        .await
+        .context("reaching warframe.market")?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("reading warframe.market's answer")?;
+    Ok((entry_status(id, status, &body)?, body))
+}
+
+/// An entry endpoint body as a search page holding just that auction, so it can be recorded
+/// like a feed. `None` if the body has no auction.
+pub fn entry_as_page(body: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let auction = value.pointer_mut("/payload/auction")?.take();
+    auction
+        .is_object()
+        .then(|| serde_json::json!({ "payload": { "auctions": [auction] } }).to_string())
+}
+
 /// Whether an auction entry body shows a listing still for sale. A closed or hidden auction
 /// can't be bought, so it counts as gone. A body without those fields counts as listed.
 fn entry_is_listed(body: &str) -> bool {
@@ -356,6 +415,34 @@ fn closed_or_hidden_entries_are_not_listed() {
     assert!(!entry_is_listed(&entry(
         r#","closed":false,"visible":false"#
     )));
+}
+
+#[cfg(test)]
+#[test]
+fn entry_answers_tell_listed_from_gone_and_page_like_a_search() {
+    let listed = r#"{"payload":{"auction":{"id":"a","closed":false,"visible":true}}}"#;
+    let not_exist = r#"{"error": {"auction": ["app.form.not_exist"]}}"#;
+    assert_eq!(
+        entry_status("a", StatusCode::OK, listed).unwrap(),
+        Entry::Listed
+    );
+    assert_eq!(
+        entry_status("a", StatusCode::BAD_REQUEST, not_exist).unwrap(),
+        Entry::Gone
+    );
+    let closed = r#"{"payload":{"auction":{"id":"a","closed":true}}}"#;
+    assert_eq!(
+        entry_status("a", StatusCode::OK, closed).unwrap(),
+        Entry::Gone
+    );
+    // Being turned away isn't an answer about the listing.
+    assert!(entry_status("a", StatusCode::TOO_MANY_REQUESTS, "").is_err());
+    assert!(entry_status("a", StatusCode::BAD_GATEWAY, not_exist).is_err());
+
+    let page = entry_as_page(listed).unwrap();
+    let (_, _, ids) = parse_auction_page(&page).unwrap();
+    assert!(ids.contains("a"));
+    assert_eq!(entry_as_page(not_exist), None);
 }
 
 /// Parses an auction search body. Individual malformed auctions are skipped, not fatal.

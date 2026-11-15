@@ -1,6 +1,6 @@
 # Warframe Market Tracker
 
-Tracks [warframe.market](https://warframe.market) riven auctions so you can search listings, follow prices, and compare stats. Paste a riven screenshot into the search bar to scan it locally in your browser.
+Tracks [warframe.market](https://warframe.market) riven auctions so you can search listings, follow prices, and compare stats. Paste a riven screenshot into the search bar to scan it locally in your browser. A riven's page checks whether its listing is still on warframe.market; the server asks at most every 15 minutes per listing, or when you press "Check again", and keeps the answer in `checks.jsonl` in the data folder. A scraping server also adds it to its dataset.
 
 The data is published as the Hugging Face dataset [LLukas22/wf-riven-data](https://huggingface.co/datasets/LLukas22/wf-riven-data), with a folder for each finished UTC day.
 

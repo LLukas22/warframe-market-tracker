@@ -3,6 +3,8 @@ mod admin;
 mod api;
 #[cfg(feature = "server")]
 mod app;
+#[cfg(feature = "server")]
+mod availability;
 mod chart;
 #[cfg(feature = "server")]
 mod config;

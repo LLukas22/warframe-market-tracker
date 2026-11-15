@@ -88,6 +88,7 @@ fn dataset(root: &Path) -> Result<()> {
         vec![Verified {
             auction_id: sold,
             exists: false,
+            weapon: None,
         }],
     );
     pipeline.process(&weapon, &raw, &mut sink)?;

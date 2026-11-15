@@ -10,7 +10,7 @@ use wfmt_dataset::identity::Registry;
 use wfmt_dataset::maintenance::{self, MaintenanceArgs};
 use wfmt_dataset::sink::ParquetSink;
 use wfmt_scraper::{
-    archive::{PageKind, RawPage, RawResponse, State, Store},
+    archive::{PageKind, RawPage, RawResponse, State, Store, Verified},
     engine::{Engine, EngineArgs},
     normalize::Normalizer,
     pipeline::Pipeline,
@@ -866,5 +866,121 @@ fn older_edits_cannot_replace_prices_from_feeds_or_sweeps_after_restart() -> Res
     assert_eq!(sink.auctions.last().unwrap().buyout_price, Some(500));
     sink.flush()?;
     assert_eq!(rows(&root.0, "auctions"), 3);
+    Ok(())
+}
+
+#[test]
+fn listing_checks_record_a_sighting_or_a_verified_removal_and_replay() -> Result<()> {
+    let root = Temp::new();
+    let store = Store::new(root.0.clone());
+    let metadata = r#"{"data":[{"slug":"kulstar","rivenType":"pistol"}]}"#;
+    store.save_weapons_raw(metadata)?;
+    let weapons = wfm::parse_weapons(metadata)?;
+    let cutoff = "2026-10-22T00:00:00Z".parse()?;
+    let mut pipeline = Pipeline {
+        normalizer: Normalizer::new(cutoff),
+        registry: Registry::open(store.registry_path())?,
+        tracker: Tracker::open(store.seen_dir()),
+    };
+    let mut sink = ParquetSink::new(root.0.join("parquet"));
+    let t = Utc::now();
+    let listing = |id: &str, buyout: i64| {
+        let mut auction = fixture();
+        auction["id"] = id.into();
+        auction["buyout_price"] = buyout.into();
+        auction["top_bid"] = serde_json::Value::Null;
+        auction["item"]["weapon_url_name"] = "kulstar".into();
+        auction
+    };
+    let sweep = RawResponse::new(
+        t,
+        "kulstar".into(),
+        "pc".into(),
+        vec![RawPage {
+            buyout_policy: None,
+            sort_by: SortBy::PriceAsc.into(),
+            body: serde_json::json!({"payload":{"auctions":[
+                listing("kept", 500),
+                listing("sold", 600),
+                listing("other", 700),
+            ]}})
+            .to_string(),
+        }],
+        vec![],
+    );
+    pipeline.process(&weapons[0], &sweep, &mut sink)?;
+    sink.flush()?;
+    let check = |at, pages: Vec<RawPage>, verified: Vec<Verified>| {
+        RawResponse::new(
+            at,
+            wfmt_types::Feed::Check.as_str().into(),
+            "pc".into(),
+            pages,
+            verified,
+        )
+    };
+
+    // Still listed, at a new price: the entry becomes a sighting of its own.
+    let entry = serde_json::json!({"payload":{"auction": listing("kept", 450)}}).to_string();
+    let listed = check(
+        t + TimeDelta::minutes(1),
+        vec![RawPage {
+            buyout_policy: None,
+            sort_by: wfmt_types::Feed::Check.into(),
+            body: wfm::entry_as_page(&entry).unwrap(),
+        }],
+        vec![],
+    );
+    let summary = pipeline.process_feed(&weapons, &listed, &mut sink)?;
+    assert_eq!((summary.auctions, summary.gone), (1, 0));
+
+    // Gone: a verified removal of that one listing, saying nothing about the others.
+    let gone_at = t + TimeDelta::minutes(2);
+    let gone = check(
+        gone_at,
+        vec![],
+        vec![Verified {
+            auction_id: "sold".into(),
+            exists: false,
+            weapon: Some("kulstar".into()),
+        }],
+    );
+    assert_eq!(pipeline.process_feed(&weapons, &gone, &mut sink)?.gone, 1);
+    sink.flush()?;
+
+    let removals = table(&root.0, "gone");
+    assert_eq!(removals.len(), 1);
+    assert_eq!(removals[0]["auction_id"], "sold");
+    assert_eq!(removals[0]["reason"], "verified");
+    assert_eq!(
+        removals[0]["detected_at"],
+        gone_at.timestamp_millis().to_string()
+    );
+    let checked: Vec<_> = table(&root.0, "auctions")
+        .into_iter()
+        .filter(|r| r["source"] == "check")
+        .collect();
+    assert_eq!(checked.len(), 1);
+    assert_eq!(checked[0]["buyout_price"], "450");
+    let seen: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.seen_dir().join("kulstar.json"))?)?;
+    assert!(seen.get("kept").is_some() && seen.get("other").is_some());
+    assert!(seen.get("sold").is_none());
+    drop((pipeline, sink));
+
+    // A check archived right before a crash is replayed on the next start.
+    let crashed = check(
+        t + TimeDelta::minutes(3),
+        vec![],
+        vec![Verified {
+            auction_id: "other".into(),
+            exists: false,
+            weapon: Some("kulstar".into()),
+        }],
+    );
+    store.save_raw(&crashed)?;
+    drop(Engine::new(root.0.clone(), cutoff, args())?);
+    assert!(store.pending_raw()?.is_empty());
+    assert_eq!(rows(&root.0, "gone"), 2);
     Ok(())
 }

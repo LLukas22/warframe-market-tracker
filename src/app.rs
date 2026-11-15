@@ -10,6 +10,7 @@ use dioxus::prelude::ServerFnError;
 use wfmt_store::{Data, Store};
 
 use crate::admin::Admin;
+use crate::availability::Availability;
 use crate::config::Config;
 use crate::hub::Hub;
 use crate::images::Images;
@@ -25,6 +26,8 @@ pub struct App {
     pub hub: Hub,
     pub images: Images,
     pub transfers: Transfers,
+    /// Checks listings on warframe.market for the riven page.
+    pub availability: Availability,
     /// The screenshot scanner's files.
     pub ocr_dir: PathBuf,
     /// [`App::stop_on_signal`] is listening.
@@ -42,6 +45,7 @@ pub fn init(config: Config) -> Result<&'static App> {
         hub: Hub::new(config.hub),
         images: Images::new(&config.data_dir)?,
         transfers: Transfers::default(),
+        availability: Availability::new()?,
         ocr_dir: config.ocr_dir,
         data_dir: config.data_dir,
         listening: AtomicBool::new(false),

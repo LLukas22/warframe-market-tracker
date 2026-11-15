@@ -157,8 +157,9 @@ impl Pipeline {
         })
     }
 
-    /// Records a site-wide feed. A feed only proves that its listings exist, so nothing is ever
-    /// inferred from what it leaves out. Raw feed archives are short-lived, so the rows are the
+    /// Records a site-wide feed, or a check of single listings ([`wfmt_types::Feed::Check`]). A
+    /// feed only proves that its listings exist, so nothing is ever inferred from what it leaves
+    /// out; only a check's `verified` entries can mark a listing gone. Raw feed archives are short-lived, so the rows are the
     /// lasting record; only sightings that add nothing are skipped (see `Tracker::needs_row`),
     /// because consecutive polls overlap. Starting-only listings wait for a weapon search, which
     /// has the reference prices they are judged against. Already tracked listings always
@@ -192,10 +193,23 @@ impl Pipeline {
             gone: 0,
             complete: false,
         };
+        // Checks that found a listing gone, by weapon. A check that found it still listed is a
+        // page of its own, handled like any feed sighting.
+        let mut gone_checks: BTreeMap<String, HashMap<String, bool>> = BTreeMap::new();
+        for v in raw.verified.iter().filter(|v| !v.exists) {
+            if let Some(weapon) = &v.weapon {
+                gone_checks
+                    .entry(weapon.clone())
+                    .or_default()
+                    .insert(v.auction_id.clone(), false);
+                by_weapon.entry(weapon.clone()).or_default();
+            }
+        }
         for (slug, listings) in by_weapon {
             let Some(weapon) = weapons.iter().find(|w| w.slug == slug) else {
                 continue;
             };
+            let verified = gone_checks.remove(&slug).unwrap_or_default();
             let present: HashSet<String> = listings.iter().map(|(a, _)| a.id.clone()).collect();
             let fresh: Vec<(Auction, String)> = listings
                 .into_iter()
@@ -205,15 +219,8 @@ impl Pipeline {
                         && self.tracker.needs_row(&slug, a, raw.scraped_at)
                 })
                 .collect();
-            let (fitted, gone) = self.commit(
-                weapon,
-                raw,
-                &fresh,
-                &coverage,
-                &HashMap::new(),
-                &present,
-                sink,
-            )?;
+            let (fitted, gone) =
+                self.commit(weapon, raw, &fresh, &coverage, &verified, &present, sink)?;
             summary.auctions += fresh.len();
             summary.fitted += fitted;
             summary.gone += gone;
