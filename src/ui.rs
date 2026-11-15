@@ -104,20 +104,30 @@ pub async fn sleep_ms(ms: u32) {
 /// How often the header checks for new scraped data.
 const LIVE_POLL_MS: u32 = 5 * SECOND_MS as u32;
 
-#[derive(Clone, Debug, PartialEq, Routable)]
-pub(crate) enum Route {
-    #[layout(Shell)]
-    #[route("/")]
-    Market {},
-    #[route("/weapons/:slug")]
-    Weapon { slug: String },
-    #[route("/search/:id")]
-    Search { id: String },
-    #[route("/riven/:id?:auction")]
-    RivenPage { id: String, auction: String },
-    /// An editable riven read from a screenshot (see `RivenScan::to_param`).
-    #[route("/scanned?:scan")]
-    ScannedRivenPage { scan: String },
+pub(crate) use route::Route;
+
+/// In a module of its own so the lint can be allowed for the derive's code, which an attribute
+/// on the enum doesn't reach: since Rust 1.100, `Routable` (dioxus-router 0.7) generates a call
+/// the compiler sees as unreachable.
+mod route {
+    #![allow(unreachable_code)]
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Routable)]
+    pub(crate) enum Route {
+        #[layout(Shell)]
+        #[route("/")]
+        Market {},
+        #[route("/weapons/:slug")]
+        Weapon { slug: String },
+        #[route("/search/:id")]
+        Search { id: String },
+        #[route("/riven/:id?:auction")]
+        RivenPage { id: String, auction: String },
+        /// An editable riven read from a screenshot (see `RivenScan::to_param`).
+        #[route("/scanned?:scan")]
+        ScannedRivenPage { scan: String },
+    }
 }
 
 #[component]
