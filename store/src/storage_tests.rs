@@ -1410,3 +1410,39 @@ fn listing_checks_confirm_or_remove_listings_and_count_each_removal_once() -> an
     check(&reloaded.read());
     Ok(())
 }
+
+#[test]
+fn spliced_filter_keeps_rivens_with_a_splicer_only_stat() {
+    let mut inner = Data::default();
+    let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
+    let viral = inner.intern_attr("viral");
+    let critical = inner.intern_attr("critical_chance");
+    let with_stats = |inner: &mut Data, id: &str, attrs: &[AttrId]| {
+        let index = add_auction(inner, weapon, id, 100, 1000);
+        inner.auctions[index].attrs = attrs
+            .iter()
+            .map(|&attr| Attr {
+                attr,
+                positive: true,
+                value: 100.0,
+                value_rank8: Some(100.0),
+                quality: Some(0.5),
+            })
+            .collect();
+    };
+    with_stats(&mut inner, "spliced", &[viral, critical]);
+    with_stats(&mut inner, "plain", &[critical]);
+    inner.finish_load();
+    let mut query = Query {
+        weapon: Some("w".into()),
+        ..all_time()
+    };
+    assert_eq!(inner.search(&query, now_ms()).total, 2);
+    query.spliced = true;
+    let result = inner.search(&query, now_ms());
+    assert_eq!(result.total, 1);
+    assert_eq!(result.listings[0].auction_id, "spliced");
+    // Combined with a stat filter, which checks each riven's stats.
+    query.positives = vec!["critical_chance".into()];
+    assert_eq!(inner.search(&query, now_ms()).total, 1);
+}

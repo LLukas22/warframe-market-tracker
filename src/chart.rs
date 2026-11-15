@@ -408,7 +408,10 @@ fn EffectRow(stat: StatEffect, scale: f64) -> Element {
     );
     rsx! {
         li { class: "effect-row", title: "{tooltip}", onclick: move |_| open.toggle(),
-            span { class: "effect-name", "{name}" }
+            span { class: "effect-name",
+                "{name}"
+                crate::riven_view::SplicedMark { slug: stat.slug.clone() }
+            }
             span { class: "effect-track {kind}",
                 span {
                     class: "effect-range",

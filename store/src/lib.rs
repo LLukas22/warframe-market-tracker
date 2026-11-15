@@ -473,6 +473,8 @@ impl RowFlags {
     const CURRENT: Self = Self(8);
     /// Has a negative stat.
     const CURSED: Self = Self(16);
+    /// Has a stat only the Riven Splicer gives.
+    const SPLICED: Self = Self(32);
 
     fn set(&mut self, flag: Self, on: bool) {
         if on {

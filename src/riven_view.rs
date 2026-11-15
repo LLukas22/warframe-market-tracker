@@ -133,6 +133,7 @@ fn StatScale(attr: AttrView) -> Element {
                 div { class: "stat-label",
                     span { class: "stat-value", "{format_value(&a.slug, value)}" }
                     span { class: "stat-name", title: "{attribute_name(&a.slug)}", "{attribute_name(&a.slug)}" }
+                    SplicedMark { slug: a.slug.clone() }
                     span { class: "muted small", "range unknown" }
                 }
             }
@@ -157,6 +158,7 @@ fn StatScale(attr: AttrView) -> Element {
             div { class: "stat-label",
                 span { class: "stat-value", "{format_value(&a.slug, value)}" }
                 span { class: "stat-name", title: "{attribute_name(&a.slug)}", "{attribute_name(&a.slug)}" }
+                SplicedMark { slug: a.slug.clone() }
                 span { class: "stat-verdict", "{verdict}" }
             }
             div { class: "stat-scale",
@@ -363,6 +365,28 @@ pub fn AvailabilityPanel(
                     }
                     if busy() { "Checking…" } else { "Check again" }
                 }
+            }
+        }
+    }
+}
+
+/// Marks a stat only the Riven Splicer gives, after its name. Nothing for other stats.
+#[component]
+pub fn SplicedMark(slug: String) -> Element {
+    if !api::is_spliced(&slug) {
+        return rsx! {};
+    }
+    rsx! {
+        span {
+            class: "spliced-mark",
+            role: "img",
+            title: "Spliced: only the Riven Splicer gives this stat",
+            "aria-label": "spliced",
+            svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2.2",
+                stroke_linecap: "round", "aria-hidden": "true",
+                path { d: "M8 3c0 4.5 8 4.5 8 9s-8 4.5-8 9" }
+                path { d: "M16 3c0 4.5-8 4.5-8 9s8 4.5 8 9" }
+                path { d: "M9.5 6.5h5M9.5 17.5h5" }
             }
         }
     }

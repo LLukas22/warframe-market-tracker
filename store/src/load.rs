@@ -551,6 +551,11 @@ impl Data {
     }
 
     pub(super) fn build_rows(&self) -> Table<AuctionId, Row> {
+        let spliced: Table<AttrId, bool> = self
+            .attrs
+            .iter()
+            .map(|slug| wfmt_api::is_spliced(slug))
+            .collect();
         self.auctions
             .iter()
             .map(|a| {
@@ -560,6 +565,7 @@ impl Data {
                 flags.set(RowFlags::DIRECT, a.direct_sell);
                 flags.set(RowFlags::CURRENT, self.is_current(a));
                 flags.set(RowFlags::CURSED, a.attrs.iter().any(|x| !x.positive));
+                flags.set(RowFlags::SPLICED, a.attrs.iter().any(|x| spliced[x.attr]));
                 Row {
                     price: auction_price(a).unwrap_or(Row::NO_PRICE),
                     limit: self.weapons[a.weapon].price_limit.unwrap_or(i64::MAX),

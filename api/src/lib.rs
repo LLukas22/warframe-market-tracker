@@ -94,6 +94,9 @@ pub struct Query {
     /// The same riven has appeared under different nonempty seller names.
     #[serde(default)]
     pub owner_changed: bool,
+    /// Has a stat only the Riven Splicer gives (see `is_spliced`).
+    #[serde(default)]
+    pub spliced: bool,
     /// Minimum mean roll quality of the positive attributes, 0..1.
     pub min_quality: f64,
     pub min_price: Option<i64>,
@@ -179,6 +182,7 @@ impl Default for Query {
             include_outliers: false,
             price_changed: false,
             owner_changed: false,
+            spliced: false,
             min_quality: 0.0,
             min_price: Some(MIN_PRICE),
             max_price: None,
@@ -492,7 +496,7 @@ pub struct StatEffects {
     pub rare_stats: u32,
 }
 
-pub use wfmt_types::attributes::{format_value, name_of as attribute_name};
+pub use wfmt_types::attributes::{format_value, is_spliced, name_of as attribute_name};
 
 /// The values a stat could have had on this riven: worst roll to best, or for a negative,
 /// mildest to harshest. A roll scales the stat's base value by `ROLL_MIN` to `ROLL_MAX`, and

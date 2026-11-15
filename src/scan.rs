@@ -569,7 +569,11 @@ pub fn ScanEditor(scan: RivenScan, onchange: EventHandler<RivenScan>) -> Element
                             },
                             for (slug, name, fits) in stats.iter() {
                                 option { key: "{slug}", value: "{slug}",
-                                    if *fits { "{name}" } else { "{name} (not on this weapon)" }
+                                    match (*fits, crate::api::is_spliced(slug)) {
+                                        (false, _) => format!("{name} (not on this weapon)"),
+                                        (true, true) => format!("{name} (spliced)"),
+                                        (true, false) => name.clone(),
+                                    }
                                 }
                             }
                         }

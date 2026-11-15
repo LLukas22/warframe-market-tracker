@@ -110,6 +110,9 @@ impl Data {
             CurseFilter::Required if !r.has(RowFlags::CURSED) => return false,
             _ => {}
         }
+        if q.spliced && !r.has(RowFlags::SPLICED) {
+            return false;
+        }
         if !q.positives.is_empty() || matches!(q.curse, CurseFilter::Attr(_)) {
             return self.matches(a, q, weapon);
         }
@@ -292,6 +295,14 @@ impl Data {
             })
         };
         if !q.positives.iter().all(|p| has(p, true)) {
+            return false;
+        }
+        if q.spliced
+            && !a
+                .attrs
+                .iter()
+                .any(|x| wfmt_api::is_spliced(&self.attrs[x.attr]))
+        {
             return false;
         }
         let has_curse = a.attrs.iter().any(|x| !x.positive);

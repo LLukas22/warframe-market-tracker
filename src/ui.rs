@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::api::{
     self, AttrInfo, CurseFilter, DAY_MS, HOUR_MS, Listing, LiveStats, Overview, Period, Query,
-    SIMILAR_LIMIT, SearchResult, Sort, attribute_name, format_value,
+    SIMILAR_LIMIT, SearchResult, Sort, attribute_name, format_value, is_spliced,
 };
 use crate::chart::{PriceChart, StatEffectsPanel};
 use crate::weapons::{WeaponGrid, WeaponHeader, WeaponImage, WeaponPicker};
@@ -903,6 +903,7 @@ fn active_filters(q: &Query) -> usize {
             q.include_outliers != d.include_outliers,
             q.price_changed != d.price_changed,
             q.owner_changed != d.owner_changed,
+            q.spliced != d.spliced,
             q.min_quality != d.min_quality,
             q.min_price != d.min_price,
             q.max_price != d.max_price,
@@ -1232,6 +1233,7 @@ fn Filters(
                                 class: if ok { "chip positive" } else { "chip unavailable" },
                                 title: if ok { "" } else { "Can't roll on this weapon" },
                                 "+{attribute_name(&slug)}"
+                                crate::riven_view::SplicedMark { slug: slug.clone() }
                                 button {
                                     aria_label: "Remove {attribute_name(&slug)}",
                                     onclick: move |_| query.with_mut(|q| q.positives.retain(|p| p != &slug)),
@@ -1258,8 +1260,15 @@ fn Filters(
                         option { value: "",
                             if q.positives.is_empty() { "+ Positive stat (all required)" } else { "+ Another positive stat" }
                         }
-                        for a in positive_options.iter() {
+                        for a in positive_options.iter().filter(|a| !is_spliced(&a.slug)) {
                             option { key: "{a.slug}", value: "{a.slug}", "{a.name}" }
+                        }
+                        if positive_options.iter().any(|a| is_spliced(&a.slug)) {
+                            optgroup { label: "Spliced (Riven Splicer only)",
+                                for a in positive_options.iter().filter(|a| is_spliced(&a.slug)) {
+                                    option { key: "{a.slug}", value: "{a.slug}", "{a.name}" }
+                                }
+                            }
                         }
                     }
                 }
@@ -1281,6 +1290,17 @@ fn Filters(
                                 "−{a.name}"
                             }
                         }
+                    }
+                }
+                label { class: "check", title: "Stats only the Riven Splicer gives, such as Viral or Weak Point Damage.",
+                    input {
+                        r#type: "checkbox",
+                        checked: q.spliced,
+                        onchange: move |e| query.with_mut(|q| q.spliced = e.checked()),
+                    }
+                    "Has a spliced stat"
+                    span { "aria-hidden": "true",
+                        crate::riven_view::SplicedMark { slug: "viral" }
                     }
                 }
                 label { class: "slider-label",
@@ -1741,7 +1761,10 @@ fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) ->
                             key: "{a.slug}",
                             class: if a.positive { "attr positive" } else { "attr negative" },
                             span { class: "attr-value", "{format_value(&a.slug, a.value_rank8.unwrap_or(a.value))}" }
-                            span { class: "attr-name", "{attribute_name(&a.slug)}" }
+                            span { class: "attr-name",
+                                "{attribute_name(&a.slug)}"
+                                crate::riven_view::SplicedMark { slug: a.slug.clone() }
+                            }
                             if let Some(q) = a.quality {
                                 span { class: "quality", title: "roll {q * 100.0:.0}%",
                                     span { class: "quality-bar", style: "width: {q * 100.0:.0}%" }
@@ -1971,6 +1994,8 @@ mod route_tests {
         assert_eq!(active_filters(&q), 1);
         q.owner_changed = true;
         assert_eq!(active_filters(&q), 2);
+        q.spliced = true;
+        assert_eq!(active_filters(&q), 3);
         q = Query {
             weapon: Some("torid".into()),
             ..Query::default()

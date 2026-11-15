@@ -11,6 +11,8 @@
   --positive: #5fd39b;
   --negative: #ff7a7a;
   --warn: #f0b85a;
+  /* Spliced stats (Riven Splicer). */
+  --splice: #5cc8e8;
   --radius: 10px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: dark;
@@ -487,6 +489,11 @@ aside {
 .attr.negative .attr-value { color: var(--negative); }
 .attr-value { font-variant-numeric: tabular-nums; text-align: right; }
 .attr-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* After a stat only the Riven Splicer gives. */
+.spliced-mark { display: inline-grid; place-items: center; vertical-align: -2px; width: 16px; height: 16px; margin-left: 5px; border-radius: 4px; background: color-mix(in srgb, var(--splice) 18%, transparent); color: var(--splice); }
+.spliced-mark svg { width: 12px; height: 12px; }
+.stat-label .spliced-mark { flex: none; margin-left: -4px; }
+.check .spliced-mark, .chip .spliced-mark { margin-left: 0; }
 .quality { height: 5px; background: var(--panel-3); border-radius: 3px; overflow: hidden; }
 .quality-bar { display: block; height: 100%; }
 .attr.positive .quality-bar { background: var(--positive); }

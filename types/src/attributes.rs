@@ -163,6 +163,11 @@ pub fn attribute(slug: &str) -> Option<&'static Attribute> {
     ATTRIBUTES.iter().find(|a| a.slug == slug)
 }
 
+/// Whether the stat only comes from the Riven Splicer. Unknown slugs aren't.
+pub fn is_spliced(slug: &str) -> bool {
+    attribute(slug).is_some_and(|a| a.spliced)
+}
+
 /// The unit of any slug. One this table doesn't know yet is guessed from its name.
 pub fn unit_of(slug: &str) -> Unit {
     match attribute(slug) {
