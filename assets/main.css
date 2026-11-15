@@ -537,10 +537,8 @@ aside {
   opacity: 0;
   transition: opacity .1s;
 }
-.listing:hover .riven-id .copy, .detail .riven-id .copy, .riven-id .copy.copied { opacity: 1; }
+.riven-id:hover .copy, .riven-id:focus-within .copy, .riven-id .copy.copied { opacity: 1; }
 .riven-id .copy.copied { color: var(--positive); border-color: var(--positive); }
-.detail-id { display: flex; align-items: center; gap: 10px; }
-.detail-id .riven-id code { font-size: 13px; color: var(--text); }
 .link-button { background: transparent; border: none; color: var(--accent); padding: 0; font-size: 12px; }
 .link-button:hover { text-decoration: underline; }
 

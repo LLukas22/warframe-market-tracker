@@ -1718,7 +1718,6 @@ fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) ->
                         span { "MR{mr}" }
                         crate::riven_view::Rerolls { count: l.re_rolls.unwrap_or(0) }
                     }
-                    RivenId { id: l.riven_id.clone(), short: true }
                     div {
                         if let Some(t) = l.gone_at {
                             span { class: "tag gone", title: "{l.gone_reason.clone().unwrap_or_default()}",
@@ -1785,27 +1784,20 @@ fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) ->
     }
 }
 
-/// Enough of a riven id to tell rivens apart in a list.
-const SHORT_RIVEN_ID_LEN: usize = 8;
 /// How long the copy button shows that it copied.
 const COPIED_NOTICE_MS: u32 = 1500;
 
-/// A riven id with a copy button. Clicks don't bubble up to the listing row.
+/// A riven id with a copy button, which shows on hover.
 #[component]
-pub(crate) fn RivenId(id: String, short: bool) -> Element {
+pub(crate) fn RivenId(id: String) -> Element {
     let mut copied = use_signal(|| false);
-    let shown = if short {
-        id.chars().take(SHORT_RIVEN_ID_LEN).collect()
-    } else {
-        id.clone()
-    };
     let script = format!("navigator.clipboard.writeText({id:?})");
     rsx! {
         span {
             class: "riven-id",
             title: "Riven id {id}: the same for every listing of this riven",
             onclick: move |e| e.stop_propagation(),
-            code { "{shown}" }
+            code { "{id}" }
             button {
                 class: if copied() { "copy copied" } else { "copy" },
                 title: "Copy riven id",

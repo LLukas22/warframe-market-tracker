@@ -112,7 +112,7 @@ pub fn RivenSummary(listing: Listing, now: Option<i64>) -> Element {
 
             if now.is_some() {
                 div { class: "riven-foot muted small",
-                    span { "Riven id " RivenId { id: l.riven_id.clone(), short: false } }
+                    span { "Riven id " RivenId { id: l.riven_id.clone() } }
                 }
             }
         }
