@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 use crate::api::{
     self, AttrView, Availability, Listing, Overview, attribute_name, format_value, roll_range,
 };
-use crate::ui::{RivenId, format_age, format_date, format_plat};
+use crate::ui::{RivenId, format_age, format_plat};
 use crate::weapons::WeaponImage;
 
 /// `now` is `None` for a scanned riven, which has no price, seller or sightings.
@@ -113,7 +113,6 @@ pub fn RivenSummary(listing: Listing, now: Option<i64>) -> Element {
             if now.is_some() {
                 div { class: "riven-foot muted small",
                     span { "Riven id " RivenId { id: l.riven_id.clone(), short: false } }
-                    span { "first seen {format_date(l.first_seen)}" }
                 }
             }
         }

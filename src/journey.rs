@@ -1,7 +1,9 @@
 //! One riven's observations: separate price series and seller intervals per auction.
 use crate::api::{self, RivenAuction};
 use crate::chart::{INITIAL_WIDTH, RESIZE_THRESHOLD};
-use crate::ui::{Route, format_date, format_datetime, format_plat};
+use crate::ui::{
+    Route, format_date, format_datetime, format_plat, format_short_datetime, format_time,
+};
 use dioxus::prelude::*;
 
 const COLORS: [&str; 6] = [
@@ -134,9 +136,11 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
     rsx! {
         section { class: "journey",
             div { class: "journey-summary",
-                div { span { "First seen" } strong { "{format_date(first)}" } small { "{format_datetime(first)} UTC" } }
-                div { span { "Last seen" } strong { "{format_date(last)}" } small { "{format_datetime(last)} UTC" } }
-                div { span { "Listing history" } strong { "{auctions.len()} listings" } small { "{sellers.len()} distinct sellers observed" } }
+                div { span { "First seen" } strong { "{format_date(first)}" } small { "{format_time(first)} UTC" } }
+                div { span { "Last seen" } strong { "{format_date(last)}" } small { "{format_time(last)} UTC" } }
+                div { span { "Listings" } strong { "{auctions.len()}" }
+                    small { if sellers.len() == 1 { "1 seller" } else { "{sellers.len()} sellers" } }
+                }
             }
             div { class: "section-head", h2 { "Price history" } span { class: "muted small", "one line per listing" } }
             div { class: "chart journey-chart",
@@ -180,7 +184,10 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
             }
             div { class: "section-head", h2 { "Sellers & sightings" } }
             p { class: "muted small", "Each bar spans one listing, first to last sighting. A new seller may mean a resale, but that can't be confirmed." }
-            div { class: "sighting-axis", span { "{format_date(first)}" } span { "{format_date(last)}" } }
+            // The scale of the bars; with one listing its own dates say it all.
+            if auctions.len() > 1 {
+                div { class: "sighting-axis", span { "{format_date(first)}" } span { "{format_date(last)}" } }
+            }
             ol { class: "sighting-list",
                 for (i, a) in auctions.iter().enumerate().rev().take(displayed) {
                     li { class: if a.auction_id == selected_auction { "sighting selected" } else { "sighting" },
@@ -199,8 +206,8 @@ fn JourneyChart(id: String, auctions: Vec<RivenAuction>, selected_auction: Strin
                             span { style: format!("left: {}%; width: {}%; background: {}", if first == last { 50.0 } else { (a.first_seen - first) as f64 / span * 100.0 }, (a.last_seen - a.first_seen) as f64 / span * 100.0, color(a)) }
                         }
                         div { class: "sighting-dates",
-                            span { "{format_datetime(a.first_seen)} → {format_datetime(a.last_seen)} UTC" }
-                            span { if let Some(t) = a.gone_at { "Removed / expired {format_date(t)}" } else { "Last observed; availability unconfirmed" } }
+                            span { "{format_short_datetime(a.first_seen)} → {format_short_datetime(a.last_seen)} UTC" }
+                            if let Some(t) = a.gone_at { span { "Gone {format_short_datetime(t)} UTC" } }
                         }
                     }
                 }
