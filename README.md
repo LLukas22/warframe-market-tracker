@@ -32,6 +32,7 @@ A Cargo workspace. The web app (Dioxus, at the root) is a thin layer over librar
 
 ## Development
 
+- `scripts/dev.sh` runs the dev server on port 8081 (or `PORT`), with data downloaded from the Hugging Face dataset into `./data`. Set `WFMT_HF_PULL_DATASET=` to use only the local data.
 - `cargo test --workspace --features server` runs the tests. `store/tests/snapshots.rs` compares the answers to every kind of query with the snapshots in `store/tests/snapshots/`; after an intended change, review and accept the new ones with [`cargo insta review`](https://insta.rs).
 - `cargo bench -p wfmt-store --bench queries` times the queries on the real dataset in `./data` (or `WFMT_DATA_DIR`).
 - `WFMT_GOLDEN=out.jsonl cargo test --release -p wfmt-store golden -- --ignored` writes the answers to many queries on the real dataset, to diff two versions of the code.
