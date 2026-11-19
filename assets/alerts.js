@@ -4,7 +4,7 @@
     const KEY = 'wfmt.riven-alerts.v1';
     const STATUSES = {any: 'Any status', available: 'Online or in game', online: 'Online', ingame: 'In game'};
     const SELLER_STATUSES = {online: 'Online', ingame: 'In game', offline: 'Offline'};
-    let root, state = {rules: []}, error = '', status = 'Waiting for first check…', busy = false;
+    let root, state = {rules: []}, error = '', status = 'Checking…', busy = false;
     let matches = [], permissionError = '';
     let displayedRules, displayedMatches;
     const el = (tag, text, cls) => {
@@ -13,6 +13,29 @@
         if (cls) node.className = cls;
         return node;
     };
+    const plat = n => `${n.toLocaleString()}p`;
+    // Same image path and initial fallback as the Rust WeaponImage component.
+    function weaponImage(slug, name) {
+        const img = el('img', undefined, 'weapon-img sm');
+        img.src = `/img/weapon/${encodeURIComponent(slug)}.png`;
+        img.alt = ''; img.loading = 'lazy';
+        img.onerror = () => img.replaceWith(el('div', name.charAt(0) || '?', 'weapon-img placeholder sm'));
+        return img;
+    }
+    function row({slug, name, tag, meta, priceLabel, price, actions, muted}) {
+        const node = el('div', undefined, muted ? 'alert-row paused' : 'alert-row');
+        const text = el('div', undefined, 'alert-row-text');
+        const title = el('strong', name);
+        if (tag) title.append(el('span', tag, 'tag alert-tag'));
+        text.append(title, el('p', meta));
+        const value = el('div', undefined, 'alert-row-price');
+        if (priceLabel) value.append(el('span', priceLabel, 'muted small'));
+        value.append(el('span', plat(price), 'plat'));
+        const actionBox = el('div', undefined, 'alert-row-actions');
+        actionBox.append(...actions);
+        node.append(weaponImage(slug, name), text, value, actionBox);
+        return node;
+    }
     function read() {
         const parsed = JSON.parse(localStorage.getItem(KEY) || '{"rules":[]}');
         if (!parsed || !Array.isArray(parsed.rules) || parsed.rules.length > 50 || parsed.rules.some(r =>
@@ -56,20 +79,24 @@
         }
     }
     function permission() {
-        if (!window.isSecureContext) return {detail: 'Notifications require HTTPS or localhost.'};
-        if (!('Notification' in window)) return {detail: 'This browser doesn’t support notifications.'};
-        if (Notification.permission === 'denied') return {detail: 'Notifications blocked in browser settings.'};
-        if (Notification.permission === 'granted') return {detail: 'Notifications on while a tracker tab is open.'};
-        return {detail: '', canEnable: true};
+        if (!window.isSecureContext) return {state: 'blocked', detail: 'Notifications need HTTPS or localhost. Matches still show below.'};
+        if (!('Notification' in window)) return {state: 'blocked', detail: 'This browser doesn’t support notifications. Matches still show below.'};
+        if (Notification.permission === 'denied') return {state: 'blocked', detail: 'Notifications are blocked in your browser settings. Matches still show below.'};
+        if (Notification.permission === 'granted') return {state: 'on', detail: 'Notifications are on. Alerts check every 30 seconds while a tracker tab is open.'};
+        return {state: 'prompt', detail: 'Turn on notifications to get pinged. Alerts only check while a tracker tab is open.', canEnable: true};
     }
     function render() {
         if (!root?.isConnected) return;
         root.querySelector('#alerts-error').textContent = error;
         const checkStatus = root.querySelector('#alerts-status');
         checkStatus.textContent = status;
-        checkStatus.hidden = status === 'No active alerts.';
+        checkStatus.hidden = !state.rules.some(r => r.enabled);
         const notifications = permission();
+        root.querySelector('#alerts-notice').dataset.state = permissionError ? 'blocked' : notifications.state;
         root.querySelector('#alerts-permission-status').textContent = permissionError || notifications.detail;
+        const active = state.rules.filter(r => r.enabled).length, paused = state.rules.length - active;
+        root.querySelector('#alerts-rules-count').textContent = state.rules.length
+            ? [`${active} active`, paused && `${paused} paused`].filter(Boolean).join(' · ') : '';
         const enableButton = root.querySelector('#alerts-permission');
         enableButton.hidden = !notifications.canEnable;
         enableButton.disabled = !notifications.canEnable;
@@ -90,17 +117,12 @@
         const rules = root.querySelector('#alerts-rules');
         rules.replaceChildren();
         if (!state.rules.length) {
-            rules.append(el('p', 'No saved alerts.', 'alert-empty'));
+            rules.append(el('p', 'No alerts yet. Pick a weapon and a max price above, or use Create alert on any weapon page.', 'alert-empty'));
         }
         for (const rule of state.rules) {
-            const row = el('div', undefined, 'alert-rule');
-            const description = el('div');
-            const details = [`Up to ${rule.max_price.toLocaleString()} platinum`, STATUSES[rule.status]];
+            const details = [STATUSES[rule.status]];
             if (rule.min_reputation > 0) details.push(`Reputation ≥ ${rule.min_reputation}`);
-            if (!rule.enabled) details.push('Paused');
-            description.append(el('strong', rule.name), el('p', details.join(' · ')));
-            row.append(description);
-            const actions = el('div', undefined, 'alert-rule-actions');
+            const actions = [];
             for (const [action, label] of [['toggle', rule.enabled ? 'Pause' : 'Resume'], ['delete', 'Delete']]) {
                 const button = el('button', label, action === 'delete' ? 'alert-delete' : undefined);
                 button.type = 'button';
@@ -112,28 +134,29 @@
                     else { const found = next.rules.find(r => r.id === rule.id); if (found) found.enabled = !found.enabled; }
                     save(next); render();
                 }).then(poll).catch(fail);
-                actions.append(button);
+                actions.push(button);
             }
-            row.append(actions);
-            rules.append(row);
+            rules.append(row({slug: rule.weapon, name: rule.name, tag: rule.enabled ? '' : 'Paused', meta: details.join(' · '),
+                priceLabel: 'up to', price: rule.max_price, actions, muted: !rule.enabled}));
         }
     }
     function renderMatches(visibleMatches) {
         const list = root.querySelector('#alerts-matches');
         list.replaceChildren();
-        if (!visibleMatches.length) list.append(el('p', 'No recent matches.', 'alert-empty'));
+        if (!visibleMatches.length) {
+            list.append(el('p', state.rules.some(r => r.enabled)
+                ? 'Nothing matches right now. New listings that match show up here.'
+                : 'Listings that match your alerts show up here.', 'alert-empty'));
+        }
         for (const listing of visibleMatches) {
-            const row = el('div', undefined, 'alert-rule');
-            const description = el('div');
             const link = el('a', 'View listing ↗', 'alert-market-link');
             link.href = `https://warframe.market/auction/${encodeURIComponent(listing.auction_id)}`;
             link.target = '_blank'; link.rel = 'noopener noreferrer';
             link.setAttribute('aria-label', `View ${listing.weapon_name} listing on Warframe Market (opens in a new tab)`);
-            const details = [SELLER_STATUSES[listing.status] || 'Status unknown', listing.platform, `reputation ${listing.reputation ?? 'unknown'}`];
-            description.append(el('strong', `${listing.weapon_name} · ${listing.price.toLocaleString()} platinum`),
-                el('p', [listing.seller, ...details].filter(Boolean).join(' · ')));
-            row.append(description, link);
-            list.append(row);
+            const details = [listing.seller, SELLER_STATUSES[listing.status] || 'Status unknown', listing.platform,
+                `Reputation ${listing.reputation ?? 'unknown'}`];
+            list.append(row({slug: listing.weapon, name: listing.weapon_name, meta: details.filter(Boolean).join(' · '),
+                price: listing.price, actions: [link]}));
         }
     }
     function fail(e) { error = e.message || String(e); render(); }
@@ -149,11 +172,9 @@
             } catch (e) { permissionError = `Could not enable notifications: ${e.message}`; render(); }
         };
         const form = root.querySelector('#alert-form');
-        const weapon = form.querySelector('#alert-weapon');
         const sellerStatus = form.querySelector('#alert-seller-status');
         const reputation = form.querySelector('#alert-reputation');
         const saved = root.querySelector('#alerts-saved');
-        form.querySelector('.alert-submit').disabled = false;
         reputation.addEventListener('invalid', () => {
             reputation.closest('details').open = true;
         });
@@ -164,23 +185,17 @@
                 : STATUSES[sellerStatus.value];
         }
         form.oninput = () => {
-            weapon.setCustomValidity('');
             saved.textContent = '';
             updateFilters();
         };
         form.onsubmit = event => {
             event.preventDefault();
             if (!form.reportValidity()) return;
-            const name = weapon.value.trim().toLowerCase();
-            const selected = Array.from(weapon.list?.options ?? []).find(option => option.value.toLowerCase() === name);
-            if (!selected) {
-                weapon.setCustomValidity('Choose a weapon from the suggestions.');
-                weapon.reportValidity();
-                return;
-            }
+            const {weapon, weaponName} = form.dataset;
+            if (!weapon || !weaponName) return;
             const rule = {
                 id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-                weapon: selected.dataset.weapon, name: selected.value,
+                weapon, name: weaponName,
                 max_price: Number(form.querySelector('#alert-price').value),
                 status: sellerStatus.value,
                 min_reputation: Number(reputation.value),
@@ -197,9 +212,8 @@
                 const next = structuredClone(state); next.rules.push(rule);
                 if (!save(next)) return render();
                 saved.textContent = `Alert saved for ${rule.name}.`;
-                form.reset();
-                updateFilters();
-                status = 'Checking for matches…';
+                form.querySelector('#alert-price').value = '';
+                status = 'Checking…';
                 render();
                 return true;
             }).then(added => { if (added) poll(); }).catch(fail);
@@ -214,7 +228,7 @@
     async function check() {
         if (!load()) return render();
         const rules = state.rules.filter(r => r.enabled);
-        if (!rules.length) { matches = []; status = 'No active alerts.'; render(); return; }
+        if (!rules.length) { matches = []; status = ''; render(); return; }
         const response = await fetch('/api/alerts/matches', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(rules.map(({weapon, max_price, status, min_reputation}) => ({weapon, max_price, status, min_reputation}))),
@@ -227,9 +241,10 @@
         matches = data.listings.filter(l => state.rules.some(r => matchesRule(r, l)))
             .sort((a, b) => b.observed_at - a.observed_at || a.price - b.price);
         const age = data.latest_observation === null ? Infinity : data.server_time - data.latest_observation;
-        status = !data.live_scraper ? 'Live scraping is off. Matches use the data already loaded on this server.' :
-            age > 15 * 60000 ? 'Scraped data is stale. Waiting for fresh listings.' :
-            `Last check at ${new Date().toLocaleTimeString()}. Checks run every 30 seconds.`;
+        const checked = new Date().toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+        status = !data.live_scraper ? `Live scraping is off · checked ${checked}` :
+            age > 15 * 60000 ? `Scraped data is stale · checked ${checked}` :
+            `Checked ${checked} · every 30 seconds`;
         if ('Notification' in window && Notification.permission === 'granted') {
             const next = structuredClone(state);
             const pending = [];

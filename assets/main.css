@@ -340,6 +340,7 @@ aside {
 }
 .weapon-header-title { flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .weapon-header-title h2 { font-size: 22px; }
+.weapon-header-links { display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .kpis { display: flex; gap: 28px; }
 .kpi { text-align: right; }
 .kpi-value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -940,7 +941,7 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
   color: var(--muted);
   font-weight: 600;
 }
-.nav-tab:hover, .nav-tab[aria-current="page"] {
+.nav-tab:hover, .nav-tab.active, .nav-tab[aria-current="page"] {
   background: var(--accent-soft);
   color: var(--accent);
   text-decoration: none;
@@ -949,20 +950,49 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 .alerts-page {
   max-width: 880px;
   margin: 0 auto;
-  padding: 32px 24px 48px;
-}
-.alerts-intro {
+  padding: 28px 24px 48px;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 20px;
-  margin-bottom: 20px;
+  flex-direction: column;
+  gap: 14px;
 }
-.alerts-intro h1 { margin: 0; font-size: 24px; }
-.alert-notifications { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.alert-notifications p, .alert-check-status, .alert-empty { margin: 0; color: var(--muted); font-size: 13px; }
-.alert-notifications p:empty { display: none; }
+.alerts-intro { display: flex; flex-direction: column; gap: 4px; }
+.alerts-intro h1 { margin: 0; font-size: 22px; font-weight: 600; }
+.alerts-intro p { margin: 0; }
+
+/* Same surface as the sidebar, weapon header and chart cards. */
+.alert-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+/* Prompting for permission is the call to action; once granted it is a quiet status line. */
+.alert-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(120deg, var(--accent-soft), transparent 70%), var(--panel);
+}
+.alert-notice p { flex: 1; min-width: 200px; margin: 0; }
+.alert-notice[data-state="loading"] { visibility: hidden; }
+.alert-notice[data-state="on"] { padding: 0 2px; border: 0; background: none; }
+.alert-notice[data-state="on"] p { color: var(--muted); font-size: 12px; }
+.alert-notice[data-state="on"] p::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--positive); vertical-align: 1px; }
+.alert-notice[data-state="blocked"] { background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
+.alert-notice[data-state="blocked"] p { color: var(--warn); }
+#alerts-permission, .alert-form .alert-submit {
+  min-height: 38px;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1b122b;
+  font-weight: 600;
+}
+#alerts-permission[hidden] { display: none; }
 
 .alert-form {
   display: grid;
@@ -970,40 +1000,74 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
   align-items: end;
   gap: 12px;
 }
-.alert-form label { display: grid; min-width: 0; gap: 6px; }
+.alert-form label, .alert-weapon-field { display: grid; min-width: 0; gap: 6px; font-size: 13px; }
 .alert-form select, .alert-form input { width: 100%; min-height: 38px; }
-.alert-form .alert-submit { min-height: 38px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.alerts-page button:disabled { cursor: default; opacity: .6; }
+.alert-weapon-field .picker-box { padding-block: 0; }
+.alert-weapon-field .picker-box input { min-height: 36px; }
+.alert-weapon-field .picker-menu { z-index: 10; }
+.alert-weapon-field .picker-item { width: 100%; border: 0; background: transparent; text-align: left; }
+.alert-weapon-field .picker-item.active { background: var(--panel-3); }
+.picker-empty { padding: 8px; color: var(--muted); font-size: 13px; }
+
+/* A quiet disclosure, like the sidebar's "More options". */
 .alert-seller-filters { grid-column: 1 / -1; }
-.alert-seller-filters summary { width: fit-content; cursor: pointer; }
-.alert-filter-summary { margin-left: 8px; color: var(--muted); font-size: 12px; }
-.alert-seller-fields { display: grid; grid-template-columns: minmax(0, 230px) minmax(0, 185px); gap: 12px; margin-top: 12px; }
+.alert-seller-filters summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: fit-content;
+  padding: 2px 0;
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+.alert-seller-filters summary::-webkit-details-marker { display: none; }
+.alert-seller-filters summary:hover .alert-chevron { color: var(--text); }
+.alert-chevron::after { content: "▾"; color: var(--muted); }
+.alert-seller-filters[open] .alert-chevron::after { content: "▴"; }
+.alert-filter-summary { color: var(--muted); font-size: 12px; }
+.alert-seller-fields { display: grid; grid-template-columns: minmax(0, 230px) minmax(0, 185px); gap: 12px; margin-top: 10px; }
 .alert-seller-filters p { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
-#alerts-error, #alerts-saved { margin: 10px 0 0; }
+#alerts-error, #alerts-saved { grid-column: 1 / -1; margin: 0; }
 #alerts-error:empty, #alerts-saved:empty { display: none; }
 .alert-saved { color: var(--positive); }
 
-.alerts-section { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
-.alerts-section h2 { margin-bottom: 10px; }
-.alert-check-status:not([hidden]) { margin-bottom: 8px; }
-.alert-rule {
-  display: flex;
+.alerts-section { padding-bottom: 6px; }
+.alerts-section .section-head { flex-wrap: wrap; gap: 2px 12px; margin: 0 0 6px; }
+.alert-empty { margin: 0; padding: 10px 0 12px; color: var(--muted); font-size: 13px; }
+
+/* Watchlist and match rows share one layout: image, text, price, actions.
+   Rows use the list's columns so prices and buttons line up across rows. */
+#alerts-rules, #alerts-matches { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto auto; column-gap: 14px; }
+#alerts-rules > .alert-empty, #alerts-matches > .alert-empty { grid-column: 1 / -1; }
+.alert-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
   align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px 12px;
+  row-gap: 6px;
   padding: 10px 0;
   overflow-wrap: anywhere;
 }
-.alert-rule + .alert-rule { border-top: 1px solid var(--border); }
-.alert-rule p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
-.alert-rule-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.alert-rule-actions .alert-delete { color: var(--muted); background: transparent; }
+.alert-row-price { justify-content: flex-end; }
+.alert-row + .alert-row { border-top: 1px solid var(--border); }
+.alert-row-text p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.alert-row-price { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.alert-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.alert-row-actions .alert-delete { color: var(--muted); background: transparent; }
+.alert-row.paused > :not(.alert-row-actions) { opacity: .5; }
+.alert-tag { margin: 0 0 0 8px; vertical-align: 1px; background: var(--panel-3); color: var(--muted); font-weight: 600; }
 
 @media (max-width: 600px) {
   .market-nav { grid-column: 1 / -1; grid-row: 3; }
-  .alerts-page { padding: 20px 12px 40px; }
-  .alert-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .alert-form > label:first-child { grid-column: 1 / -1; }
-  .alert-submit { justify-self: start; }
+  .alerts-page { padding: 18px 12px 40px; gap: 12px; }
+  .alert-card { padding: 14px; }
+  .alert-form { grid-template-columns: minmax(0, 1fr) auto; }
+  .alert-weapon-field { grid-column: 1 / -1; }
+  .alert-seller-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #alerts-permission { width: 100%; }
+  /* Actions always take their own line so every row lines up. */
+  #alerts-rules, #alerts-matches { grid-template-columns: 44px minmax(0, 1fr) auto; column-gap: 12px; }
+  .alert-row { align-items: start; }
+  .alert-row-actions { grid-column: 2 / -1; justify-content: flex-start; }
 }

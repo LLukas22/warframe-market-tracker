@@ -82,18 +82,37 @@ pub fn WeaponImage(slug: String, has_image: bool, name: String, size: &'static s
 /// Search box with a dropdown of matching weapon names.
 #[component]
 pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
+    let selected = match use_route::<Route>() {
+        Route::Weapon { slug } => Some(slug),
+        _ => None,
+    };
+    rsx! { WeaponDropdown { weapons, selected } }
+}
+
+/// The header navigates to the chosen weapon. The alert form keeps the choice locally.
+#[component]
+pub fn WeaponDropdown(
+    weapons: Vec<WeaponInfo>,
+    selected: Option<String>,
+    #[props(optional)] on_change: Option<EventHandler<Option<String>>>,
+) -> Element {
     let navigator = use_navigator();
-    let route = use_route::<Route>();
     let cache = use_context::<crate::ui::ViewCache>();
     let filters = use_context::<Signal<crate::api::Query>>();
     let mut text = use_signal(String::new);
     let mut open = use_signal(|| false);
     let mut active = use_signal(|| 0usize);
 
-    let selected = match &route {
-        Route::Weapon { slug } => weapons.iter().find(|w| &w.slug == slug).cloned(),
-        _ => None,
+    let market = on_change.is_none();
+    let input_id = if market {
+        "weapon-search"
+    } else {
+        "alert-weapon"
     };
+    let selected = selected
+        .as_ref()
+        .and_then(|slug| weapons.iter().find(|w| &w.slug == slug));
+    let has_selection = selected.is_some();
 
     let needle = text().trim().to_lowercase();
     let matches: Vec<WeaponInfo> = if needle.is_empty() {
@@ -120,12 +139,20 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
     let count = matches.len();
     let active_index = active().min(count.saturating_sub(1));
 
-    let id_like = looks_like_riven_id(&needle);
-    let mut choose = move |slug: String| {
-        navigator.push(Route::Weapon { slug });
+    let id_like = market && looks_like_riven_id(&needle);
+    let close = move || {
+        let (mut text, mut open, mut active) = (text, open, active);
         text.set(String::new());
         open.set(false);
         active.set(0);
+    };
+    let choose = move |slug: String| {
+        if let Some(on_change) = on_change {
+            on_change.call(Some(slug));
+        } else {
+            navigator.push(Route::Weapon { slug });
+        }
+        close();
     };
     let mut find_id = move |id: String| {
         navigator.push(Route::Search { id });
@@ -137,7 +164,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
     rsx! {
         div { class: "picker",
             div { class: "picker-box",
-                if let Some(w) = selected.as_ref().filter(|_| text().is_empty()) {
+                if let Some(w) = selected.filter(|_| text().is_empty()) {
                     WeaponImage {
                         slug: w.slug.clone(),
                         has_image: w.has_image,
@@ -146,19 +173,31 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                     }
                 }
                 input {
-                    id: "weapon-search",
+                    id: input_id,
                     r#type: "text",
-                    placeholder: match &selected {
+                    aria_label: if market { "Search weapons or riven ID" } else { "Weapon" },
+                    disabled: !market && weapons.is_empty(),
+                    placeholder: match selected {
                         Some(w) => w.name.clone(),
+                        None if !market && weapons.is_empty() => "Loading weapons…".into(),
+                        None if !market => "Search by weapon name".into(),
                         None => "Search weapons, paste a riven id or screenshot…".to_owned(),
                     },
-                    class: if selected.is_some() { "has-selection" } else { "" },
-                    value: "{text}",
+                    class: if has_selection { "has-selection" } else { "" },
+                    value: if !market && let Some(w) = selected { w.name.clone() } else { text() },
+                    role: (!market).then_some("combobox"),
+                    aria_autocomplete: (!market).then_some("list"),
+                    aria_expanded: (!market).then(|| open() && count > 0),
+                    aria_controls: (!market && open() && count > 0).then_some("alert-weapon-options"),
+                    aria_activedescendant: (!market && open() && count > 0).then(|| format!("alert-weapon-option-{active_index}")),
                     autocomplete: "off",
                     spellcheck: "false",
                     onfocus: move |_| open.set(true),
                     onfocusout: move |_| open.set(false),
                     oninput: move |e| {
+                        if let Some(on_change) = on_change.filter(|_| has_selection) {
+                            on_change.call(None);
+                        }
                         text.set(e.value());
                         open.set(true);
                         active.set(0);
@@ -177,7 +216,8 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                                 active.set((active_index + count - 1) % count);
                             }
                         }
-                        Key::Enter => {
+                        Key::Enter if market || open() => {
+                            e.prevent_default();
                             if id_like {
                                 find_id(text().trim().to_ascii_lowercase());
                             } else if let Some(w) = picks.get(active_index) {
@@ -191,7 +231,7 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                         _ => {}
                     },
                 }
-                if selected.is_some() {
+                if has_selection && market {
                     Link {
                         to: Route::Market {},
                         class: "picker-clear",
@@ -202,8 +242,16 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                         },
                         "×"
                     }
+                } else if has_selection && let Some(on_change) = on_change {
+                    button {
+                        class: "picker-clear", r#type: "button", aria_label: "Clear weapon",
+                        onclick: move |_| { on_change.call(None); close(); },
+                        "×"
+                    }
                 }
-                crate::scan::ScanButton {}
+                if market {
+                    crate::scan::ScanButton {}
+                }
             }
             if open() && id_like {
                 div { class: "picker-menu",
@@ -222,8 +270,11 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                 }
             } else if open() && count > 0 {
                 div { class: "picker-menu",
+                    id: (!market).then_some("alert-weapon-options"),
+                    role: (!market).then_some("listbox"),
+                    aria_label: (!market).then_some("Weapons"),
                     if needle.is_empty() {
-                        div { class: "picker-hint", "Most valuable right now" }
+                        div { class: "picker-hint", aria_hidden: !market, "Most valuable right now" }
                     }
                     for (i, w) in matches.into_iter().enumerate() {
                         div {
@@ -232,45 +283,65 @@ pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
                                 let slug = w.slug.clone();
                                 move |_| {
                                     active.set(i);
-                                    cache.prefetch_weapon(filters.peek().clone(), slug.clone());
+                                    if market {
+                                        cache.prefetch_weapon(filters.peek().clone(), slug.clone());
+                                    }
                                 }
                             },
                             // Keep the menu mounted until the link receives its click.
                             onmousedown: move |e: MouseEvent| e.prevent_default(),
-                            Link {
-                                to: Route::Weapon { slug: w.slug.clone() },
-                                class: if i == active_index { "picker-item active" } else { "picker-item" },
-                                onclick: move |_| {
-                                    text.set(String::new());
-                                    open.set(false);
-                                    active.set(0);
-                                },
-                                WeaponImage {
-                                    slug: w.slug.clone(),
-                                    has_image: w.has_image,
-                                    name: w.name.clone(),
-                                    size: "sm",
+                            if market {
+                                Link {
+                                    to: Route::Weapon { slug: w.slug.clone() },
+                                    class: if i == active_index { "picker-item active" } else { "picker-item" },
+                                    onclick: move |_| close(),
+                                    WeaponSuggestion { weapon: w.clone(), show_price: true }
                                 }
-                                div { class: "picker-name",
-                                    div { "{w.name}" }
-                                    div { class: "muted small", "{group_label(w.group)}" }
-                                }
-                                div { class: "picker-stats",
-                                    if let Some(m) = w.median_price {
-                                        div { class: "plat-small", "{format_plat(m)}p" }
-                                    }
-                                    div { class: "muted small",
-                                        if w.listings > 0 {
-                                            "{w.listings} listings"
-                                        } else {
-                                            "not scraped yet"
-                                        }
-                                    }
+                            } else {
+                                button {
+                                    id: "alert-weapon-option-{i}",
+                                    role: "option",
+                                    aria_selected: i == active_index,
+                                    r#type: "button", tabindex: -1,
+                                    class: if i == active_index { "picker-item active" } else { "picker-item" },
+                                    onclick: {
+                                        let slug = w.slug.clone();
+                                        move |_| choose(slug.clone())
+                                    },
+                                    WeaponSuggestion { weapon: w.clone(), show_price: false }
                                 }
                             }
                         }
                     }
                 }
+            } else if !market && open() && !needle.is_empty() {
+                div { class: "picker-menu", role: "status",
+                    div { class: "picker-empty", "No weapons match" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn WeaponSuggestion(weapon: WeaponInfo, show_price: bool) -> Element {
+    rsx! {
+        WeaponImage {
+            slug: weapon.slug.clone(),
+            has_image: weapon.has_image,
+            name: weapon.name.clone(),
+            size: "sm",
+        }
+        div { class: "picker-name",
+            div { "{weapon.name}" }
+            div { class: "muted small", "{group_label(weapon.group)}" }
+        }
+        div { class: "picker-stats",
+            if show_price && let Some(m) = weapon.median_price {
+                div { class: "plat-small", "{format_plat(m)}p" }
+            }
+            div { class: "muted small",
+                if weapon.listings > 0 { "{weapon.listings} listings" } else { "not scraped yet" }
             }
         }
     }
@@ -300,8 +371,9 @@ pub fn WeaponHeader(weapon: WeaponInfo, now: Option<i64>) -> Element {
                         " · scraped {format_age(now, w.last_scrape)} ago"
                     }
                 }
-                a { class: "small", href: "{url}", target: "_blank", rel: "noopener",
-                    "warframe.market ↗"
+                div { class: "weapon-header-links small",
+                    a { href: "{url}", target: "_blank", rel: "noopener", "warframe.market ↗" }
+                    Link { to: Route::AlertsPage { weapon: Some(w.slug.clone()) }, "Create alert" }
                 }
             }
             div { class: "kpis",

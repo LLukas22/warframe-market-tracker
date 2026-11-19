@@ -1,5 +1,6 @@
 //! Browser-owned rules and notifications stay alive across route changes in the shell.
 use crate::api::Overview;
+use crate::weapons::WeaponDropdown;
 use dioxus::prelude::*;
 
 #[component]
@@ -8,40 +9,56 @@ pub fn AlertRuntime() -> Element {
 }
 
 #[component]
-pub fn AlertsPage() -> Element {
+pub fn AlertsPage(weapon: Option<String>) -> Element {
+    let key = weapon.as_deref().unwrap_or_default();
+    rsx! { AlertsView { key: "{key}", weapon } }
+}
+
+#[component]
+fn AlertsView(weapon: Option<String>) -> Element {
+    let mut selected = use_signal(|| weapon);
     let overview = use_context::<Signal<Option<Overview>>>();
     let catalog = overview.read();
+    let weapons = catalog
+        .as_ref()
+        .map(|data| data.weapons.as_slice())
+        .unwrap_or_default();
+    let choice = selected.read();
+    let selected_weapon = choice
+        .as_ref()
+        .and_then(|slug| weapons.iter().find(|w| &w.slug == slug));
     rsx! {
         main { class: "alerts-page", id: "riven-alerts",
             div { class: "alerts-intro",
                 h1 { "Riven alerts" }
-                div { class: "alert-notifications",
-                    p { id: "alerts-permission-status", role: "status" }
-                    button { id: "alerts-permission", r#type: "button", disabled: true, "Enable notifications" }
-                }
+                p { class: "muted", "Get pinged when a Riven for your weapon is listed at or under your price." }
             }
-            form { id: "alert-form", class: "alert-form", aria_label: "Create an alert",
-                label { r#for: "alert-weapon", "Weapon"
-                    input {
-                        id: "alert-weapon", r#type: "text", list: "alert-weapons", required: true,
-                        disabled: catalog.is_none(), autocomplete: "off", spellcheck: false,
-                        placeholder: if catalog.is_none() { "Loading weapons…" } else { "Search by weapon name" },
-                    }
-                }
-                datalist { id: "alert-weapons",
-                    if let Some(data) = catalog.as_ref() {
-                        for weapon in &data.weapons {
-                            option { key: "{weapon.slug}", value: "{weapon.name}", "data-weapon": "{weapon.slug}" }
-                        }
+            div { class: "alert-notice", id: "alerts-notice", "data-state": "loading",
+                p { id: "alerts-permission-status", role: "status" }
+                button { id: "alerts-permission", r#type: "button", disabled: true, "Enable notifications" }
+            }
+            form { id: "alert-form", class: "alert-card alert-form", aria_label: "Create an alert",
+                "data-weapon": selected_weapon.map(|w| w.slug.clone()),
+                "data-weapon-name": selected_weapon.map(|w| w.name.clone()),
+                div { class: "alert-weapon-field",
+                    label { r#for: "alert-weapon", "Weapon" }
+                    WeaponDropdown {
+                        weapons: weapons.to_vec(),
+                        selected: choice.clone(),
+                        on_change: move |slug| selected.set(slug),
                     }
                 }
                 label { r#for: "alert-price", "Max price (platinum)"
                     input { id: "alert-price", r#type: "number", min: "1", step: "1", max: "2147483647",
                         required: true, placeholder: "e.g. 300" }
                 }
-                button { class: "alert-submit", r#type: "submit", disabled: true, "Save alert" }
+                button { class: "alert-submit", r#type: "submit", disabled: selected_weapon.is_none(), "Save alert" }
                 details { class: "alert-seller-filters",
-                    summary { "Seller filters" span { class: "alert-filter-summary", id: "alert-filter-summary", "Online or in game" } }
+                    summary {
+                        "Seller filters"
+                        span { class: "alert-filter-summary", id: "alert-filter-summary", "Online or in game" }
+                        span { class: "alert-chevron", aria_hidden: true }
+                    }
                     div { class: "alert-seller-fields",
                         label { r#for: "alert-seller-status", "Seller availability"
                             select { id: "alert-seller-status",
@@ -57,18 +74,23 @@ pub fn AlertsPage() -> Element {
                     }
                     p { "Seller availability reflects the last scrape." }
                 }
+                p { id: "alerts-error", class: "error", role: "alert" }
+                p { id: "alerts-saved", class: "alert-saved", role: "status" }
             }
-            p { id: "alerts-error", class: "error", role: "alert" }
-            p { id: "alerts-saved", class: "alert-saved", role: "status" }
-            section { class: "alerts-section", aria_labelledby: "alert-rules-title",
-                h2 { id: "alert-rules-title", "Watchlist" }
+            section { class: "alert-card alerts-section", aria_labelledby: "alert-rules-title",
+                div { class: "section-head",
+                    h2 { id: "alert-rules-title", "Watchlist" }
+                    span { class: "muted small", id: "alerts-rules-count" }
+                }
                 div { id: "alerts-rules",
                     p { class: "alert-empty", "Loading saved alerts…" }
                 }
             }
-            section { class: "alerts-section", aria_labelledby: "alert-matches-title",
-                h2 { id: "alert-matches-title", "Recent matches" }
-                p { id: "alerts-status", role: "status", class: "alert-check-status", hidden: true }
+            section { class: "alert-card alerts-section", aria_labelledby: "alert-matches-title",
+                div { class: "section-head",
+                    h2 { id: "alert-matches-title", "Recent matches" }
+                    span { id: "alerts-status", role: "status", class: "muted small", hidden: true }
+                }
                 div { id: "alerts-matches", aria_live: "polite" }
             }
         }

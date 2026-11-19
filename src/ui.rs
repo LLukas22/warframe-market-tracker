@@ -119,8 +119,8 @@ mod route {
         #[layout(Shell)]
         #[route("/")]
         Market {},
-        #[route("/alerts")]
-        AlertsPage {},
+        #[route("/alerts?:weapon")]
+        AlertsPage { weapon: Option<String> },
         #[route("/weapons/:slug")]
         Weapon { slug: String },
         #[route("/search/:id")]
@@ -399,6 +399,7 @@ fn Shell() -> Element {
         }
     });
     let current_route = use_route::<Route>();
+    let on_alerts = matches!(current_route, Route::AlertsPage { .. });
     use_effect(use_reactive!(|current_route| {
         let _ = current_route;
         scraper_open.set(false);
@@ -433,8 +434,9 @@ fn Shell() -> Element {
                 div {}
             }
             nav { class: "market-nav", aria_label: "Tracker pages",
-                Link { to: Route::Market {}, class: "nav-tab", "Market" }
-                Link { to: Route::AlertsPage {}, class: "nav-tab", "Alerts" }
+                // Weapon, riven and scan pages all belong to the market tab.
+                Link { to: Route::Market {}, class: if on_alerts { "nav-tab" } else { "nav-tab active" }, "Market" }
+                Link { to: Route::AlertsPage { weapon: None }, class: if on_alerts { "nav-tab active" } else { "nav-tab" }, "Alerts" }
             }
             div { class: "header-actions",
                 button {
