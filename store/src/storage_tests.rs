@@ -74,6 +74,8 @@ fn add_auction(
         mean_quality: None,
         owner_name: id.into(),
         owner_reputation: None,
+        owner_status: String::new(),
+        platform: String::new(),
         created: 0,
         first_seen: last_seen,
         last_seen,
@@ -1445,4 +1447,56 @@ fn spliced_filter_keeps_rivens_with_a_splicer_only_stat() {
     // Combined with a stat filter, which checks each riven's stats.
     query.positives = vec!["critical_chance".into()];
     assert_eq!(inner.search(&query, now_ms()).total, 1);
+}
+
+#[test]
+fn alerts_match_buyouts_status_reputation_and_recent_observations() {
+    use wfmt_api::{AlertFilter, SellerStatus};
+    let mut data = Data::default();
+    let weapon = data.intern_weapon("torid", "Torid", None);
+    let other_weapon = data.intern_weapon("soma", "Soma", None);
+    let now = 2_000_000;
+    let hit = add_auction(&mut data, weapon, "hit", 300, now);
+    data.auctions[hit].owner_status = "ingame".into();
+    data.auctions[hit].owner_reputation = Some(10);
+    let expensive = add_auction(&mut data, weapon, "expensive", 301, now);
+    data.auctions[expensive].owner_status = "ingame".into();
+    add_auction(&mut data, weapon, "stale", 100, now - 16 * 60 * 1000);
+    let bid = add_auction(&mut data, weapon, "bid", 1, now);
+    data.auctions[bid].direct_sell = false;
+    let gone = add_auction(&mut data, weapon, "gone", 100, now);
+    data.auctions[gone].gone = Some(Gone {
+        at: now,
+        reason: wfmt_dataset::schema::GoneReason::Expired,
+    });
+    add_auction(&mut data, other_weapon, "other", 100, now);
+    let mut rule = AlertFilter {
+        weapon: "torid".into(),
+        max_price: 300,
+        status: SellerStatus::Available,
+        min_reputation: 10,
+    };
+    let (matches, latest) = data.alert_matches(&[rule.clone()], now);
+    assert_eq!(latest, Some(now));
+    assert_eq!(
+        matches
+            .iter()
+            .map(|l| l.auction_id.as_str())
+            .collect::<Vec<_>>(),
+        ["hit"]
+    );
+    rule.status = SellerStatus::Online;
+    assert!(data.alert_matches(&[rule.clone()], now).0.is_empty());
+    rule.status = SellerStatus::Ingame;
+    assert_eq!(data.alert_matches(&[rule.clone()], now).0.len(), 1);
+    rule.min_reputation = 11;
+    assert!(data.alert_matches(&[rule.clone()], now).0.is_empty());
+    rule.status = SellerStatus::Any;
+    rule.min_reputation = 0;
+    // Unknown seller status/reputation are accepted only without those restrictions.
+    let unknown = add_auction(&mut data, weapon, "unknown", 200, now);
+    assert_eq!(data.alert_matches(&[rule.clone()], now).0.len(), 2);
+    data.auctions[unknown].buyout_price = None;
+    data.auctions[hit].buyout_price = Some(0);
+    assert!(data.alert_matches(&[rule], now).0.is_empty());
 }

@@ -37,3 +37,19 @@ A Cargo workspace. The web app (Dioxus, at the root) is a thin layer over librar
 - `cargo bench -p wfmt-store --bench queries` times the queries on the real dataset in `./data` (or `WFMT_DATA_DIR`).
 - `WFMT_GOLDEN=out.jsonl cargo test --release -p wfmt-store golden -- --ignored` writes the answers to many queries on the real dataset, to diff two versions of the code.
 - `cargo run -p wfmt-scraper --release --features reprocess --bin reprocess -- --replace` rebuilds a stopped server's dataset from its raw archive.
+
+## Browser alerts
+
+Open **Alerts** to save a weapon, maximum platinum price, seller status, and minimum seller
+reputation. Rules and per-listing notification history are saved only in this browser's local
+storage. Pause/resume or delete rules from the tab. Enable browser notifications when prompted;
+HTTPS (or localhost) is required, and blocked permissions must be changed in browser site settings.
+
+Keep any tracker page open. It checks the server's shared data every 30 seconds and notifies once
+per rule and matching fixed-price listing, including existing matches on the first check. Bidding
+starting prices do not trigger alerts. Matches also appear in the Alerts tab if notifications are
+unavailable. Only listings observed in the past 15 minutes are eligible; seller status and
+reputation reflect that observation. Live scraping is needed for timely alerts: the default
+Hugging Face downloads are delayed, and background tabs may be throttled by the browser.
+
+Run the browser alert controller tests with `node --test assets/alerts.test.cjs`.

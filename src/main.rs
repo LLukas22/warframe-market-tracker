@@ -1,5 +1,8 @@
 #[cfg(feature = "server")]
 mod admin;
+#[cfg(feature = "server")]
+mod alert_api;
+mod alerts;
 mod api;
 #[cfg(feature = "server")]
 mod app;
@@ -54,6 +57,7 @@ fn main() {
         // visitor doesn't pay for it. Pages rendered before it's done fetch from the browser.
         tokio::task::spawn_blocking(|| app.store.refresh());
         Ok(dioxus::server::router(ui::App)
+            .route("/api/alerts/matches", post(alert_api::matches))
             .route("/img/weapon/{slug}", get(images::weapon))
             .route("/ocr/{*path}", get(ocr_assets::serve))
             .route("/api/data/export", post(transfer::export))

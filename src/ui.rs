@@ -112,12 +112,15 @@ pub(crate) use route::Route;
 mod route {
     #![allow(unreachable_code)]
     use super::*;
+    use crate::alerts::AlertsPage;
 
     #[derive(Clone, Debug, PartialEq, Routable)]
     pub(crate) enum Route {
         #[layout(Shell)]
         #[route("/")]
         Market {},
+        #[route("/alerts")]
+        AlertsPage {},
         #[route("/weapons/:slug")]
         Weapon { slug: String },
         #[route("/search/:id")]
@@ -417,6 +420,7 @@ fn Shell() -> Element {
     rsx! {
         document::Stylesheet { href: CSS }
         document::Title { "Riven Tracker" }
+        crate::alerts::AlertRuntime {}
         header {
             div { class: "brand",
                 h1 {
@@ -427,6 +431,10 @@ fn Shell() -> Element {
                 WeaponPicker { weapons: o.weapons.clone() }
             } else {
                 div {}
+            }
+            nav { class: "market-nav", aria_label: "Tracker pages",
+                Link { to: Route::Market {}, class: "nav-tab", "Market" }
+                Link { to: Route::AlertsPage {}, class: "nav-tab", "Alerts" }
             }
             div { class: "header-actions",
                 button {

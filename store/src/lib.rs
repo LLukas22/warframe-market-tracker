@@ -321,6 +321,8 @@ struct Auction {
     mean_quality: Option<f64>,
     owner_name: String,
     owner_reputation: Option<i64>,
+    owner_status: String,
+    platform: String,
     created: i64,
     first_seen: i64,
     last_seen: i64,
@@ -505,6 +507,7 @@ impl Row {
     }
 }
 
+mod alerts;
 mod checks;
 mod detail;
 mod effects;

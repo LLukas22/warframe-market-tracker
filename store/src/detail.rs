@@ -255,6 +255,8 @@ impl Data {
                 .then(|| positives.iter().sum::<f64>() / positives.len() as f64),
             owner_name: String::new(),
             owner_reputation: None,
+            owner_status: String::new(),
+            platform: String::new(),
             created: now,
             first_seen: now,
             last_seen: now,

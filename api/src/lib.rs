@@ -637,3 +637,53 @@ mod key_tests {
         }
     }
 }
+
+/// Browser-owned notification rules; only filters are sent to the server.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlertFilter {
+    pub weapon: String,
+    pub max_price: i64,
+    pub status: SellerStatus,
+    pub min_reputation: i64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SellerStatus {
+    Any,
+    Online,
+    Ingame,
+    Available,
+}
+
+impl SellerStatus {
+    pub fn matches(self, status: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Online => status == "online",
+            Self::Ingame => status == "ingame",
+            Self::Available => matches!(status, "online" | "ingame"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlertListing {
+    pub auction_id: String,
+    pub weapon: String,
+    pub weapon_name: String,
+    pub price: i64,
+    pub seller: String,
+    pub status: String,
+    pub reputation: Option<i64>,
+    pub platform: String,
+    pub observed_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlertSnapshot {
+    pub listings: Vec<AlertListing>,
+    pub latest_observation: Option<i64>,
+    pub live_scraper: bool,
+    pub server_time: i64,
+}

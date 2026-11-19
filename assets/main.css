@@ -48,7 +48,7 @@ header {
   top: 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: 280px minmax(280px, 560px) 1fr;
+  grid-template-columns: 280px minmax(280px, 560px) auto 1fr;
   gap: 24px;
   align-items: center;
   padding: 12px 24px;
@@ -77,6 +77,7 @@ header {
 
 .auction-count {
   justify-self: end;
+  white-space: nowrap;
   padding: 2px 8px;
   border-color: transparent;
   background: transparent;
@@ -598,7 +599,7 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 /* Last in the file, so these win over the base rules of the same specificity. */
 
 @media (max-width: 1100px) {
-  header { grid-template-columns: auto minmax(0, 1fr) auto; }
+  header { grid-template-columns: auto minmax(0, 1fr) auto auto; }
   .market-page { grid-template-columns: minmax(0, 1fr); }
   aside { position: static; max-height: none; padding: 0; overflow: visible; }
   .filters-toggle {
@@ -928,4 +929,81 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
   .scan-stat-name { grid-row: 1; grid-column: 2; }
   .scan-stat-remove { grid-row: 1; grid-column: 3; }
   .scan-stat-value { grid-row: 2; grid-column: 2; }
+}
+
+/* ---------- alert navigation and page ---------- */
+
+.market-nav { display: flex; align-items: center; gap: 4px; }
+.nav-tab {
+  padding: 7px 10px;
+  border-radius: 7px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.nav-tab:hover, .nav-tab[aria-current="page"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.alerts-page {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 32px 24px 48px;
+}
+.alerts-intro {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 20px;
+  margin-bottom: 20px;
+}
+.alerts-intro h1 { margin: 0; font-size: 24px; }
+.alert-notifications { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.alert-notifications p, .alert-check-status, .alert-empty { margin: 0; color: var(--muted); font-size: 13px; }
+.alert-notifications p:empty { display: none; }
+
+.alert-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(135px, 185px) auto;
+  align-items: end;
+  gap: 12px;
+}
+.alert-form label { display: grid; min-width: 0; gap: 6px; }
+.alert-form select, .alert-form input { width: 100%; min-height: 38px; }
+.alert-form .alert-submit { min-height: 38px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.alerts-page button:disabled { cursor: default; opacity: .6; }
+.alert-seller-filters { grid-column: 1 / -1; }
+.alert-seller-filters summary { width: fit-content; cursor: pointer; }
+.alert-filter-summary { margin-left: 8px; color: var(--muted); font-size: 12px; }
+.alert-seller-fields { display: grid; grid-template-columns: minmax(0, 230px) minmax(0, 185px); gap: 12px; margin-top: 12px; }
+.alert-seller-filters p { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+#alerts-error, #alerts-saved { margin: 10px 0 0; }
+#alerts-error:empty, #alerts-saved:empty { display: none; }
+.alert-saved { color: var(--positive); }
+
+.alerts-section { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
+.alerts-section h2 { margin-bottom: 10px; }
+.alert-check-status:not([hidden]) { margin-bottom: 8px; }
+.alert-rule {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 0;
+  overflow-wrap: anywhere;
+}
+.alert-rule + .alert-rule { border-top: 1px solid var(--border); }
+.alert-rule p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.alert-rule-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.alert-rule-actions .alert-delete { color: var(--muted); background: transparent; }
+
+@media (max-width: 600px) {
+  .market-nav { grid-column: 1 / -1; grid-row: 3; }
+  .alerts-page { padding: 20px 12px 40px; }
+  .alert-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .alert-form > label:first-child { grid-column: 1 / -1; }
+  .alert-submit { justify-self: start; }
 }

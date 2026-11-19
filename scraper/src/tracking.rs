@@ -118,6 +118,10 @@ pub struct Seen {
     pub row_at: Option<DateTime<Utc>>,
     pub direct_sell: bool,
     pub owner_name: String,
+    #[serde(default)]
+    pub owner_status: String,
+    #[serde(default)]
+    pub owner_reputation: Option<i64>,
     pub created: DateTime<Utc>,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
@@ -176,7 +180,9 @@ impl Tracker {
     /// hasn't had a row for a while. Sightings without a row are lost with their raw archive.
     pub fn needs_row(&mut self, weapon: &str, auction: &Auction, now: DateTime<Utc>) -> bool {
         self.weapon(weapon).get(&auction.id).is_none_or(|s| {
-            s.price != auction.price()
+            s.owner_status != auction.owner.status
+                || s.owner_reputation != auction.owner.reputation
+                || s.price != auction.price()
                 || s.buyout != auction.buyout_price
                 || s.top_bid != auction.top_bid()
                 || s.updated != Some(auction.updated)
@@ -333,6 +339,8 @@ mod tests {
             row_at: None,
             direct_sell: true,
             owner_name: "x".into(),
+            owner_status: String::new(),
+            owner_reputation: None,
             created: at,
             first_seen: at,
             last_seen: at,

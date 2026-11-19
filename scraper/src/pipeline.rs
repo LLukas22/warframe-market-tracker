@@ -267,6 +267,8 @@ impl Pipeline {
                         row_at: Some(raw.scraped_at),
                         direct_sell: r.is_direct_sell,
                         owner_name: r.owner_name.clone(),
+                        owner_status: r.owner_status.clone(),
+                        owner_reputation: r.owner_reputation,
                         created: r.created,
                         first_seen: raw.scraped_at,
                         last_seen: raw.scraped_at,

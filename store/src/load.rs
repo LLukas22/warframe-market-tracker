@@ -329,6 +329,12 @@ impl Data {
             let closed = column!(b, auctions::CLOSED, BooleanArray);
             let created = column!(b, auctions::CREATED, TimestampMillisecondArray);
             let owner_name = column!(b, auctions::OWNER_NAME, StringArray);
+            let owner_status = b
+                .column_by_name(auctions::OWNER_STATUS)
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let platform = b
+                .column_by_name(auctions::PLATFORM)
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
             let owner_rep = column!(b, auctions::OWNER_REPUTATION, Int64Array);
             // Older parts predate riven ids; fall back to one riven per auction.
             let riven_ids = b
@@ -342,6 +348,12 @@ impl Data {
                 if !visible.value(i) || closed.value(i) {
                     continue;
                 }
+                let status = owner_status
+                    .filter(|c| c.is_valid(i))
+                    .map_or("", |c| c.value(i));
+                let platform_value = platform
+                    .filter(|c| c.is_valid(i))
+                    .map_or("", |c| c.value(i));
                 let t = scraped.value(i);
                 let class = weapon_class
                     .is_valid(i)
@@ -403,6 +415,8 @@ impl Data {
                         a.fit_ok = fit_ok.value(i);
                         a.mean_quality = opt(mean_q, i, Float64Array::value);
                         set_str(&mut a.owner_name, owner_name.value(i));
+                        set_str(&mut a.owner_status, status);
+                        set_str(&mut a.platform, platform_value);
                         a.owner_reputation = opt(owner_rep, i, Int64Array::value);
                         a.created = created.value(i);
                         a.first_seen = a.first_seen.min(t);
@@ -434,6 +448,8 @@ impl Data {
                             mean_quality: opt(mean_q, i, Float64Array::value),
                             owner_name: owner_name.value(i).to_owned(),
                             owner_reputation: opt(owner_rep, i, Int64Array::value),
+                            owner_status: status.to_owned(),
+                            platform: platform_value.to_owned(),
                             created: created.value(i),
                             first_seen: t,
                             last_seen: t,
