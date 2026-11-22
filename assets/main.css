@@ -14,6 +14,8 @@
   /* Spliced stats (Riven Splicer). */
   --splice: #5cc8e8;
   --radius: 10px;
+  /* The sticky site header's height, for things that stick below it. */
+  --header-height: 66px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: dark;
   -webkit-text-size-adjust: 100%;
@@ -423,7 +425,7 @@ aside {
 .swatch.band { height: 10px; background: color-mix(in srgb, var(--accent) 30%, transparent); }
 .swatch.min { background: var(--positive); }
 .swatch.gone { width: 10px; height: 10px; border-radius: 50%; background: color-mix(in srgb, var(--warn) 70%, transparent); }
-.chart .gone-dot { fill: color-mix(in srgb, var(--warn) 55%, transparent); stroke: var(--warn); stroke-width: 1; pointer-events: none; }
+.chart .gone-dot { fill: color-mix(in srgb, var(--warn) 35%, transparent); stroke: color-mix(in srgb, var(--warn) 70%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
 .tooltip-gone { color: var(--warn); }
 
 /* ---------- stat effects ---------- */
@@ -482,6 +484,8 @@ aside {
 .tag.bad { background: color-mix(in srgb, var(--negative) 18%, transparent); color: var(--negative); }
 .tag.gone { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
 .tag.info { background: var(--accent-soft); color: var(--accent); }
+/* When a listing was last seen: on nearly every row, so it stays quiet. */
+.tag.seen { padding-left: 0; background: none; color: var(--muted); }
 .listings.gone .listing { opacity: .8; }
 .kpi-sub { font-size: 13px; color: var(--muted); font-weight: 500; }
 
@@ -496,6 +500,8 @@ aside {
 .spliced-mark svg { width: 12px; height: 12px; }
 .stat-label .spliced-mark { flex: none; margin-left: -4px; }
 .check .spliced-mark, .chip .spliced-mark { margin-left: 0; }
+.roll-strength { display: flex; gap: 4px; align-items: center; }
+.roll-strength .quality { flex: 1; }
 .quality { height: 5px; background: var(--panel-3); border-radius: 3px; overflow: hidden; }
 .quality-bar { display: block; height: 100%; }
 .attr.positive .quality-bar { background: var(--positive); }
@@ -754,31 +760,43 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 .similar-options { display: block; }
 .similar-options label { margin-top: 12px; }
 .journey { margin-top: 0; }
-.journey-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 4px 0 18px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
-.journey-summary > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.journey-summary span, .journey-summary small { color: var(--muted); font-size: 12px; }
-.journey-summary strong { font-size: 20px; font-weight: 600; }
 .journey .section-head { margin: 18px 0 10px; }
+.journey > .section-head:first-child { margin-top: 4px; }
+
+/* Who held the riven: cards left to right, an arrow and the gap between them. */
+.ownership-more { margin: 4px 0 8px; }
+.ownership-flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px 0; list-style: none; padding: 0; margin: 10px 0 4px; }
+.ownership-step { display: flex; align-items: center; }
+.stage-handover { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 76px; padding: 0 6px; text-align: center; }
+.stage-arrow { color: var(--muted); font-size: 20px; line-height: 1; }
+.stage-markup { font-size: 12px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.stage-markup.up { color: var(--accent); }
+.stage-card { display: flex; flex-direction: column; gap: 4px; width: 190px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.stage-card.openable { cursor: pointer; transition: border-color .15s, background .15s; }
+.stage-card.openable:hover { border-color: var(--panel-3); background: var(--panel-2); }
+.stage-card.openable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.stage-card.selected { border-color: var(--accent); }
+.stage-seller { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 600; }
+/* A piece of the seller's line in the price chart, as in a legend. */
+.stage-swatch { flex: none; width: 14px; height: 3px; border-radius: 2px; }
+.stage-seller .seller-name > a:first-child { color: var(--text); }
+.stage-price { font-size: 17px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; text-decoration: none; }
+.stage-card.openable:hover .stage-price { text-decoration: underline; }
+/* Narrow screens: top to bottom, the arrow pointing down. */
+@media (max-width: 600px) {
+  .ownership-flow { flex-direction: column; flex-wrap: nowrap; }
+  .ownership-step { flex-direction: column; align-items: stretch; }
+  .stage-card { width: auto; }
+  .stage-handover { flex-direction: row; justify-content: center; gap: 8px; padding: 6px 0; }
+  .stage-arrow { transform: rotate(90deg); }
+}
 .journey-chart svg { height: auto; min-height: 200px; }
 .journey-readout { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; min-height: 26px; padding: 10px 0 0; font-size: 13px; }
 .journey-hit { cursor: crosshair; }
 .journey-hit:focus { stroke: var(--text); outline: none; }
-.sighting-axis, .sighting-dates { display: flex; justify-content: space-between; gap: 8px 16px; color: var(--muted); font-size: 12px; }
-.sighting-axis { padding: 0 14px; }
-.sighting-list { list-style: none; padding: 0; margin: 8px 0 12px; }
-.sighting { padding: 12px 14px; border-bottom: 1px solid var(--border); }
-.sighting.selected { background: var(--panel); border-radius: 8px; }
-.sighting-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
-.sighting-heading a { margin-left: auto; font-size: 12px; }
-.sighting-track { position: relative; height: 6px; margin: 12px 3px; background: var(--panel-3); border-radius: 4px; }
-.sighting-track span { position: absolute; top: 0; height: 6px; min-width: 6px; max-width: 100%; border-radius: 4px; transform: translateX(-3px); }
-.sighting-dates { flex-wrap: wrap; }
-@media (max-width: 600px) {
-  .journey-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 10px; }
-  .journey-summary > div:last-child { grid-column: 1 / -1; }
-  .journey-summary strong { font-size: 17px; }
-  .sighting-heading a { margin-left: 0; }
-}
+.journey-chart .axis-tick { stroke: var(--border); }
+.journey-left-up { opacity: .45; stroke-dasharray: 1 5; stroke-linecap: round; }
+.journey-handover { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: .6; vector-effect: non-scaling-stroke; }
 
 .match-label { font-weight: 600; }
 .match-quality { margin-left: auto; font-size: 12px; }
@@ -810,31 +828,30 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 .rerolls { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; }
 .rerolls svg { flex: none; width: 13px; height: 13px; }
 .riven-tags .tag { margin-top: 2px; }
-.riven-offer { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; text-align: right; }
+/* The offer, then who's selling it, apart. */
+.riven-offer { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 12px; text-align: right; }
 .riven-offer .plat { font-size: 26px; }
+.offer-main { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.offer-links { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px 14px; margin-top: 2px; }
+.offer-seller { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 160px; padding-top: 10px; border-top: 1px solid var(--border); }
+.offer-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.offer-seller-name { font-weight: 600; }
+.offer-seller-name .seller-name > a:first-child { color: var(--text); }
 .riven-foot { display: flex; flex-wrap: wrap; gap: 6px 20px; align-items: center; padding-top: 12px; border-top: 1px solid var(--border); }
 .riven-foot .riven-id code { color: var(--text); }
 .riven-section-title { margin: 28px 0 8px; }
 
-/* Whether the listing is still on warframe.market, under the riven's summary. */
-.availability { display: flex; align-items: center; gap: 14px; margin-top: 12px; padding: 12px 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
-.availability-icon { flex: none; display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); }
-.availability-icon svg { width: 26px; height: 26px; }
-.availability-icon .spinner { width: 20px; height: 20px; }
-.availability-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.availability-text strong { font-size: 15px; }
-.availability.listed { border-color: color-mix(in srgb, var(--positive) 40%, var(--border)); }
-.availability.listed .availability-icon, .availability.listed strong { color: var(--positive); }
-.availability.gone { border-color: color-mix(in srgb, var(--negative) 40%, var(--border)); }
-.availability.gone .availability-icon, .availability.gone strong { color: var(--negative); }
-.availability.failed .availability-icon, .availability.failed strong { color: var(--warn); }
-.availability-refresh { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
-.availability-refresh svg { width: 14px; height: 14px; }
+/* Whether the listing is still on warframe.market, one line in the price box. */
+.availability { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.availability-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .7; }
+.availability.checking .availability-dot { animation: live-pulse 1.2s ease-in-out infinite; }
+.availability.listed { color: var(--positive); }
+.availability.gone { color: var(--negative); }
+.availability.failed { color: var(--warn); }
+.availability-refresh { display: inline-grid; place-items: center; padding: 2px; border: 0; background: none; color: var(--muted); cursor: pointer; }
+.availability-refresh:hover:not(:disabled) { color: var(--text); }
+.availability-refresh svg { width: 13px; height: 13px; }
 .availability-refresh svg.spinning { animation: spin .8s linear infinite; }
-@media (max-width: 600px) {
-  .availability { flex-wrap: wrap; padding: 12px; }
-  .availability-refresh { margin-left: 42px; }
-}
 
 .stat-panel { display: flex; flex-direction: column; gap: 14px; }
 .stat-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -846,7 +863,8 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
 .stat-row.positive .stat-value { color: var(--positive); }
 .stat-row.negative .stat-value { color: var(--negative); }
 .stat-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stat-verdict { margin-left: auto; flex: none; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-verdict { margin-left: auto; flex: none; text-align: right; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-verdict strong { display: block; }
 .stat-scale { display: grid; grid-template-columns: 64px 1fr 64px; gap: 10px; align-items: center; }
 .stat-end { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .stat-end:first-child { text-align: right; }
@@ -861,7 +879,10 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
   .riven-head { flex-wrap: wrap; gap: 12px; }
   .riven-head .weapon-img.md { width: 56px; height: 56px; }
   .riven-title h2 { font-size: 18px; }
-  .riven-offer { flex: 0 0 100%; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; text-align: left; }
+  .riven-offer { flex: 0 0 100%; flex-direction: row; flex-wrap: wrap; align-items: stretch; justify-content: space-between; gap: 12px; text-align: left; }
+  .offer-main { align-items: flex-start; }
+  .offer-links { justify-content: flex-start; }
+  .offer-seller { min-width: 0; padding: 0 0 0 12px; border-top: 0; border-left: 1px solid var(--border); align-items: flex-start; }
   .stat-row { grid-template-columns: minmax(0, 1fr); }
   .stat-scale { grid-template-columns: 56px 1fr 56px; }
 }
@@ -1071,3 +1092,101 @@ button:disabled { cursor: not-allowed; opacity: .4; border-color: var(--border);
   .alert-row { align-items: start; }
   .alert-row-actions { grid-column: 2 / -1; justify-content: flex-start; }
 }
+
+/* ---------- people ---------- */
+
+.people-page {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 28px 24px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Search and period on one line. */
+.people-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }
+.people-search-row { display: flex; gap: 8px; flex: 1 1 220px; max-width: 300px; min-width: 0; }
+.people-search { flex: 1; min-width: 0; }
+.people-count { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Column headers sort on wide screens. */
+.people-sort { display: none; }
+
+/* The market's period choices, kept compact: presets, then the custom range toggle. */
+.people-period { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.people-period .segmented { width: 252px; }
+.people-period .custom-toggle { width: auto; gap: 8px; padding: 6px 10px; }
+.people-period .date-range { flex-basis: 100%; max-width: 360px; }
+
+/* No overflow clipping: it would stop the header row from sticking. */
+.people-table-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.people-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.people-table th, .people-table td { padding: 10px 16px; text-align: left; white-space: nowrap; }
+.people-table th { border-bottom: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 12px; font-weight: 500; }
+.people-table th:first-child { border-top-left-radius: var(--radius); }
+.people-table th:last-child { border-top-right-radius: var(--radius); }
+.people-table tbody tr:last-child td:first-child { border-bottom-left-radius: var(--radius); }
+.people-table tbody tr:last-child td:last-child { border-bottom-right-radius: var(--radius); }
+/* The column names stay in view below the site header on wide screens. */
+@media (min-width: 761px) {
+  .people-table thead th { position: sticky; top: var(--header-height); z-index: 1; }
+}
+.people-table .num { text-align: right; }
+.people-table tbody tr + tr td { border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.people-table td.none { color: color-mix(in srgb, var(--muted) 45%, transparent); }
+.people-table td.resales:not(.none) { color: var(--accent); font-weight: 600; }
+.person-row { cursor: pointer; }
+@media (hover: hover) { .person-row:hover td { background: var(--panel-2); } }
+/* Wide enough for long names, narrow enough that the numbers stay near them. */
+.person-name { width: 30%; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+.person-name a { color: var(--text); font-weight: 600; }
+
+/* Column headers that sort, styled like the header text they replace. */
+.sort-header { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; }
+.sort-header:hover, .sort-header.active { color: var(--text); }
+.sort-header:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sort-arrow { margin-left: 3px; visibility: hidden; }
+.sort-header.active .sort-arrow { visibility: visible; }
+
+/* A seller's page: name and a line of facts, then their rivens. */
+.person-header { display: flex; flex-direction: column; gap: 6px; }
+.person-title { font-size: 22px; overflow-wrap: anywhere; }
+.person-facts { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.person-page { max-width: 1040px; }
+.person-page .listing-bar { margin: 20px 0 14px; }
+.person-page .listing-bar .people-period { margin-bottom: 6px; }
+.person-page .listing-tabs { overflow-x: auto; scrollbar-width: none; }
+.person-page .listing-tabs button { white-space: nowrap; }
+.tab-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.listing-tabs button.active .tab-count { color: inherit; }
+/* On a seller's page, who a riven passed between is the point: give it the accent. */
+.tag.handoff { background: var(--accent-soft); color: var(--accent); }
+.tag.handoff a { color: inherit; font-weight: 600; }
+
+@media (max-width: 760px) {
+  .people-table .optional { display: none; }
+  .people-table th, .people-table td { padding: 9px 12px; }
+  .person-name { max-width: 180px; }
+  .people-sort { display: block; }
+  .people-count { margin-left: 0; }
+}
+@media (max-width: 600px) {
+  .people-page { padding: 18px 12px 40px; gap: 12px; }
+  /* Search and sort on one line, then the period on one line. */
+  .people-search-row { max-width: none; flex-basis: 100%; }
+  .people-period { width: 100%; }
+  .people-period .segmented { flex: 1 1 auto; width: auto; }
+  .people-period .custom-range-word { display: none; }
+  .people-table .secondary { display: none; }
+  .person-title { font-size: 18px; }
+  .person-page .listing-tabs { gap: 0; }
+  .person-page .listing-tabs button { padding: 10px 9px; }
+}
+
+/* A seller's name opens warframe.market; the icon beside it, their page here. */
+.seller-name { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.seller-name > a:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seller .seller-name > a:first-child { color: var(--text); }
+.seller-page { flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 4px; color: var(--muted); }
+.seller-page:hover, .seller-page:focus-visible { color: var(--accent); background: var(--accent-soft); text-decoration: none; }
+@media (pointer: coarse) { .seller-page { width: 28px; height: 28px; } }

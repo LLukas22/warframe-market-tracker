@@ -8,6 +8,9 @@ use crate::api::{
 };
 use crate::ui::{format_date, format_datetime, format_plat, format_short_datetime, format_time};
 
+/// Horizontal room, in pixels, each point needs for its median marker to show.
+const MIN_MARKER_SPACING: f64 = 14.0;
+
 /// Charts are drawn at this width until they've been measured.
 pub(crate) const INITIAL_WIDTH: f64 = 900.0;
 
@@ -141,6 +144,8 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
         })
         .collect();
 
+    let roomy = (w - LEFT - RIGHT) / points.len() as f64 >= MIN_MARKER_SPACING;
+
     let tooltip = hovered().and_then(|i| points.get(i)).map(|p| {
         let left = x(p.t) / w * 100.0;
         rsx! {
@@ -171,6 +176,17 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
             svg {
                 view_box: "0 0 {w} {H}",
                 preserve_aspect_ratio: "xMinYMin meet",
+                // A chart rendered by the server and hydrated may never get a resize event,
+                // and would keep the guessed width, shrunk to fit: measure it once mounted.
+                onmounted: move |event| async move {
+                    if let Ok(rect) = event.get_client_rect().await {
+                        let measured = rect.width();
+                        if measured > LEFT + RIGHT && (measured - width()).abs() > RESIZE_THRESHOLD {
+                            LAST_WIDTH.set(measured);
+                            width.set(measured);
+                        }
+                    }
+                },
                 onmouseleave: move |_| hovered.set(None),
                 for v in y_ticks {
                     line {
@@ -198,18 +214,21 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
                     }
                 }
                 polygon { class: "band", points: "{band}" }
-                polyline { class: "min-line", points: "{min}" }
-                polyline { class: "median-line", points: "{median}" }
+                // Under the lines, so they never hide the median.
                 for p in points.iter().filter(|p| p.gone_median.is_some()) {
                     circle {
                         key: "gone-{p.t}",
                         class: "gone-dot",
                         cx: "{x(p.t)}",
                         cy: "{y(p.gone_median.unwrap_or_default())}",
-                        r: "{(3.0 + (p.gone_count as f64).sqrt() * 1.5).min(9.0):.1}",
+                        r: "{(2.0 + (p.gone_count as f64).sqrt() * 0.6).min(6.0):.1}",
                     }
                 }
-                for (i, p) in points.iter().enumerate() {
+                polyline { class: "min-line", points: "{min}" }
+                polyline { class: "median-line", points: "{median}" }
+                // Markers only where points have room; packed tight they'd merge into a
+                // chain of circles. The hovered one always shows.
+                for (i, p) in points.iter().enumerate().filter(|&(i, _)| roomy || hovered() == Some(i)) {
                     circle {
                         key: "{p.t}",
                         class: if hovered() == Some(i) { "dot active" } else { "dot" },
@@ -253,8 +272,7 @@ fn format_multiplier(effect: f64) -> String {
 pub fn StatEffectsPanel(weapon: String) -> Element {
     let data_version = use_context::<Signal<u64>>();
     let cache = use_context::<crate::ui::ViewCache>();
-    let seed_weapon = weapon.clone();
-    let seed = crate::ui::use_seed(move || api::seed::stat_effects(&seed_weapon));
+    let seed = crate::ui::use_seed(weapon.clone(), |weapon| api::seed::stat_effects(weapon));
     // Seeded from the cache so returning to a weapon doesn't pop this panel in late and
     // push the listings down.
     let cached = use_hook(|| {

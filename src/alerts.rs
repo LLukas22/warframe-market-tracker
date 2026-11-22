@@ -10,8 +10,14 @@ pub fn AlertRuntime() -> Element {
 
 #[component]
 pub fn AlertsPage(weapon: Option<String>) -> Element {
-    let key = weapon.as_deref().unwrap_or_default();
-    rsx! { AlertsView { key: "{key}", weapon } }
+    // Keyed so a new weapon resets the form. Dioxus only remounts on a new key in a list,
+    // hence the list of one.
+    let key = weapon.clone().unwrap_or_default();
+    rsx! {
+        for key in [key] {
+            AlertsView { key: "{key}", weapon: weapon.clone() }
+        }
+    }
 }
 
 #[component]

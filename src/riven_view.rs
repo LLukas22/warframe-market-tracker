@@ -83,15 +83,26 @@ pub fn RivenSummary(listing: Listing, now: Option<i64>) -> Element {
                 }
                 if let Some(now) = now {
                     div { class: "riven-offer",
-                        div {
-                            span { class: "plat", "{price}p" }
-                            span { class: "muted small", " {kind}" }
+                        div { class: "offer-main",
+                            div {
+                                span { class: "plat", "{price}p" }
+                                span { class: "muted small", " {kind}" }
+                            }
+                            div { class: "muted small", "listed {format_age(now, l.created)} ago" }
+                            div { class: "offer-links small",
+                                if l.gone_at.is_none() {
+                                    AvailabilityCheck { key: "{l.auction_id}", auction_id: l.auction_id.clone() }
+                                }
+                                a { href: "{url}", target: "_blank", rel: "noopener", "warframe.market ↗" }
+                            }
                         }
-                        div { class: "small", "{l.owner_name}"
-                            if let Some(rep) = l.owner_reputation { span { class: "muted", " · rep {rep}" } }
+                        div { class: "offer-seller",
+                            span { class: "offer-label", "Seller" }
+                            div { class: "offer-seller-name",
+                                crate::people::SellerName { name: l.owner_name.clone() }
+                            }
+                            if let Some(rep) = l.owner_reputation { span { class: "muted small", "reputation {rep}" } }
                         }
-                        div { class: "muted small", "listed {format_age(now, l.created)} ago" }
-                        a { class: "small", href: "{url}", target: "_blank", rel: "noopener", "warframe.market ↗" }
                     }
                 }
             }
@@ -158,7 +169,12 @@ fn StatScale(attr: AttrView) -> Element {
                 span { class: "stat-value", "{format_value(&a.slug, value)}" }
                 span { class: "stat-name", title: "{attribute_name(&a.slug)}", "{attribute_name(&a.slug)}" }
                 SplicedMark { slug: a.slug.clone() }
-                span { class: "stat-verdict", "{verdict}" }
+                span { class: "stat-verdict",
+                    if let Some((letter, delta)) = api::grading::roll_grade(q, a.positive) {
+                        strong { title: "Favorable deviation from the midpoint of the roll range", "{letter} ({delta:+.1}%)" }
+                    }
+                    "{verdict}"
+                }
             }
             div { class: "stat-scale",
                 span { class: "stat-end", "{label(low)}" }
@@ -224,16 +240,11 @@ pub fn Rerolls(count: i64) -> Element {
     }
 }
 
-/// Whether the listing is still on warframe.market. Checked once the page is open, and again
-/// on request; the server answers from a recent check when it has one. A listing the data
-/// already has as gone isn't checked.
+/// One line in the price box: whether the listing is still on warframe.market. Checked once the
+/// page is open, and again on request; the server answers from a recent check when it has one.
+/// Only for listings the data doesn't already have as gone, whose tag says so.
 #[component]
-pub fn AvailabilityPanel(
-    auction_id: String,
-    gone_at: Option<i64>,
-    gone_reason: Option<String>,
-    now: i64,
-) -> Element {
+pub fn AvailabilityCheck(auction_id: String) -> Element {
     let mut answer = use_signal(|| None::<Result<Availability, String>>);
     let mut busy = use_signal(|| false);
     let mut check = move |refresh: bool| {
@@ -248,113 +259,47 @@ pub fn AvailabilityPanel(
         });
     };
     let mut first = check.clone();
-    let known_gone = gone_at.is_some();
     // Effects only run in the browser, so the page renders without waiting for the check.
-    use_effect(move || {
-        if !known_gone {
-            first(false);
-        }
-    });
+    use_effect(move || first(false));
 
-    // What to show: the latest answer, else the data's own removal, else that it's checking.
-    let shown = match answer() {
-        Some(result) => Some(result),
-        None => gone_at.map(|at| {
-            Ok(Availability {
-                listed: false,
-                checked_at: at,
-                live: false,
-                gone_reason: gone_reason.clone(),
-                server_time: now,
-                refresh_at: 0,
-            })
-        }),
-    };
-    let ago = |now: i64, then: i64| {
-        if now - then < wfmt_types::MINUTE_MS {
+    let ago = |a: &Availability| {
+        if a.server_time - a.checked_at < wfmt_types::MINUTE_MS {
             "just now".to_owned()
         } else {
-            format!("{} ago", format_age(now, then))
+            format!("{} ago", format_age(a.server_time, a.checked_at))
         }
     };
-    let (class, title, detail) = match &shown {
+    let (class, text, title) = match &*answer.read() {
         None => (
             "checking",
-            "Checking warframe.market…".to_owned(),
-            "Looking up whether this listing is still for sale.".to_owned(),
+            "checking warframe.market…".to_owned(),
+            String::new(),
         ),
-        Some(Err(error)) => (
-            "failed",
-            "Couldn't check warframe.market".to_owned(),
-            error.clone(),
-        ),
+        Some(Err(error)) => ("failed", "couldn't check".to_owned(), error.clone()),
         Some(Ok(a)) if a.listed => (
             "listed",
-            "Available".to_owned(),
-            format!(
-                "Still listed on warframe.market · checked {}",
-                ago(a.server_time, a.checked_at)
-            ),
+            "still listed".to_owned(),
+            format!("warframe.market still lists it, checked {}", ago(a)),
         ),
         Some(Ok(a)) => (
             "gone",
-            "Gone".to_owned(),
-            match a.gone_reason.as_deref() {
-                Some("expired") => format!(
-                    "Not seen for days, so counted as gone {}",
-                    ago(a.server_time, a.checked_at)
-                ),
-                Some("missing") => format!(
-                    "Sold or removed · missing from warframe.market's search {}",
-                    ago(a.server_time, a.checked_at)
-                ),
-                _ => format!(
-                    "Sold or removed · warframe.market confirmed it {}",
-                    ago(a.server_time, a.checked_at)
-                ),
-            },
+            "sold or removed".to_owned(),
+            format!("Gone from warframe.market, found {}", ago(a)),
         ),
     };
-    let can_refresh = !matches!(&shown, Some(Ok(a)) if !a.listed);
+    let gone = class == "gone";
 
     rsx! {
-        section { class: "availability {class}", "aria-live": "polite",
-            span { class: "availability-icon", "aria-hidden": "true",
-                match class {
-                    "checking" => rsx! { span { class: "spinner" } },
-                    "listed" => rsx! {
-                        svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2.5",
-                            stroke_linecap: "round", stroke_linejoin: "round",
-                            circle { cx: "12", cy: "12", r: "9.5" }
-                            path { d: "M7.5 12.5l3 3 6-6.5" }
-                        }
-                    },
-                    "gone" => rsx! {
-                        svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2.5",
-                            stroke_linecap: "round", stroke_linejoin: "round",
-                            circle { cx: "12", cy: "12", r: "9.5" }
-                            path { d: "M8.5 8.5l7 7M15.5 8.5l-7 7" }
-                        }
-                    },
-                    _ => rsx! {
-                        svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2.5",
-                            stroke_linecap: "round", stroke_linejoin: "round",
-                            path { d: "M12 3.5l9.5 17h-19z" }
-                            path { d: "M12 10v4.5M12 17.5v.5" }
-                        }
-                    },
-                }
-            }
-            div { class: "availability-text",
-                strong { "{title}" }
-                span { class: "muted small", "{detail}" }
-            }
-            if can_refresh {
+        div { class: "availability small {class}", "aria-live": "polite", title: "{title}",
+            span { class: "availability-dot", aria_hidden: "true" }
+            span { "{text}" }
+            if !gone {
                 button {
                     class: "availability-refresh",
                     r#type: "button",
                     disabled: busy(),
                     title: "Ask warframe.market again",
+                    aria_label: "Check again",
                     onclick: move |_| check(true),
                     svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2.5",
                         stroke_linecap: "round", stroke_linejoin: "round", "aria-hidden": "true",
@@ -362,7 +307,6 @@ pub fn AvailabilityPanel(
                         path { d: "M20 12a8 8 0 1 1-2.6-5.9" }
                         path { d: "M20 4v4.5h-4.5" }
                     }
-                    if busy() { "Checking…" } else { "Check again" }
                 }
             }
         }

@@ -60,6 +60,7 @@ fn fixture() -> &'static Fixture {
             let middling = weapons[weapons.len() / 2].slug.clone();
             let listing = data
                 .search(&weapon(&busiest), now)
+                .unwrap()
                 .listings
                 .into_iter()
                 .next()
@@ -140,7 +141,7 @@ fn search_all_weapons(period: Period) -> usize {
         period,
         ..Query::default()
     };
-    data().search(&query, fixture().now).total
+    data().search(&query, fixture().now).unwrap().total
 }
 
 #[divan::bench(args = Sort::ALL)]
@@ -149,7 +150,7 @@ fn search_all_weapons_sorted(sort: Sort) -> usize {
         sort,
         ..Query::default()
     };
-    data().search(&query, fixture().now).total
+    data().search(&query, fixture().now).unwrap().total
 }
 
 #[divan::bench]
@@ -163,7 +164,7 @@ fn search_all_weapons_nothing_filtered() -> usize {
         period: Period::All,
         ..Query::default()
     };
-    data().search(&query, fixture().now).total
+    data().search(&query, fixture().now).unwrap().total
 }
 
 #[divan::bench]
@@ -174,7 +175,7 @@ fn search_all_weapons_by_stats() -> usize {
         min_quality: 0.5,
         ..Query::default()
     };
-    data().search(&query, fixture().now).total
+    data().search(&query, fixture().now).unwrap().total
 }
 
 #[divan::bench]
@@ -184,20 +185,24 @@ fn search_all_weapons_changed() -> usize {
         owner_changed: true,
         ..Query::default()
     };
-    data().search(&query, fixture().now).total
+    data().search(&query, fixture().now).unwrap().total
 }
 
 #[divan::bench(args = [false, true])]
 fn search_all_weapons_page_two(gone_tab: bool) -> usize {
     data()
         .search_page(&Query::default(), 50, Some(gone_tab), fixture().now)
+        .unwrap()
         .listings
         .len()
 }
 
 #[divan::bench(args = ["busiest", "middling"])]
 fn search_weapon(which: &str) -> usize {
-    data().search(&weapon(pick(which)), fixture().now).total
+    data()
+        .search(&weapon(pick(which)), fixture().now)
+        .unwrap()
+        .total
 }
 
 #[divan::bench(args = ["busiest", "middling"])]
@@ -206,7 +211,7 @@ fn search_weapon_all_time(which: &str) -> usize {
         period: Period::All,
         ..weapon(pick(which))
     };
-    data().search(&query, fixture().now).total
+    data().search(&query, fixture().now).unwrap().total
 }
 
 #[divan::bench(args = ["busiest", "middling"])]
@@ -251,7 +256,10 @@ fn riven_detail(all_comparisons: bool) -> bool {
 
 #[divan::bench]
 fn riven_history() -> usize {
-    data().riven_history(&fixture().listing.riven_id).len()
+    data()
+        .riven_history(&fixture().listing.riven_id)
+        .unwrap()
+        .len()
 }
 
 #[divan::bench]
@@ -260,7 +268,7 @@ fn search_riven_id_prefix() -> usize {
         riven_id: Some(fixture().listing.riven_id[..8].to_owned()),
         ..Query::default()
     };
-    data().search(&query, fixture().now).total
+    data().search(&query, fixture().now).unwrap().total
 }
 
 #[divan::bench]
@@ -276,4 +284,15 @@ fn scanned_detail() -> bool {
     data()
         .scanned_detail(&fixture().scan, Comparisons::default(), fixture().now)
         .is_some()
+}
+
+#[divan::bench(args = wfmt_api::PeopleSort::ALL)]
+fn people(sort: wfmt_api::PeopleSort) -> usize {
+    let query = wfmt_api::PeopleQuery {
+        sort,
+        ..wfmt_api::PeopleQuery::default()
+    };
+    data()
+        .people(&query, wfmt_api::Page::default(), fixture().now)
+        .total
 }

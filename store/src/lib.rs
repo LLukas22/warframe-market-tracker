@@ -1,5 +1,5 @@
-//! The server's read model: keeps the dataset (see `wfmt_dataset`) in memory and answers the
-//! web UI's queries from it.
+//! The server keeps listing summaries in memory and queries historical prices in the
+//! authoritative Parquet dataset with DuckDB.
 //!
 //! New parts are picked up incrementally. When compaction replaces loaded files, rebuild
 //! the cache from the new snapshot so observations aren't counted twice.
@@ -61,14 +61,26 @@ const INTERVAL: f64 = 1.96;
 const MEMO_TTL: Duration = Duration::from_secs(30);
 const SEARCH_MEMO_SIZE: usize = 8;
 
-/// Every open page refetches the overview after each scraper batch, and the start page
-/// searches all weapons; both scan every auction (~10–45 ms on 100k auctions), while a
-/// single weapon's search takes well under a millisecond. So only those two are memoized,
-/// per data version.
+/// Share recent first-page searches and the overview between visitors to this data version.
 #[derive(Default)]
 struct Memo {
     overview: Mutex<Option<(u64, Instant, Overview)>>,
-    search: Mutex<Vec<(u64, Instant, Query, SearchResult)>>,
+    search: Mutex<Vec<CachedSearch>>,
+    /// Built for the first people page of each data version, see `people`.
+    people: Mutex<Option<(u64, std::sync::Arc<people::People>)>>,
+}
+
+struct CachedSearch {
+    version: u64,
+    at: Instant,
+    query: Query,
+    result: std::sync::Arc<Mutex<Option<SearchResult>>>,
+}
+
+impl CachedSearch {
+    fn fresh(&self, version: u64) -> bool {
+        self.version == version && self.at.elapsed() < MEMO_TTL
+    }
 }
 
 /// The current time, for tests. The queries take theirs as `now` (unix ms), from the caller,
@@ -107,6 +119,29 @@ impl Store {
     /// The data as loaded so far. Call [`Store::refresh`] first to pick up new files.
     pub fn read(&self) -> RwLockReadGuard<'_, Data> {
         self.inner.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run an on-demand Parquet query against the same publication as the listing summaries.
+    /// Take the filesystem lock before the store read lock, as the loader does. If a writer
+    /// won the race between refresh and this read, reconcile its publication first.
+    pub fn query_parquet<T>(
+        &self,
+        query: impl FnOnce(&Data) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        loop {
+            self.refresh();
+            let snapshot = wfmt_dataset::DatasetLock::read(&self.dir)?;
+            let data = self.read();
+            if self.ready.load(Ordering::Acquire) && !data.parts_replaced() {
+                return query(&data);
+            }
+            drop(data);
+            drop(snapshot);
+            *self
+                .last_scan
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+        }
     }
 
     fn write(&self) -> RwLockWriteGuard<'_, Data> {
@@ -188,8 +223,7 @@ impl Store {
             }
         };
         *last = Some(Instant::now());
-        let rebuild = self.read().loaded.iter().any(|p| !p.exists());
-        if rebuild {
+        if self.read().parts_replaced() {
             // Build the replacement aside and swap it in: clearing the live store first would
             // serve empty pages for the second or so the full load takes.
             let mut fresh = Data::default();
@@ -356,8 +390,8 @@ struct Gone {
 }
 
 /// One auction seen in one scrape.
-/// 24 bytes rather than the 32 an `Option<i64>` price takes: charts stream through up to a
-/// million of these per request.
+/// A compact price point returned by a history scan.
+#[derive(Clone, Copy)]
 struct Observation {
     t: i64,
     /// The price, or `Observation::NO_PRICE`.
@@ -423,7 +457,10 @@ pub struct Data {
     attr_index: HashMap<String, AttrId>,
     auctions: Table<AuctionId, Auction>,
     auction_index: HashMap<String, AuctionId>,
+    // Test fixtures can supply observations without writing Parquet.
+    #[cfg(test)]
     observations: Vec<Observation>,
+    history: history::History,
     /// Riven ids, as the scraper's registry gives them.
     rivens: Table<RivenId, String>,
     riven_index: HashMap<String, RivenId>,
@@ -441,6 +478,13 @@ pub struct Data {
     /// Per auction, what searches filter on (see `Row`). Rebuilt by `finish_load`.
     rows: Table<AuctionId, Row>,
     memo: Memo,
+}
+
+impl Data {
+    fn parts_replaced(&self) -> bool {
+        self.loaded.iter().any(|p| !p.exists())
+            || self.history.files.iter().any(|p| p.verify().is_err())
+    }
 }
 
 /// The fields searches filter and sort on, for one auction, packed tight. A search visits
@@ -511,8 +555,10 @@ mod alerts;
 mod checks;
 mod detail;
 mod effects;
+mod history;
 mod ids;
 mod load;
+mod people;
 mod query;
 
 pub use checks::{CHECKS_FILE, ListingStatus};

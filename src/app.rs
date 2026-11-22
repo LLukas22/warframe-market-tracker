@@ -80,6 +80,17 @@ impl App {
         .map_err(ServerFnError::new)
     }
 
+    pub async fn query_parquet<T, F>(&'static self, f: F) -> Result<T, ServerFnError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Data) -> anyhow::Result<T> + Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || self.store.query_parquet(f))
+            .await
+            .map_err(ServerFnError::new)?
+            .map_err(ServerFnError::new)
+    }
+
     /// Runs `f` on the loaded data only if that takes no waiting: no refresh, no lock held by a
     /// reload. For server rendering, which must never hold a page back; the browser fetches
     /// whatever this couldn't answer.

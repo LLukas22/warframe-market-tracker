@@ -1,6 +1,6 @@
 [package]
 name = "wfmt-store"
-description = "The server's read model: the dataset in memory, indexed to answer the web UI's searches and riven pages."
+description = "The server's read model: listing summaries and direct Parquet history queries for the web UI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,6 +16,7 @@ wfmt-dataset.workspace = true
 anyhow.workspace = true
 arrow.workspace = true
 parquet.workspace = true
+duckdb = { version = "1.20001", features = ["parquet"] }
 # Fast hashing for the in-memory indexes; keys are ids from our own dataset.
 rustc-hash = "2"
 serde.workspace = true

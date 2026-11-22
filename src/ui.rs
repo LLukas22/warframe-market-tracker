@@ -33,6 +33,15 @@ pub fn format_short_datetime(ms: i64) -> String {
     format!("{m:02}-{d:02} {}", format_time(ms))
 }
 
+/// `3 Nov` (UTC) from unix ms.
+pub fn format_day_month(ms: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_, m, d) = civil_from_days(ms.div_euclid(DAY_MS));
+    format!("{d} {}", MONTHS[m as usize - 1])
+}
+
 /// Unix ms of the UTC midnight starting a `YYYY-MM-DD` date, as date inputs give it.
 pub fn parse_date(s: &str) -> Option<i64> {
     let mut parts = s.trim().splitn(3, '-').map(str::parse::<i64>);
@@ -113,6 +122,7 @@ mod route {
     #![allow(unreachable_code)]
     use super::*;
     use crate::alerts::AlertsPage;
+    use crate::people::{PeoplePage, PersonPage};
 
     #[derive(Clone, Debug, PartialEq, Routable)]
     pub(crate) enum Route {
@@ -121,6 +131,10 @@ mod route {
         Market {},
         #[route("/alerts?:weapon")]
         AlertsPage { weapon: Option<String> },
+        #[route("/people")]
+        PeoplePage {},
+        #[route("/people/:name")]
+        PersonPage { name: String },
         #[route("/weapons/:slug")]
         Weapon { slug: String },
         #[route("/search/:id")]
@@ -158,13 +172,23 @@ fn client_now() -> f64 {
 
 /// Data for a page's first render, embedded in the server's HTML (see `api::seed`). The
 /// hydrating browser reads it back, so its first render matches the server's; later mounts
-/// get `None` and load as usual. Like any hook, call it unconditionally.
+/// load as usual. Like any hook, call it unconditionally.
+///
+/// The browser finds embedded answers by the order they were created in, not by what they
+/// answer, so a page mounted after navigating can be handed another page's answer. Each one
+/// therefore carries the `key` it was made for, and is only used for that key.
 #[track_caller]
-pub(crate) fn use_seed<T>(seed: impl Fn() -> Option<T>) -> Option<T>
+pub(crate) fn use_seed<K, T>(key: K, seed: impl Fn(&K) -> Option<T>) -> Option<T>
 where
+    K: serde::Serialize + serde::de::DeserializeOwned + Clone + PartialEq + 'static,
     T: serde::Serialize + serde::de::DeserializeOwned + Clone + 'static,
 {
-    use_server_cached(seed)
+    let wanted = key.clone();
+    let cached: Option<(K, T)> =
+        use_server_cached(move || seed(&key).map(|value| (key.clone(), value)));
+    cached
+        .filter(|(made_for, _)| *made_for == wanted)
+        .map(|(_, value)| value)
 }
 
 struct Entry<K, V> {
@@ -346,11 +370,14 @@ fn Shell() -> Element {
     use_context_provider(|| data_version);
     use_context_provider(|| ViewCache::new(data_version));
     use_context_provider(crate::weapons::GridState::new);
+    // The people list's sort and search, kept while visiting a seller's page.
+    let people_query = use_signal(api::PeopleQuery::default);
+    use_context_provider(|| people_query);
 
     // Never suspend on data: suspending held back the server response and blanked the page
     // on every refresh. The catalog comes embedded in the server's HTML when the server has
     // it at hand (see `api::seed`), else the page frame renders and it fills in on arrival.
-    let seed = use_seed(api::seed::overview);
+    let seed = use_seed((), |_| api::seed::overview());
     let first = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(seed.clone())));
     let mut overview = use_resource(move || {
         let first = first.take();
@@ -400,6 +427,11 @@ fn Shell() -> Element {
     });
     let current_route = use_route::<Route>();
     let on_alerts = matches!(current_route, Route::AlertsPage { .. });
+    let on_people = matches!(
+        current_route,
+        Route::PeoplePage {} | Route::PersonPage { .. }
+    );
+    let tab = |active: bool| if active { "nav-tab active" } else { "nav-tab" };
     use_effect(use_reactive!(|current_route| {
         let _ = current_route;
         scraper_open.set(false);
@@ -435,8 +467,9 @@ fn Shell() -> Element {
             }
             nav { class: "market-nav", aria_label: "Tracker pages",
                 // Weapon, riven and scan pages all belong to the market tab.
-                Link { to: Route::Market {}, class: if on_alerts { "nav-tab" } else { "nav-tab active" }, "Market" }
-                Link { to: Route::AlertsPage { weapon: None }, class: if on_alerts { "nav-tab active" } else { "nav-tab" }, "Alerts" }
+                Link { to: Route::Market {}, class: tab(!on_alerts && !on_people), "Market" }
+                Link { to: Route::PeoplePage {}, class: tab(on_people), "People" }
+                Link { to: Route::AlertsPage { weapon: None }, class: tab(on_alerts), "Alerts" }
             }
             div { class: "header-actions",
                 button {
@@ -531,8 +564,13 @@ fn Market() -> Element {
 
 #[component]
 fn RivenPage(id: String, auction: String) -> Element {
-    // Key the resource owner so navigating between two rivens resets all page state.
-    rsx! { RivenPageContent { key: "{id}/{auction}", id, auction } }
+    // Keyed so moving to another riven, or another listing of it, resets all page state.
+    // Dioxus only remounts on a new key in a list, hence the list of one.
+    rsx! {
+        for key in [format!("{id}/{auction}")] {
+            RivenPageContent { key: "{key}", id: id.clone(), auction: auction.clone() }
+        }
+    }
 }
 
 #[component]
@@ -543,12 +581,8 @@ fn RivenPageContent(id: String, auction: String) -> Element {
     let include_unfit = use_signal(|| false);
     let include_loose = use_signal(|| false);
     let mut similar_tab = use_signal(|| false);
-    let (seed_id, seed_auction) = (id.clone(), auction.clone());
-    let seed = use_seed(move || {
-        api::seed::riven_detail(
-            &seed_id,
-            Some(seed_auction.as_str()).filter(|a| !a.is_empty()),
-        )
+    let seed = use_seed((id.clone(), auction.clone()), |(id, auction)| {
+        api::seed::riven_detail(id, Some(auction.as_str()).filter(|a| !a.is_empty()))
     });
     // The embedded answer is for the default options; it stands in for their first request.
     let first = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(seed.clone())));
@@ -593,12 +627,6 @@ fn RivenPageContent(id: String, auction: String) -> Element {
                     rsx! {
                         document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
                         crate::riven_view::RivenSummary { listing: selected.clone(), now: Some(data.server_time) }
-                        crate::riven_view::AvailabilityPanel {
-                            auction_id: selected.auction_id.clone(),
-                            gone_at: selected.gone_at,
-                            gone_reason: selected.gone_reason.clone(),
-                            now: data.server_time,
-                        }
                         div { class: "listing-bar",
                             div { class: "listing-tabs", role: "tablist", aria_label: "Riven sections",
                                 button {
@@ -619,6 +647,7 @@ fn RivenPageContent(id: String, auction: String) -> Element {
                         div { id: "history-panel", role: "tabpanel", aria_labelledby: "history-tab", hidden: similar_tab(),
                             crate::journey::RivenJourney {
                                 id: selected.riven_id.clone(), selected_auction: selected.auction_id.clone(),
+                                now: data.server_time,
                             }
                         }
                         div { id: "similar-panel", role: "tabpanel", aria_labelledby: "similar-tab", hidden: !similar_tab(),
@@ -937,9 +966,10 @@ fn MarketPage(
     // live update. Now the frame renders first and the results stream in. The query rides
     // along with the result so the page knows which filters the shown results belong to.
     let cache = use_context::<ViewCache>();
-    let seed_route = route.clone();
-    let seed =
-        use_seed(move || api::seed::search(&query_for_route(query.peek().clone(), &seed_route)));
+    let seed = use_seed(
+        query_for_route(query.peek().clone(), &route),
+        api::seed::search,
+    );
     use_hook(|| {
         if let Some(result) = seed {
             cache.store_search(requested.clone(), result);
@@ -1098,6 +1128,70 @@ fn day_start(ms: i64) -> i64 {
     ms - ms.rem_euclid(DAY_MS)
 }
 
+/// The period presets and a custom range of UTC days, as the market filters and the people
+/// page offer them. `now` is the server time of what's shown, to fill the date fields with
+/// the days a preset covers.
+#[component]
+pub(crate) fn PeriodPicker(
+    period: Period,
+    now: Option<i64>,
+    onchange: EventHandler<Period>,
+) -> Element {
+    // The date fields show the days a preset covers, and editing one keeps the other as shown.
+    let (shown_from, shown_to) = match (period, now) {
+        (Period::Custom { from, to }, _) => (from, to),
+        (Period::All, _) | (_, None) => (None, None),
+        (period, Some(now)) => (period.bounds(now).0.map(day_start), Some(day_start(now))),
+    };
+    let date_input = |v: Option<i64>| v.map(format_date).unwrap_or_default();
+    let today = now.map(format_date).unwrap_or_default();
+    let is_custom = matches!(period, Period::Custom { .. });
+    let mut custom_open = use_signal(|| is_custom);
+    rsx! {
+        div { class: "segmented", role: "group", aria_label: "Period",
+            for (preset, label) in PERIODS {
+                button {
+                    key: "{label}",
+                    class: if period == preset { "active" } else { "" },
+                    aria_pressed: period == preset,
+                    onclick: move |_| onchange.call(preset),
+                    "{label}"
+                }
+            }
+        }
+        button {
+            class: if is_custom { "custom-toggle active" } else { "custom-toggle" },
+            aria_expanded: custom_open(),
+            aria_controls: "custom-range",
+            onclick: move |_| custom_open.toggle(),
+            span { "Custom" span { class: "custom-range-word", " range" } }
+            span { class: "muted", if custom_open() { "▴" } else { "▾" } }
+        }
+        if custom_open() {
+            div { id: "custom-range", class: "row date-range",
+                input {
+                    r#type: "date",
+                    aria_label: "From",
+                    title: "From (UTC)",
+                    value: "{date_input(shown_from)}",
+                    max: if let Some(to) = shown_to { format_date(to) } else { today.clone() },
+                    onchange: move |e| onchange.call(Period::custom(parse_date(&e.value()), shown_to)),
+                }
+                span { class: "muted", "–" }
+                input {
+                    r#type: "date",
+                    aria_label: "To",
+                    title: "To (UTC, inclusive)",
+                    value: "{date_input(shown_to)}",
+                    min: "{date_input(shown_from)}",
+                    max: "{today}",
+                    onchange: move |e| onchange.call(Period::custom(shown_from, parse_date(&e.value()))),
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn Filters(
     overview: Overview,
@@ -1144,15 +1238,6 @@ fn Filters(
     let curse_value = q.curse.key();
     let price_input = |v: Option<i64>| v.map(|v| v.to_string()).unwrap_or_default();
 
-    // The date fields show the days a preset covers, and editing one keeps the other as shown.
-    let (shown_from, shown_to) = match (q.period, now) {
-        (Period::Custom { from, to }, _) => (from, to),
-        (Period::All, _) | (_, None) => (None, None),
-        (period, Some(now)) => (period.bounds(now).0.map(day_start), Some(day_start(now))),
-    };
-    let date_input = |v: Option<i64>| v.map(format_date).unwrap_or_default();
-    let today = now.map(format_date).unwrap_or_default();
-
     let changed = active_filters(&q);
     let d = Query::default();
     let more_changed = [
@@ -1166,8 +1251,6 @@ fn Filters(
     .filter(|c| *c)
     .count();
     let mut more_open = use_signal(|| more_changed > 0);
-    let is_custom = matches!(q.period, Period::Custom { .. });
-    let mut custom_open = use_signal(|| is_custom);
 
     rsx! {
         div { class: "filters",
@@ -1185,50 +1268,10 @@ fn Filters(
 
             div { class: "filter-group",
                 h3 { "Period" }
-                div { class: "segmented", role: "group", aria_label: "Period",
-                    for (period, label) in PERIODS {
-                        button {
-                            key: "{label}",
-                            class: if q.period == period { "active" } else { "" },
-                            aria_pressed: q.period == period,
-                            onclick: move |_| query.with_mut(|q| q.period = period),
-                            "{label}"
-                        }
-                    }
-                }
-                button {
-                    class: if is_custom { "custom-toggle active" } else { "custom-toggle" },
-                    aria_expanded: custom_open(),
-                    aria_controls: "custom-range",
-                    onclick: move |_| custom_open.toggle(),
-                    span { "Custom range" }
-                    span { class: "muted", if custom_open() { "▴" } else { "▾" } }
-                }
-                if custom_open() {
-                    div { id: "custom-range", class: "row date-range",
-                        input {
-                            r#type: "date",
-                            aria_label: "From",
-                            title: "From (UTC)",
-                            value: "{date_input(shown_from)}",
-                            max: if let Some(to) = shown_to { format_date(to) } else { today.clone() },
-                            onchange: move |e| {
-                                query.with_mut(|q| q.period = Period::custom(parse_date(&e.value()), shown_to));
-                            },
-                        }
-                        span { class: "muted", "–" }
-                        input {
-                            r#type: "date",
-                            aria_label: "To",
-                            title: "To (UTC, inclusive)",
-                            value: "{date_input(shown_to)}",
-                            min: "{date_input(shown_from)}",
-                            max: "{today}",
-                            onchange: move |e| {
-                                query.with_mut(|q| q.period = Period::custom(shown_from, parse_date(&e.value())));
-                            },
-                        }
-                    }
+                PeriodPicker {
+                    period: q.period,
+                    now,
+                    onchange: move |period| query.with_mut(|q| q.period = period),
                 }
                 p { class: "muted small", "Applies to the chart and to gone listings. Days are UTC." }
             }
@@ -1487,6 +1530,7 @@ fn Results(
             div { class: "listing-tabs", role: "tablist", aria_label: "Listing status",
                 button {
                     role: "tab", id: "active-tab", aria_selected: !gone_tab(), aria_controls: "listing-panel",
+                    title: "Current listings matching the filters, one per riven. By default those are buyouts of at least 10p.",
                     class: if !gone_tab() { "active" } else { "" },
                     onclick: move |_| gone_tab.set(false),
                     "Active ({result.total})"
@@ -1656,7 +1700,7 @@ fn sort_label(sort: Sort) -> &'static str {
 }
 
 /// The period as a phrase, e.g. "in the last 7 days".
-fn period_label(period: Period) -> String {
+pub(crate) fn period_label(period: Period) -> String {
     match period {
         Period::Today => "today".into(),
         Period::Week => "in the last 7 days".into(),
@@ -1683,7 +1727,21 @@ fn bucket_label(hours: u32) -> String {
 }
 
 #[component]
-fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) -> Element {
+pub(crate) fn ListingRow(
+    listing: Listing,
+    now: i64,
+    show_weapon: bool,
+    has_image: bool,
+    /// Off on a seller's own page, where every row is theirs.
+    #[props(default = true)]
+    show_seller: bool,
+    /// The seller who listed this riven before this one, shown as a tag.
+    #[props(default)]
+    bought_from: Option<String>,
+    /// The seller who listed it after this one.
+    #[props(default)]
+    sold_to: Option<String>,
+) -> Element {
     let navigator = use_navigator();
     let l = &listing;
     let target = Route::RivenPage {
@@ -1735,13 +1793,28 @@ fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) ->
                             }
                         }
                         if l.gone_at.is_none() {
-                            span { class: "tag info",
+                            span { class: "tag seen",
                                 title: "Last observed asking price; listings outside the fetched pages remain unconfirmed until verified or expired.",
                                 if l.unconfirmed { "unconfirmed · " }
                                 "seen {format_age(now, l.last_seen)} ago"
                             }
                         }
-                        if l.copies > 1 {
+                        if let Some(from) = bought_from.clone() {
+                            span { class: "tag handoff", title: "{from} listed this riven before",
+                                "from "
+                                Link { to: Route::PersonPage { name: from.clone() },
+                                    onclick: move |e: MouseEvent| e.stop_propagation(), "{from}" }
+                            }
+                        }
+                        if let Some(to) = sold_to.clone() {
+                            span { class: "tag handoff", title: "{to} listed this riven after",
+                                "to "
+                                Link { to: Route::PersonPage { name: to.clone() },
+                                    onclick: move |e: MouseEvent| e.stop_propagation(), "{to}" }
+                            }
+                        }
+                        // Who it passed between says more than how many sellers it had.
+                        if l.copies > 1 && bought_from.is_none() && sold_to.is_none() {
                             span {
                                 class: "tag info",
                                 title: "Same riven seen in {l.copies} auctions",
@@ -1775,8 +1848,13 @@ fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) ->
                                 crate::riven_view::SplicedMark { slug: a.slug.clone() }
                             }
                             if let Some(q) = a.quality {
-                                span { class: "quality", title: "roll {q * 100.0:.0}%",
-                                    span { class: "quality-bar", style: "width: {q * 100.0:.0}%" }
+                                div { class: "roll-strength",
+                                    if let Some((letter, delta)) = crate::api::grading::roll_grade(q, a.positive) {
+                                        strong { title: "Roll grade · {delta:+.1}% from midpoint, adjusted for penalties", "{letter}" }
+                                    }
+                                    span { class: "quality", title: "roll {q * 100.0:.0}%",
+                                        span { class: "quality-bar", style: "width: {q * 100.0:.0}%" }
+                                    }
                                 }
                             }
                         }
@@ -1786,7 +1864,11 @@ fn ListingRow(listing: Listing, now: i64, show_weapon: bool, has_image: bool) ->
                     if let Some(q) = quality {
                         div { class: "roll", title: "average roll of the positive stats", "{q} roll" }
                     }
-                    div { class: "small seller", "{l.owner_name}" }
+                    if show_seller {
+                        div { class: "small seller",
+                            crate::people::SellerName { name: l.owner_name.clone() }
+                        }
+                    }
                     div { class: "muted small", "listed {age} ago" }
                 }
             }

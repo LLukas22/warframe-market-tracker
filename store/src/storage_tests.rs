@@ -383,7 +383,7 @@ fn riven_history_orders_observations_and_clears_stale_removal_status() {
         at: 2000,
         reason: GoneReason::Missing,
     });
-    let history = inner.riven_history("riven");
+    let history = inner.riven_history("riven").unwrap();
     assert_eq!(
         history[0].points.iter().map(|p| p.t).collect::<Vec<_>>(),
         [1000, 3000]
@@ -642,11 +642,11 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
                 owner_changed,
                 ..all_time()
             };
-            let result = inner.search(&query, now_ms());
+            let result = inner.search(&query, now_ms()).unwrap();
             let totals = if gone { (0, expected) } else { (expected, 0) };
             assert_eq!((result.total, result.gone_total), totals);
-            let first = inner.search_page(&query, 0, Some(gone), now_ms());
-            let second = inner.search_page(&query, 50, Some(gone), now_ms());
+            let first = inner.search_page(&query, 0, Some(gone), now_ms()).unwrap();
+            let second = inner.search_page(&query, 50, Some(gone), now_ms()).unwrap();
             let rows: Vec<_> = if gone {
                 first.gone.into_iter().chain(second.gone).collect()
             } else {
@@ -665,15 +665,17 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
                 assert!(rows.iter().all(|l| l.riven_id.starts_with("both")));
             }
         }
-        let id = inner.search(
-            &Query {
-                riven_id: Some("same".into()),
-                price_changed: true,
-                owner_changed: true,
-                ..all_time()
-            },
-            now_ms(),
-        );
+        let id = inner
+            .search(
+                &Query {
+                    riven_id: Some("same".into()),
+                    price_changed: true,
+                    owner_changed: true,
+                    ..all_time()
+                },
+                now_ms(),
+            )
+            .unwrap();
         assert_eq!(id.total + id.gone_total, 1, "ID searches ignore filters");
     }
 
@@ -691,6 +693,7 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
                 },
                 now_ms()
             )
+            .unwrap()
             .gone_total,
         59
     );
@@ -705,6 +708,7 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
                 },
                 now_ms()
             )
+            .unwrap()
             .gone_total,
         58
     );
@@ -733,25 +737,31 @@ fn period_limits_chart_and_gone_listings_but_not_current_ones() {
     }
     inner.finish_load();
     let search = |period| {
-        inner.search(
-            &Query {
-                period,
-                ..all_time()
-            },
-            now_ms(),
-        )
+        inner
+            .search(
+                &Query {
+                    period,
+                    ..all_time()
+                },
+                now_ms(),
+            )
+            .unwrap()
     };
 
     let all = search(Period::All);
     assert_eq!((all.total, all.gone_total), (1, 2));
     assert_eq!(all.bucket_hours, 24);
-    assert_eq!(all.history.iter().map(|p| p.count).sum::<u32>(), 3);
+    // A listing counts in every bucket from its sighting until it's gone: the old and the
+    // recent one in two days each, the current one in its day.
+    assert_eq!(all.history.iter().map(|p| p.count).sum::<u32>(), 5);
 
     let week = search(Period::Week);
     assert_eq!((week.total, week.gone_total), (1, 1));
-    // Only two days of the week have data, so the buckets fit those.
+    // Only two days of the week have data, so the buckets fit those. The recent listing
+    // counts for every hour from its sighting until it went, though it was seen only once.
     assert_eq!(week.bucket_hours, 1);
-    assert_eq!(week.history.iter().map(|p| p.count).sum::<u32>(), 2);
+    assert_eq!(week.history.len(), 26);
+    assert_eq!(week.history.iter().map(|p| p.count).sum::<u32>(), 26);
     assert!(
         week.history
             .iter()
@@ -783,19 +793,21 @@ fn period_limits_chart_and_gone_listings_but_not_current_ones() {
         to: Some(day + DAY_MS),
     });
     assert_eq!(custom.gone_total, 1);
-    assert_eq!(custom.history.iter().map(|p| p.count).sum::<u32>(), 1);
+    assert_eq!(custom.history.iter().map(|p| p.count).sum::<u32>(), 25);
     assert_eq!(custom.bucket_hours, 1);
 
     // An id search shows the riven's whole past whatever the period.
     let id = inner.auctions[old].riven;
-    let found = inner.search(
-        &Query {
-            riven_id: Some(inner.rivens[id].clone()),
-            period: Period::Today,
-            ..all_time()
-        },
-        now_ms(),
-    );
+    let found = inner
+        .search(
+            &Query {
+                riven_id: Some(inner.rivens[id].clone()),
+                period: Period::Today,
+                ..all_time()
+            },
+            now_ms(),
+        )
+        .unwrap();
     assert_eq!(found.gone_total, 1);
 }
 
@@ -842,13 +854,15 @@ fn listing_pages_reach_every_match_beyond_the_old_caps() {
             sort,
             ..all_time()
         };
-        let first = inner.search(&query, now_ms());
+        let first = inner.search(&query, now_ms()).unwrap();
         assert_eq!((first.total, first.gone_total), (237, 113));
         assert_eq!((first.listings.len(), first.gone.len()), (50, 50));
         for (gone, expected) in [(false, 237), (true, 113)] {
             let mut ids = HashSet::default();
             for offset in (0..expected).step_by(LISTING_PAGE_SIZE) {
-                let page = inner.search_page(&query, offset, Some(gone), now_ms());
+                let page = inner
+                    .search_page(&query, offset, Some(gone), now_ms())
+                    .unwrap();
                 assert!(page.history.is_empty());
                 let rows = if gone {
                     assert!(page.listings.is_empty());
@@ -864,18 +878,22 @@ fn listing_pages_reach_every_match_beyond_the_old_caps() {
                 }
             }
             assert_eq!(ids.len(), expected);
-            let end = inner.search_page(&query, expected, Some(gone), now_ms());
+            let end = inner
+                .search_page(&query, expected, Some(gone), now_ms())
+                .unwrap();
             assert!(end.listings.is_empty() && end.gone.is_empty());
         }
-        let filtered = inner.search_page(
-            &Query {
-                min_price: Some(101),
-                ..query
-            },
-            0,
-            Some(false),
-            now_ms(),
-        );
+        let filtered = inner
+            .search_page(
+                &Query {
+                    min_price: Some(101),
+                    ..query
+                },
+                0,
+                Some(false),
+                now_ms(),
+            )
+            .unwrap();
         assert_eq!(filtered.total, 0);
     }
 }
@@ -891,7 +909,7 @@ fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
         weapon: Some("w".into()),
         ..all_time()
     };
-    let result = inner.search(&query, now_ms());
+    let result = inner.search(&query, now_ms()).unwrap();
     assert_eq!(result.total, 1);
     assert!(result.listings[0].unconfirmed);
     assert_eq!(result.listings[0].last_seen, 1000);
@@ -901,7 +919,7 @@ fn capped_fetch_keeps_unconfirmed_listings_and_respects_gone_events() {
     });
     // As after `load_gone`: every load ends with `finish_load`.
     inner.finish_load();
-    assert_eq!(inner.search(&query, now_ms()).total, 0);
+    assert_eq!(inner.search(&query, now_ms()).unwrap().total, 0);
 }
 
 #[test]
@@ -924,7 +942,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
         weapon: Some("w".into()),
         ..all_time()
     };
-    let result = inner.search(&query, now_ms());
+    let result = inner.search(&query, now_ms()).unwrap();
     assert_eq!(result.total, 1);
     assert_eq!(result.listings[0].auction_id, "new");
     assert_eq!(result.listings[0].copies, 2);
@@ -934,7 +952,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
         max_price: Some(200),
         ..query.clone()
     };
-    assert_eq!(inner.search(&cheap, now_ms()).total, 0);
+    assert_eq!(inner.search(&cheap, now_ms()).unwrap().total, 0);
     let w = &inner.overview(now_ms()).weapons[0];
     assert_eq!((w.listings, w.min_price), (1, Some(300)));
 
@@ -950,7 +968,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
         direct_sell: true,
     });
     inner.finish_load();
-    let result = inner.search(&query, now_ms());
+    let result = inner.search(&query, now_ms()).unwrap();
     assert_eq!((result.total, result.gone_total), (1, 0));
     assert!(result.history.iter().all(|h| h.gone_count == 0));
     // When the relist disappears too, it is the one shown as gone.
@@ -965,7 +983,7 @@ fn relists_replace_the_older_auction_in_listings_overview_and_charts() {
         direct_sell: true,
     });
     inner.finish_load();
-    let result = inner.search(&query, now_ms());
+    let result = inner.search(&query, now_ms()).unwrap();
     assert_eq!((result.total, result.gone_total), (0, 1));
     assert_eq!(result.gone[0].auction_id, "new");
 }
@@ -985,7 +1003,7 @@ fn history_uses_latest_price_of_the_newest_copy() {
         weapon: Some("w".into()),
         ..all_time()
     };
-    let history = inner.search(&query, now_ms()).history;
+    let history = inner.search(&query, now_ms()).unwrap().history;
     assert_eq!(history.len(), 1);
     assert_eq!((history[0].count, history[0].min), (1, 150));
     // An earlier matching price must not survive a later out-of-range price.
@@ -993,7 +1011,10 @@ fn history_uses_latest_price_of_the_newest_copy() {
         max_price: Some(175),
         ..query
     };
-    assert_eq!(inner.search(&filtered, now_ms()).history[0].min, 150);
+    assert_eq!(
+        inner.search(&filtered, now_ms()).unwrap().history[0].min,
+        150
+    );
 }
 
 #[test]
@@ -1032,7 +1053,7 @@ fn invalid_prices_stay_out_of_listings_charts_and_medians() {
         ..all_time()
     };
 
-    let result = inner.search(&query, now_ms());
+    let result = inner.search(&query, now_ms()).unwrap();
     assert_eq!(result.total, 9);
     assert_eq!(result.outliers_hidden, 1);
     assert_eq!(result.price_limit, Some(5000));
@@ -1047,14 +1068,16 @@ fn invalid_prices_stay_out_of_listings_charts_and_medians() {
     assert_eq!((info.median_price, info.gone_7d), (Some(100), 0));
 
     // Asking for them adds flagged listings, but the analysis stays clean.
-    let shown = inner.search(
-        &Query {
-            include_outliers: true,
-            sort: Sort::PriceDesc,
-            ..query.clone()
-        },
-        now_ms(),
-    );
+    let shown = inner
+        .search(
+            &Query {
+                include_outliers: true,
+                sort: Sort::PriceDesc,
+                ..query.clone()
+            },
+            now_ms(),
+        )
+        .unwrap();
     assert_eq!((shown.total, shown.outliers_hidden), (10, 0));
     assert!(shown.listings[0].price_outlier && !shown.listings[1].price_outlier);
     assert_eq!(shown.gone.len(), 1);
@@ -1070,13 +1093,15 @@ fn invalid_prices_stay_out_of_listings_charts_and_medians() {
 fn riven_id_search_shows_an_invalid_price_with_its_chart() {
     let inner = store_with_outlier();
     let id = inner.auctions[inner.auction_index["joke"]].riven;
-    let result = inner.search(
-        &Query {
-            riven_id: Some(inner.rivens[id].clone()),
-            ..all_time()
-        },
-        now_ms(),
-    );
+    let result = inner
+        .search(
+            &Query {
+                riven_id: Some(inner.rivens[id].clone()),
+                ..all_time()
+            },
+            now_ms(),
+        )
+        .unwrap();
     assert_eq!(result.total, 1);
     assert!(result.listings[0].price_outlier);
     assert_eq!(result.history.last().map(|p| p.median), Some(66666));
@@ -1229,7 +1254,7 @@ fn feed_sightings_do_not_make_other_listings_unconfirmed() -> anyhow::Result<()>
         assert_eq!(auction_price(auction), None);
         assert_eq!(auction.last_seen, withdrawn_at.timestamp_millis());
         assert!(inner.is_current(auction), "withdrawal is not a sale");
-        assert!(inner.observations.iter().any(|o| {
+        assert!(inner.read_history(&[index], None)?.iter().any(|o| {
             o.auction == index && o.t == withdrawn_at.timestamp_millis() && o.price().is_none()
         }));
     }
@@ -1276,9 +1301,14 @@ fn cache_reloads_compacted_history_without_duplicate_observations() -> anyhow::R
     }
     let store = Store::new(root.clone());
     store.refresh();
-    let observations = store.read().observations.len();
+    let observations = store.read().observation_count();
     let auctions = store.read().auctions.len();
     assert!(observations > auctions && auctions > 0);
+    let riven = {
+        let data = store.read();
+        data.rivens[data.auctions.iter().next().unwrap().riven].clone()
+    };
+    let journey = store.query_parquet(|data| data.riven_history(&riven))?;
     let options = MaintenanceArgs {
         raw_retention_days: 14,
         maintenance_interval_hours: 6,
@@ -1286,11 +1316,14 @@ fn cache_reloads_compacted_history_without_duplicate_observations() -> anyhow::R
     };
     let report = maintain(&root, "2026-11-03T00:00:00Z".parse()?, &options)?;
     assert_eq!(report.compacted_inputs, 4);
-    *store.last_scan.lock().unwrap() = None;
-    store.refresh();
+    // Even within the rescan throttle, a query uses the new compacted publication.
+    assert_eq!(
+        store.query_parquet(|data| data.riven_history(&riven))?,
+        journey
+    );
     {
         let inner = store.read();
-        assert_eq!(inner.observations.len(), observations);
+        assert_eq!(inner.observation_count(), observations);
         assert_eq!(inner.auctions.len(), auctions);
         assert_eq!(inner.loaded.len(), 1);
         assert!(inner.auctions.iter().all(|a| !a.attrs.is_empty()));
@@ -1311,7 +1344,7 @@ fn cache_reloads_compacted_history_without_duplicate_observations() -> anyhow::R
     sink.flush()?;
     *store.last_scan.lock().unwrap() = None;
     store.refresh();
-    assert_eq!(store.read().observations.len(), observations + auctions);
+    assert_eq!(store.read().observation_count(), observations + auctions);
     Ok(())
 }
 
@@ -1439,14 +1472,14 @@ fn spliced_filter_keeps_rivens_with_a_splicer_only_stat() {
         weapon: Some("w".into()),
         ..all_time()
     };
-    assert_eq!(inner.search(&query, now_ms()).total, 2);
+    assert_eq!(inner.search(&query, now_ms()).unwrap().total, 2);
     query.spliced = true;
-    let result = inner.search(&query, now_ms());
+    let result = inner.search(&query, now_ms()).unwrap();
     assert_eq!(result.total, 1);
     assert_eq!(result.listings[0].auction_id, "spliced");
     // Combined with a stat filter, which checks each riven's stats.
     query.positives = vec!["critical_chance".into()];
-    assert_eq!(inner.search(&query, now_ms()).total, 1);
+    assert_eq!(inner.search(&query, now_ms()).unwrap().total, 1);
 }
 
 #[test]
@@ -1499,4 +1532,191 @@ fn alerts_match_buyouts_status_reputation_and_recent_observations() {
     data.auctions[unknown].buyout_price = None;
     data.auctions[hit].buyout_price = Some(0);
     assert!(data.alert_matches(&[rule], now).0.is_empty());
+}
+
+#[test]
+fn people_count_auctions_and_resales_from_seller_changes() {
+    use wfmt_api::{Page, PeopleQuery, PeopleSort, PersonFilter};
+    let mut data = Data::default();
+    let weapon = data.intern_weapon("torid", "Torid", None);
+    // One riven passes from Alice to Bob, who relists it twice, then to carol; Alice also has
+    // a riven of her own still listed.
+    // Carol lists it a day later than the rest.
+    let chain = [
+        ("a1", "Alice", 100),
+        ("b1", "Bob", 200),
+        ("b2", "bob", 300),
+        ("c1", "Carol", DAY_MS + 100),
+    ];
+    let mut ids = Vec::new();
+    for (id, owner, created) in chain {
+        let i = add_auction(&mut data, weapon, id, 100, created + 50);
+        data.auctions[i].owner_name = owner.into();
+        data.auctions[i].created = created;
+        ids.push(i);
+    }
+    let riven = data.auctions[ids[0]].riven;
+    for &i in &ids[1..] {
+        let own = data.auctions[i].riven;
+        data.riven_auctions[own].clear();
+        data.auctions[i].riven = riven;
+        data.riven_auctions[riven].push(i);
+    }
+    for &i in &ids[..3] {
+        data.auctions[i].gone = Some(Gone {
+            at: 1000,
+            reason: GoneReason::Missing,
+        });
+    }
+    let own = add_auction(&mut data, weapon, "a2", 50, 500);
+    data.auctions[own].owner_name = "Alice".into();
+    data.auctions[own].owner_reputation = Some(7);
+    // No seller name, no person.
+    let anonymous = add_auction(&mut data, weapon, "x", 50, 500);
+    data.auctions[anonymous].owner_name = " ".into();
+    data.finish_load();
+
+    let result = data.people(&PeopleQuery::default(), Page::default(), 0);
+    assert_eq!((result.total, result.everyone), (3, 3));
+    let row = |name: &str| {
+        let p = result.people.iter().find(|p| p.name == name).unwrap();
+        (p.auctions, p.rivens, p.active, p.resales, p.sold_on)
+    };
+    assert_eq!(row("Alice"), (2, 2, 1, 0, 1));
+    // The newest spelling wins, and both of Bob's auctions are one riven.
+    assert_eq!(row("bob"), (2, 1, 0, 1, 1));
+    assert_eq!(row("Carol"), (1, 1, 1, 1, 0));
+    assert_eq!(
+        result.people[0].name, "Alice",
+        "most auctions, then by name"
+    );
+
+    let sorted = |sort| {
+        data.people(
+            &PeopleQuery {
+                sort,
+                ..PeopleQuery::default()
+            },
+            Page::default(),
+            0,
+        )
+        .people
+        .into_iter()
+        .map(|p| p.name)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(sorted(PeopleSort::Resales), ["bob", "Carol", "Alice"]);
+    assert_eq!(sorted(PeopleSort::Reputation)[0], "Alice");
+    // Pages split the same order.
+    let second = data.people(&PeopleQuery::default(), Page::new(1, 5), 0);
+    assert_eq!(second.people.len(), 2);
+    assert_eq!(second.people[0].name, "bob");
+    let search = PeopleQuery {
+        search: " CAR ".into(),
+        ..PeopleQuery::default()
+    };
+    assert_eq!(data.people(&search, Page::default(), 0).total, 1);
+
+    let bob = data
+        .person("BOB", PersonFilter::All, Period::All, Page::default(), 0)
+        .unwrap();
+    assert_eq!(bob.total, 1);
+    let held = &bob.rivens[0];
+    assert_eq!(held.listing.auction_id, "b2");
+    assert_eq!(held.bought_from.as_deref(), Some("Alice"));
+    assert_eq!(held.sold_to.as_deref(), Some("Carol"));
+    let alice = data
+        .person("alice", PersonFilter::All, Period::All, Page::default(), 0)
+        .unwrap();
+    assert_eq!(
+        alice
+            .rivens
+            .iter()
+            .map(|r| r.listing.auction_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a2", "a1"],
+        "current listings first"
+    );
+    assert_eq!(
+        data.person(
+            "alice",
+            PersonFilter::SoldOn,
+            Period::All,
+            Page::default(),
+            0
+        )
+        .unwrap()
+        .total,
+        1
+    );
+    assert_eq!(
+        data.person(
+            "carol",
+            PersonFilter::Active,
+            Period::All,
+            Page::default(),
+            0
+        )
+        .unwrap()
+        .total,
+        1
+    );
+    assert!(
+        data.person("nobody", PersonFilter::All, Period::All, Page::default(), 0)
+            .is_none()
+    );
+
+    // Only Carol's day: she resold it then, which counts Bob as having sold it on though his
+    // own listings were the day before. Alice did nothing that day.
+    let now = DAY_MS + 200;
+    let today = PeopleQuery {
+        period: Period::Today,
+        ..PeopleQuery::default()
+    };
+    let result = data.people(&today, Page::default(), now);
+    assert_eq!((result.total, result.everyone), (2, 2));
+    let counts: Vec<_> = result
+        .people
+        .iter()
+        .map(|p| (p.name.as_str(), p.auctions, p.rivens, p.resales, p.sold_on))
+        .collect();
+    assert_eq!(counts, [("Carol", 1, 1, 1, 0), ("bob", 0, 0, 0, 1)]);
+    let bob = data
+        .person(
+            "bob",
+            PersonFilter::All,
+            Period::Today,
+            Page::default(),
+            now,
+        )
+        .unwrap();
+    assert_eq!((bob.person.auctions, bob.total), (0, 0));
+    let bob = data
+        .person(
+            "bob",
+            PersonFilter::SoldOn,
+            Period::Today,
+            Page::default(),
+            now,
+        )
+        .unwrap();
+    assert_eq!(bob.rivens[0].sold_to.as_deref(), Some("Carol"));
+    // Alice's riven is still listed, but nobody saw it listed that day.
+    let alice = data.person(
+        "alice",
+        PersonFilter::Active,
+        Period::Today,
+        Page::default(),
+        now,
+    );
+    assert_eq!(alice.unwrap().total, 0);
+    // A period before anything was listed.
+    let before = PeopleQuery {
+        period: Period::Custom {
+            from: None,
+            to: Some(-2 * DAY_MS),
+        },
+        ..PeopleQuery::default()
+    };
+    assert_eq!(data.people(&before, Page::default(), now).everyone, 0);
 }

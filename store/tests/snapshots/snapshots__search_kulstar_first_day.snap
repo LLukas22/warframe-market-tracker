@@ -1,5 +1,6 @@
 ---
 source: store/tests/snapshots.rs
+assertion_line: 147
 expression: "data.search(&first_day, NOW)"
 ---
 {
@@ -2504,7 +2505,237 @@ expression: "data.search(&first_day, NOW)"
       "gone_median": null
     },
     {
+      "t": 1793494800000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793498400000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793502000000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793505600000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793509200000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793512800000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793516400000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793520000000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793523600000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793527200000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793530800000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
       "t": 1793534400000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793538000000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793541600000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793545200000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793548800000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793552400000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793556000000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793559600000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793563200000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793566800000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793570400000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793574000000,
+      "count": 47,
+      "min": 10,
+      "p25": 10,
+      "median": 15,
+      "p75": 20,
+      "gone_count": 0,
+      "gone_median": null
+    },
+    {
+      "t": 1793577600000,
       "count": 47,
       "min": 10,
       "p25": 10,

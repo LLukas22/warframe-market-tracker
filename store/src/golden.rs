@@ -91,13 +91,14 @@ fn dump_answers() {
     for (n, q) in queries.iter().enumerate() {
         write(
             &format!("search {n}"),
-            serde_json::to_value(inner.search(q, NOW)).unwrap(),
+            serde_json::to_value(inner.search(q, NOW).unwrap()).unwrap(),
         );
         for offset in [50, 100, 1000] {
             for gone in [false, true] {
                 write(
                     &format!("page {n} {offset} {gone}"),
-                    serde_json::to_value(inner.search_page(q, offset, Some(gone), NOW)).unwrap(),
+                    serde_json::to_value(inner.search_page(q, offset, Some(gone), NOW).unwrap())
+                        .unwrap(),
                 );
             }
         }
@@ -110,7 +111,7 @@ fn dump_answers() {
         );
     }
 
-    let listings = inner.search(&Query::default(), NOW).listings;
+    let listings = inner.search(&Query::default(), NOW).unwrap().listings;
     for l in listings.iter().take(20) {
         for options in [false, true] {
             write(
@@ -130,7 +131,7 @@ fn dump_answers() {
         }
         write(
             &format!("history {}", l.riven_id),
-            serde_json::to_value(inner.riven_history(&l.riven_id)).unwrap(),
+            serde_json::to_value(inner.riven_history(&l.riven_id).unwrap()).unwrap(),
         );
         let q = Query {
             riven_id: Some(l.riven_id[..6].to_owned()),
@@ -138,7 +139,7 @@ fn dump_answers() {
         };
         write(
             &format!("id {}", l.riven_id),
-            serde_json::to_value(inner.search(&q, NOW)).unwrap(),
+            serde_json::to_value(inner.search(&q, NOW).unwrap()).unwrap(),
         );
     }
 }

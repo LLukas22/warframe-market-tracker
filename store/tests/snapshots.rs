@@ -114,7 +114,7 @@ fn query_answers_stay_the_same() -> Result<()> {
         ..Query::default()
     };
     assert_eq!(
-        data.search(&everything, NOW).gone_total,
+        data.search(&everything, NOW).unwrap().gone_total,
         1,
         "one listing is gone"
     );
@@ -125,7 +125,7 @@ fn query_answers_stay_the_same() -> Result<()> {
         period: Period::All,
         ..Query::default()
     };
-    insta::assert_json_snapshot!("search_all_weapons", data.search(&all_time, NOW));
+    insta::assert_json_snapshot!("search_all_weapons", data.search(&all_time, NOW).unwrap());
     for sort in Sort::ALL {
         let query = Query {
             weapon: Some("kulstar".into()),
@@ -136,7 +136,7 @@ fn query_answers_stay_the_same() -> Result<()> {
         };
         insta::assert_json_snapshot!(
             format!("search_kulstar_{}", sort.key()),
-            data.search(&query, NOW)
+            data.search(&query, NOW).unwrap()
         );
     }
     let first_day = Query {
@@ -144,11 +144,14 @@ fn query_answers_stay_the_same() -> Result<()> {
         period: Period::custom(Some(1_793_491_200_000), Some(1_793_491_200_000)),
         ..Query::default()
     };
-    insta::assert_json_snapshot!("search_kulstar_first_day", data.search(&first_day, NOW));
+    insta::assert_json_snapshot!(
+        "search_kulstar_first_day",
+        data.search(&first_day, NOW).unwrap()
+    );
 
     insta::assert_json_snapshot!("stat_effects", data.stat_effects("kulstar"));
 
-    let listing = data.search(&all_time, NOW).listings.remove(0);
+    let listing = data.search(&all_time, NOW).unwrap().listings.remove(0);
     for (name, comparisons) in [
         ("riven_detail", Comparisons::default()),
         (
@@ -165,7 +168,10 @@ fn query_answers_stay_the_same() -> Result<()> {
             data.riven_detail(&listing.riven_id, None, comparisons, NOW)
         );
     }
-    insta::assert_json_snapshot!("riven_history", data.riven_history(&listing.riven_id));
+    insta::assert_json_snapshot!(
+        "riven_history",
+        data.riven_history(&listing.riven_id).unwrap()
+    );
 
     // The same riven read from a screenshot: found again, and graded like a listing.
     let scan = RivenScan {

@@ -165,7 +165,7 @@ fn late_auction_failure_does_not_apply_a_prefix_or_intern_attributes() {
                 .is_err()
         );
         assert!(inner.auctions.is_empty());
-        assert!(inner.observations.is_empty());
+        assert!(inner.observation_count() == 0);
         assert!(inner.attrs.is_empty());
         assert!(inner.weapons.is_empty());
     }
@@ -173,7 +173,7 @@ fn late_auction_failure_does_not_apply_a_prefix_or_intern_attributes() {
         .load_parts([Ok(auctions())], [Ok(attributes())])
         .unwrap();
     assert_eq!(inner.auctions.len(), 1);
-    assert_eq!(inner.observations.len(), 1);
+    assert_eq!(inner.observation_count(), 1);
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn late_schema_failure_leaves_existing_data_unchanged() {
             .load_parts([Ok(auctions()), Ok(gone())], [Ok(attributes())])
             .is_err()
     );
-    assert_eq!(inner.observations.len(), 1);
+    assert_eq!(inner.observation_count(), 1);
     assert_eq!(inner.auctions.len(), 1);
 }
 

@@ -1,8 +1,12 @@
 # Warframe Market Tracker
 
-Tracks [warframe.market](https://warframe.market) riven auctions so you can search listings, follow prices, and compare stats. Paste a riven screenshot into the search bar to scan it locally in your browser. A riven's page checks whether its listing is still on warframe.market; the server asks at most every 15 minutes per listing, or when you press "Check again", and keeps the answer in `checks.jsonl` in the data folder. A scraping server also adds it to its dataset.
+Tracks [warframe.market](https://warframe.market) riven auctions so you can search listings, follow prices, and compare stats. Paste a riven screenshot into the search bar to scan it locally in your browser. A riven's page checks whether a listing that isn't known to be gone is still on warframe.market; the server asks at most every 15 minutes per listing, or when you press the refresh button next to the answer, and keeps the answer in `checks.jsonl` in the data folder. A scraping server also adds it to its dataset.
 
 The data is published as the Hugging Face dataset [LLukas22/wf-riven-data](https://huggingface.co/datasets/LLukas22/wf-riven-data), with a folder for each finished UTC day.
+
+## Riven grades
+
+Listings and screenshot scans show a letter for each fitted stat. **B** is near the midpoint of its possible range. A favorable deviation of 7.5% earns **A+**, and 9.5% earns **S**. For a negative attribute, a milder penalty earns a higher grade. The tracker uses its existing rank and disposition fit, so grades also work for fitted historical listings. [Altair grading chart](https://empx.cc/docs/altair/grading/)
 
 ## Self-hosting
 
@@ -27,7 +31,7 @@ A Cargo workspace. The web app (Dioxus, at the root) is a thin layer over librar
 | `model/` (`wfmt-model`) | The riven stat model: fits listed values to a rank, a roll and a disposition. |
 | `dataset/` (`wfmt-dataset`) | The data on disk: layout, parquet schema, transactional writes, compaction, the riven registry. |
 | `scraper/` (`wfmt-scraper`) | The warframe.market client and the engine that turns its responses into dataset rows. |
-| `store/` (`wfmt-store`) | The server's read model: the dataset in memory, answering searches and riven pages. |
+| `store/` (`wfmt-store`) | Listing summaries in RAM. Embedded DuckDB reads historical prices directly from the scraper’s Parquet files for charts and riven journeys. |
 | `ocr/` (`wfmt-ocr`) | Reads rivens from screenshots, in the browser. |
 
 ## Development
@@ -37,6 +41,17 @@ A Cargo workspace. The web app (Dioxus, at the root) is a thin layer over librar
 - `cargo bench -p wfmt-store --bench queries` times the queries on the real dataset in `./data` (or `WFMT_DATA_DIR`).
 - `WFMT_GOLDEN=out.jsonl cargo test --release -p wfmt-store golden -- --ignored` writes the answers to many queries on the real dataset, to diff two versions of the code.
 - `cargo run -p wfmt-scraper --release --features reprocess --bin reprocess -- --replace` rebuilds a stopped server's dataset from its raw archive.
+
+## People
+
+Open **People** for everyone seen selling rivens, sortable by auctions, rivens listed now,
+resales, rivens sold on, reputation, or last sighting, and searchable by name. Counts cover the
+period you pick, with the market page's presets or a custom range of UTC days: auctions listed
+during it, and rivens that changed hands during it. "Listed now" is always current. A resale is a
+riven that another seller listed before them: rivens keep their id across auctions, so a new
+seller on the same riven most likely bought it, though warframe.market doesn't confirm trades. A
+rerolled riven counts as a new one. Each seller's page lists their rivens, with who listed each
+one before and after them. Seller names on listings and riven pages link there.
 
 ## Browser alerts
 

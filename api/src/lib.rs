@@ -1,6 +1,8 @@
 //! What the browser and the server exchange: queries, the answers to them, and the small
 //! helpers both sides use to show them. Builds for the browser (no server dependencies).
 
+pub mod grading;
+
 use serde::{Deserialize, Serialize};
 use wfmt_types::{WeaponClass, WeaponGroup};
 
@@ -686,4 +688,174 @@ pub struct AlertSnapshot {
     pub latest_observation: Option<i64>,
     pub live_scraper: bool,
     pub server_time: i64,
+}
+
+/// How the people list is ordered. Every order is descending; ties go by name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PeopleSort {
+    #[default]
+    Auctions,
+    /// Rivens listed right now.
+    Active,
+    /// Rivens relisted after another seller had listed them.
+    Resales,
+    /// Rivens that another seller listed after them.
+    SoldOn,
+    Reputation,
+    /// Seen by the scraper most recently.
+    LastSeen,
+}
+
+impl PeopleSort {
+    pub const ALL: [Self; 6] = [
+        Self::Auctions,
+        Self::Active,
+        Self::Resales,
+        Self::SoldOn,
+        Self::Reputation,
+        Self::LastSeen,
+    ];
+
+    /// How a `<select>` names it.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Auctions => "auctions",
+            Self::Active => "active",
+            Self::Resales => "resales",
+            Self::SoldOn => "sold_on",
+            Self::Reputation => "reputation",
+            Self::LastSeen => "last_seen",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.key() == key)
+    }
+}
+
+/// Which people the people list shows, and in what order. See [`Page`] for how much of it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PeopleQuery {
+    /// Part of the seller name, any case. Empty matches everyone.
+    pub search: String,
+    pub sort: PeopleSort,
+    /// Counts what sellers did in this stretch of time, and lists only those who did
+    /// something in it.
+    #[serde(default)]
+    pub period: Period,
+}
+
+/// How many people or rivens one page of the people pages holds.
+pub const PEOPLE_PAGE_SIZE: usize = 50;
+/// The most rows one request returns. A refresh asks again for everything loaded so far.
+pub const PEOPLE_MAX_ROWS: usize = 1000;
+
+/// Which rows of a list to return.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Page {
+    pub offset: usize,
+    /// At most [`PEOPLE_MAX_ROWS`]; more are cut to that.
+    pub limit: usize,
+}
+
+impl Page {
+    pub fn new(offset: usize, limit: usize) -> Self {
+        Self {
+            offset,
+            limit: limit.min(PEOPLE_MAX_ROWS),
+        }
+    }
+}
+
+impl Default for Page {
+    /// The first page.
+    fn default() -> Self {
+        Self::new(0, PEOPLE_PAGE_SIZE)
+    }
+}
+
+/// One seller on warframe.market, as far as the tracked auctions show. The counts are for the
+/// period asked for.
+///
+/// A resale is a riven that another seller listed before this one did. Rivens are recognized
+/// across auctions by their stats (see `Listing::riven_id`), so a resale most likely means a
+/// trade, though warframe.market doesn't confirm it; a rerolled riven counts as a new one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Person {
+    /// As their newest auction spells it.
+    pub name: String,
+    /// Auctions listed in the period, relists of the same riven included.
+    pub auctions: u32,
+    /// Distinct rivens they listed in the period.
+    pub rivens: u32,
+    /// Rivens they list right now, of those listed in the period.
+    pub active: u32,
+    /// Rivens that came to them from another seller in the period.
+    pub resales: u32,
+    /// Rivens that went from them to another seller in the period.
+    pub sold_on: u32,
+    /// From their most recently seen auction, like the platform.
+    pub reputation: Option<i64>,
+    pub platform: String,
+    /// When one of their auctions was last seen listed.
+    pub last_seen: i64,
+    /// When their oldest auction was created.
+    pub first_listed: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PeopleResult {
+    pub people: Vec<Person>,
+    /// People matching the search.
+    pub total: usize,
+    /// Everyone active in the period, before the search.
+    pub everyone: usize,
+    pub server_time: i64,
+}
+
+/// Which of a person's rivens their page lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PersonFilter {
+    /// Listed right now.
+    #[default]
+    Active,
+    All,
+    Resales,
+    SoldOn,
+}
+
+impl PersonFilter {
+    pub const ALL: [Self; 4] = [Self::Active, Self::All, Self::Resales, Self::SoldOn];
+}
+
+/// One riven a person listed: their newest auction of it, and who it passed between.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PersonRiven {
+    pub listing: Listing,
+    /// The seller who listed it last before them, if it came from someone else.
+    pub bought_from: Option<String>,
+    /// The seller who listed it next after them, if it went to someone else.
+    pub sold_to: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PersonDetail {
+    pub person: Person,
+    /// Current listings first, then newest first.
+    pub rivens: Vec<PersonRiven>,
+    /// Rivens matching the filter.
+    pub total: usize,
+    pub server_time: i64,
+}
+
+#[cfg(test)]
+mod people_tests {
+    use super::*;
+
+    #[test]
+    fn people_sort_keys_round_trip() {
+        for sort in PeopleSort::ALL {
+            assert_eq!(PeopleSort::from_key(sort.key()), Some(sort));
+        }
+    }
 }

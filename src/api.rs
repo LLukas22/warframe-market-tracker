@@ -19,7 +19,7 @@ pub async fn overview() -> Result<Overview, ServerFnError> {
 pub async fn search(query: Query) -> Result<SearchResult, ServerFnError> {
     query.period.validate().map_err(ServerFnError::new)?;
     crate::app::get()
-        .query(move |store| store.search_memo(&query, now_ms()))
+        .query_parquet(move |store| store.search_memo(&query, now_ms()))
         .await
 }
 
@@ -33,7 +33,8 @@ pub async fn listing_page(
     query.period.validate().map_err(ServerFnError::new)?;
     crate::app::get()
         .query(move |store| store.search_page(&query, offset, Some(gone), now_ms()))
-        .await
+        .await?
+        .map_err(ServerFnError::new)
 }
 
 #[post("/api/riven-detail")]
@@ -94,7 +95,33 @@ pub async fn stat_effects(weapon: String) -> Result<StatEffects, ServerFnError> 
 #[get("/api/riven/{id}")]
 pub async fn riven_history(id: String) -> Result<Vec<RivenAuction>, ServerFnError> {
     crate::app::get()
-        .query(move |store| store.riven_history(&id))
+        .query_parquet(move |store| store.riven_history(&id))
+        .await
+}
+
+#[post("/api/people")]
+pub async fn people(query: PeopleQuery, page: Page) -> Result<PeopleResult, ServerFnError> {
+    if query.search.len() > 100 {
+        return Err(ServerFnError::new("The search is too long"));
+    }
+    query.period.validate().map_err(ServerFnError::new)?;
+    crate::app::get()
+        .query(move |store| store.people(&query, page, now_ms()))
+        .await
+}
+
+/// One seller's page: their totals in `period` and a page of their rivens. `None` for an
+/// unknown name.
+#[post("/api/person")]
+pub async fn person(
+    name: String,
+    filter: PersonFilter,
+    period: Period,
+    page: Page,
+) -> Result<Option<PersonDetail>, ServerFnError> {
+    period.validate().map_err(ServerFnError::new)?;
+    crate::app::get()
+        .query(move |store| store.person(&name, filter, period, page, now_ms()))
         .await
 }
 
@@ -188,9 +215,20 @@ pub mod seed {
         )*};
     }
 
+    // Computing a chart reads Parquet. Only an already memoized result belongs on the synchronous HTML path.
+    #[cfg(feature = "server")]
+    pub fn search(query: &Query) -> Option<SearchResult> {
+        crate::app::get()
+            .try_now(|store| store.cached_search(query))
+            .flatten()
+    }
+    #[cfg(not(feature = "server"))]
+    pub fn search(_: &Query) -> Option<SearchResult> {
+        None
+    }
+
     seeds! {
         fn overview() -> Overview = |store| store.overview_memo(crate::app::now_ms());
-        fn search(query: &Query) -> SearchResult = |store| store.search_memo(query, crate::app::now_ms());
         fn stat_effects(weapon: &str) -> StatEffects = |store| store.stat_effects(weapon);
         fn riven_detail(id: &str, auction: Option<&str>) -> Option<RivenDetail> =
             |store| store.riven_detail(id, auction, super::Comparisons::default(), crate::app::now_ms());

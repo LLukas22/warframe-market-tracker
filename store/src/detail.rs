@@ -372,17 +372,13 @@ impl Data {
     }
 
     /// Every auction this riven appeared in, oldest first, with its price history.
-    pub fn riven_history(&self, riven_id: &str) -> Vec<RivenAuction> {
+    pub fn riven_history(&self, riven_id: &str) -> anyhow::Result<Vec<RivenAuction>> {
         let Some(&riven) = self.riven_index.get(riven_id) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let auctions = &self.riven_auctions[riven];
         let mut points: HashMap<AuctionId, Vec<PricePoint>> = HashMap::default();
-        for o in self
-            .observations
-            .iter()
-            .filter(|o| auctions.contains(&o.auction))
-        {
+        for o in self.read_history(auctions, None)? {
             points.entry(o.auction).or_default().push(PricePoint {
                 t: o.t,
                 price: o.price(),
@@ -413,6 +409,6 @@ impl Data {
                 .cmp(&b.first_seen)
                 .then(a.auction_id.cmp(&b.auction_id))
         });
-        out
+        Ok(out)
     }
 }

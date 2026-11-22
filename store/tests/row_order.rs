@@ -322,11 +322,11 @@ fn answers(data: &Data) -> Vec<(String, serde_json::Value)> {
         let q = query(sort);
         add(
             format!("search {}", sort.key()),
-            serde_json::to_value(data.search(&q, NOW)).unwrap(),
+            serde_json::to_value(data.search(&q, NOW).unwrap()).unwrap(),
         );
         add(
             format!("gone {}", sort.key()),
-            serde_json::to_value(data.search_page(&q, 0, Some(true), NOW)).unwrap(),
+            serde_json::to_value(data.search_page(&q, 0, Some(true), NOW).unwrap()).unwrap(),
         );
     }
     let all_weapons = Query {
@@ -335,7 +335,7 @@ fn answers(data: &Data) -> Vec<(String, serde_json::Value)> {
     };
     add(
         "search all weapons".into(),
-        serde_json::to_value(data.search(&all_weapons, NOW)).unwrap(),
+        serde_json::to_value(data.search(&all_weapons, NOW).unwrap()).unwrap(),
     );
     let (sightings, _) = rows();
     let mut rivens: Vec<&str> = sightings.iter().map(|s| s.riven).collect();
@@ -357,7 +357,7 @@ fn answers(data: &Data) -> Vec<(String, serde_json::Value)> {
         );
         add(
             format!("history {riven}"),
-            serde_json::to_value(data.riven_history(riven)).unwrap(),
+            serde_json::to_value(data.riven_history(riven).unwrap()).unwrap(),
         );
         let by_id = Query {
             riven_id: Some(riven.into()),
@@ -365,7 +365,7 @@ fn answers(data: &Data) -> Vec<(String, serde_json::Value)> {
         };
         add(
             format!("id search {riven}"),
-            serde_json::to_value(data.search(&by_id, NOW)).unwrap(),
+            serde_json::to_value(data.search(&by_id, NOW).unwrap()).unwrap(),
         );
     }
     out
@@ -447,7 +447,7 @@ fn simultaneous_copies_resolve_to_the_newest() -> Result<()> {
     let q = query(Sort::PriceAsc);
 
     // One gone entry per riven: the relist `a2` stands for `r-twin`, not `a1`.
-    let gone_tab = data.search_page(&q, 0, Some(true), NOW);
+    let gone_tab = data.search_page(&q, 0, Some(true), NOW).unwrap();
     let mut gone_ids: Vec<&str> = gone_tab
         .gone
         .iter()
@@ -457,7 +457,7 @@ fn simultaneous_copies_resolve_to_the_newest() -> Result<()> {
     assert_eq!(gone_ids, ["a2", "d1"]);
 
     // The chart's gone median in that hour counts `a2`'s 300 and `d1`'s 200, not `a1`'s 100.
-    let result = data.search(&q, NOW);
+    let result = data.search(&q, NOW).unwrap();
     let point = result
         .history
         .iter()
@@ -502,5 +502,82 @@ fn simultaneous_copies_resolve_to_the_newest() -> Result<()> {
     let effects = data.stat_effects("w");
     assert!(effects.rivens >= 40, "{} rivens", effects.rivens);
     assert!(!effects.positive.is_empty(), "no stat effects to compare");
+    Ok(())
+}
+
+#[test]
+fn parquet_chart_carries_prices_and_keeps_withdrawals() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut sink = ParquetSink::new(temp.path().join("parquet"));
+    let base = Sighting {
+        auction: "variable",
+        riven: "r-variable",
+        t: DAY,
+        price: 100,
+        created: DAY,
+        stats: vec!["damage"],
+    };
+    // The opening bucket includes a price from before the period. In the next
+    // bucket the last sighting withdraws its price, and the next bucket restores it.
+    let start = DAY + 24 * HOUR;
+    for (t, price) in [
+        (DAY, Some(100)),
+        (start + HOUR, Some(200)),
+        (start + HOUR + 1, None),
+        (start + 2 * HOUR, Some(300)),
+    ] {
+        let sighting = Sighting { t, ..base.clone() };
+        sink.prepare(time(t))?;
+        let mut auction = auction_row(&sighting);
+        auction.buyout_price = price;
+        auction.starting_price = None;
+        auction.top_bid = None;
+        sink.auctions.push(auction);
+        sink.attributes.extend(attribute_rows(&sighting));
+        // A constant second listing gives the opening and withdrawn-price buckets a point.
+        let steady = Sighting {
+            auction: "steady",
+            riven: "r-steady",
+            price: 500,
+            ..sighting
+        };
+        sink.auctions.push(auction_row(&steady));
+        sink.attributes.extend(attribute_rows(&steady));
+        sink.flush()?;
+    }
+    // There must be a scrape in the opening bucket to set the beginning of this chart.
+    let steady = Sighting {
+        auction: "steady",
+        riven: "r-steady",
+        t: start,
+        price: 500,
+        ..base
+    };
+    sink.prepare(time(start))?;
+    sink.auctions.push(auction_row(&steady));
+    sink.attributes.extend(attribute_rows(&steady));
+    sink.flush()?;
+
+    let store = Store::new(temp.path().to_owned());
+    store.refresh();
+    let data = store.read();
+    let mut q = query(Sort::Newest);
+    q.period = Period::Custom {
+        from: Some(start),
+        to: None,
+    };
+    let page = data.search(&q, start + 3 * HOUR)?;
+    let points: Vec<_> = page.history.iter().map(|p| (p.t, p.count, p.min)).collect();
+    assert_eq!(
+        points,
+        [
+            (start, 2, 100),
+            (start + HOUR, 1, 500),
+            (start + 2 * HOUR, 2, 300)
+        ]
+    );
+    let journey = data.riven_history("r-variable")?;
+    let prices: Vec<_> = journey[0].points.iter().map(|p| p.price).collect();
+    assert_eq!(prices, [Some(100), Some(200), None, Some(300)]);
     Ok(())
 }

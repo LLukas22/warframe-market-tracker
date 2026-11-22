@@ -16,47 +16,6 @@ fn class_order(class: &Option<WeaponClass>) -> &'static str {
     class.map_or("unknown", WeaponClass::as_str)
 }
 
-/// A map from ids (auctions, rivens) to an optional value, for one chart bucket. A vector
-/// with a list of the slots in use, so a bucket costs what it holds, not the size.
-pub(super) struct BucketSlots<I> {
-    pub(super) slots: Vec<i64>,
-    pub(super) touched: Vec<I>,
-}
-
-impl<I: Id> BucketSlots<I> {
-    const EMPTY: i64 = i64::MIN;
-    /// Present without a price.
-    const NONE: i64 = i64::MIN + 1;
-
-    fn new(len: usize) -> Self {
-        Self {
-            slots: vec![Self::EMPTY; len],
-            touched: Vec::new(),
-        }
-    }
-
-    fn slot(&mut self, index: I) -> &mut i64 {
-        let slot = &mut self.slots[index.index()];
-        if *slot == Self::EMPTY {
-            self.touched.push(index);
-        }
-        slot
-    }
-
-    fn set(&mut self, index: I, price: Option<i64>) {
-        *self.slot(index) = price.unwrap_or(Self::NONE);
-    }
-
-    /// The entries in insertion order, leaving the map empty.
-    fn drain(&mut self) -> impl Iterator<Item = (I, Option<i64>)> + '_ {
-        let slots = &mut self.slots;
-        self.touched.drain(..).map(move |index| {
-            let value = std::mem::replace(&mut slots[index.index()], Self::EMPTY);
-            (index, (value != Self::NONE).then_some(value))
-        })
-    }
-}
-
 pub(super) fn median(mut v: Vec<i64>) -> Option<i64> {
     v.sort_unstable();
     v.get(v.len() / 2).copied()
@@ -262,7 +221,7 @@ impl Data {
             weapons,
             attributes,
             auctions: self.auctions.len() as u32,
-            observations: self.observations.len() as u32,
+            observations: self.observation_count() as u32,
             last_scrape: self.weapons.iter().map(|w| w.last_scrape).max(),
         }
     }
@@ -374,7 +333,7 @@ impl Data {
         }
     }
 
-    pub fn search(&self, q: &Query, now: i64) -> SearchResult {
+    pub fn search(&self, q: &Query, now: i64) -> anyhow::Result<SearchResult> {
         self.search_page(q, 0, None, now)
     }
 
@@ -397,24 +356,48 @@ impl Data {
         overview
     }
 
-    /// `search`, reused for the all-weapon searches (see `Memo`).
-    pub fn search_memo(&self, q: &Query, now: i64) -> SearchResult {
-        if q.weapon.is_some() || q.riven_id.is_some() {
-            return self.search(q, now);
+    pub fn cached_search(&self, q: &Query) -> Option<SearchResult> {
+        let entries = self.memo.search.try_lock().ok()?;
+        let entry = entries
+            .iter()
+            .find(|e| e.fresh(self.version) && e.query == *q)?;
+        entry.result.try_lock().ok()?.clone()
+    }
+
+    /// Concurrent callers share a scan of the same query. Each entry has its own lock,
+    /// so a broad chart does not stall callers asking about a different weapon.
+    pub fn search_memo(&self, q: &Query, now: i64) -> anyhow::Result<SearchResult> {
+        let slot = {
+            let mut entries = self
+                .memo
+                .search
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            entries.retain(|e| e.fresh(self.version));
+            if let Some(entry) = entries.iter().find(|e| e.query == *q) {
+                entry.result.clone()
+            } else {
+                let result = std::sync::Arc::new(Mutex::new(None));
+                entries.insert(
+                    0,
+                    CachedSearch {
+                        version: self.version,
+                        at: Instant::now(),
+                        query: q.clone(),
+                        result: result.clone(),
+                    },
+                );
+                entries.truncate(SEARCH_MEMO_SIZE);
+                result
+            }
+        };
+        let mut cached = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(result) = cached.as_ref() {
+            return Ok(result.clone());
         }
-        let mut memo = self
-            .memo
-            .search
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        memo.retain(|(version, at, _, _)| *version == self.version && at.elapsed() < MEMO_TTL);
-        if let Some((_, _, _, result)) = memo.iter().find(|(_, _, query, _)| query == q) {
-            return result.clone();
-        }
-        let result = self.search(q, now);
-        memo.insert(0, (self.version, Instant::now(), q.clone(), result.clone()));
-        memo.truncate(SEARCH_MEMO_SIZE);
-        result
+        let result = self.search(q, now)?;
+        *cached = Some(result.clone());
+        Ok(result)
     }
 
     /// `None` includes both first pages and history; subsequent pages fetch only one tab.
@@ -424,7 +407,7 @@ impl Data {
         offset: usize,
         gone_tab: Option<bool>,
         now: i64,
-    ) -> SearchResult {
+    ) -> anyhow::Result<SearchResult> {
         // An id search shows everything about that riven, whatever the other filters say.
         let id_query;
         let q = match &q.riven_id {
@@ -445,7 +428,7 @@ impl Data {
             Some(slug) => match self.weapon_index.get(slug) {
                 Some(&w) => Some(w),
                 None => {
-                    return SearchResult {
+                    return Ok(SearchResult {
                         listings: Vec::new(),
                         total: 0,
                         gone: Vec::new(),
@@ -455,7 +438,7 @@ impl Data {
                         history: Vec::new(),
                         bucket_hours: DAY_BUCKET_HOURS,
                         server_time: now,
-                    };
+                    });
                 }
             },
             None => None,
@@ -582,7 +565,7 @@ impl Data {
             .collect();
 
         if gone_tab.is_some() {
-            return SearchResult {
+            return Ok(SearchResult {
                 listings,
                 total,
                 gone,
@@ -592,25 +575,20 @@ impl Data {
                 history: Vec::new(),
                 bucket_hours: DAY_BUCKET_HOURS,
                 server_time: now,
-            };
+            });
         }
 
-        // Observations are sorted by time, so the period is one slice of them.
-        let observations = {
-            let lo = start.map_or(0, |s| self.observations.partition_point(|o| o.t < s));
-            let hi = end.map_or(self.observations.len(), |e| {
-                self.observations.partition_point(|o| o.t < e)
-            });
-            &self.observations[lo..hi.max(lo)]
-        };
         // Bucket width follows the time the data covers: hours for a day, days for months.
-        let span_start = observations.first().map(|o| o.t).or(start).unwrap_or(now);
-        let bucket_hours = bucket_hours_for(end.unwrap_or(now).min(now) - span_start);
-
-        // Price history: per bucket, the latest price of every matching riven (newest copy),
-        // plus the last prices of rivens that disappeared in that bucket.
+        let (first_in_period, last_seen) = self.observation_bounds(start);
+        let span_start = first_in_period.or(start).unwrap_or(now);
+        // Up to the last scrape: past it, nothing is known about the market.
+        let last_scrape = last_seen.unwrap_or(now);
+        let span_end = end.unwrap_or(now).min(now).min(last_scrape);
+        let bucket_hours = bucket_hours_for(span_end - span_start);
         let bucket = i64::from(bucket_hours) * HOUR_MS;
         let bucket_of = |t: i64| t - t.rem_euclid(bucket);
+
+        // The last prices of rivens that disappeared, per bucket.
         let mut gone_by_bucket: HashMap<i64, HashMap<RivenId, i64>> = HashMap::default();
         for g in gone_events.iter().filter(|g| id_search || !gone_outlier(g)) {
             if let Some(p) = g.price {
@@ -620,39 +598,144 @@ impl Data {
                     .insert(self.auctions[g.auction].riven, p);
             }
         }
+
+        // Price history: per bucket, the market as it stood. Every matching riven listed at
+        // some point in the bucket counts once, at the asking price last observed for it by
+        // the bucket's end. A listing counts from its first sighting until it's gone, whether
+        // or not a scrape happened to see it in that bucket: sweeps and the newest-listings
+        // feed see very different parts of the market, and counting only what each bucket
+        // saw made the chart jump between them. A relisted riven counts with its newest copy.
+        let history = if first_in_period.is_none() && start.is_some() {
+            Vec::new()
+        } else {
+            self.market_history(
+                &rows,
+                &matching,
+                q,
+                id_search,
+                (bucket_of(span_start), span_end, bucket),
+                &mut gone_by_bucket,
+            )?
+        };
+
+        Ok(SearchResult {
+            listings,
+            total,
+            gone,
+            gone_total,
+            outliers_hidden,
+            price_limit: weapon.and_then(|w| self.weapons[w].price_limit),
+            history,
+            bucket_hours,
+            server_time: now,
+        })
+    }
+
+    /// The chart's points for buckets of width `bucket` from `first` (a bucket start) to
+    /// `last` (a time), see `search_page`. Each point also takes its bucket's disappeared
+    /// listings out of `gone_by_bucket`.
+    fn market_history(
+        &self,
+        rows: &Table<AuctionId, Row>,
+        matching: &Table<AuctionId, bool>,
+        q: &Query,
+        id_search: bool,
+        (first, last, bucket): (i64, i64, i64),
+        gone_by_bucket: &mut HashMap<i64, HashMap<RivenId, i64>>,
+    ) -> anyhow::Result<Vec<HistoryPoint>> {
+        /// Not observed yet.
+        const UNSEEN: i64 = i64::MIN;
+        /// Observed, but its price doesn't count: filtered out, invalid or unknown.
+        const NO_PRICE: i64 = i64::MIN + 1;
+        /// Gone before the bucket at hand.
+        const GONE: i64 = i64::MIN + 2;
+        const NOBODY: u32 = u32::MAX;
+        // Per auction: its price as of the bucket's end, or one of the markers above.
+        let mut price = self.auctions.same_ids(UNSEEN);
+        // Per riven: its newest listed copy, kept up as listings appear and go, so a bucket
+        // reads one price per riven rather than comparing every copy again.
+        let mut newest = self.rivens.same_ids(NOBODY);
+        let mut in_listed = self.rivens.same_ids(false);
+        let mut listed: Vec<RivenId> = Vec::new();
+        let mut removals: Vec<(i64, AuctionId)> = self
+            .auctions
+            .enumerate()
+            .filter(|&(i, _)| matching[i])
+            .filter_map(|(i, a)| a.current_gone().map(|g| (g.at, i)))
+            .collect();
+        removals.sort_unstable();
+        let mut removals = removals.into_iter().peekable();
+        let selected: Vec<_> = matching
+            .enumerate()
+            .filter_map(|(id, &yes)| yes.then_some(id))
+            .collect();
+        let events = self.read_history(&selected, Some((first, last, bucket)))?;
+        let mut observations = events.iter().peekable();
         let mut history = Vec::new();
-        let mut current_bucket = None;
-        // Keep every copy until the bucket closes; its latest observation can rise or
-        // cease to match the price filter. Only then let the newest copy seen in the
-        // bucket speak for its riven: a relist replaces the old price, and if the new one
-        // falls outside the filter, the riven does too.
-        // Indexed by auction and riven rather than hashed, since a long period visits
-        // a million observations; `touched` lists the slots to read and reset.
-        let mut prices = BucketSlots::<AuctionId>::new(self.auctions.len());
-        // Per riven, the position of its newest copy in `seen`.
-        let mut newest_seen = BucketSlots::<RivenId>::new(self.rivens.len());
-        let mut seen: Vec<(AuctionId, Option<i64>)> = Vec::new();
-        let mut flush = |t: i64, prices: &mut BucketSlots<AuctionId>| {
-            seen.clear();
-            seen.extend(prices.drain());
-            for (pos, &(auction, _)) in seen.iter().enumerate() {
-                let slot = newest_seen.slot(rows[auction].riven);
-                if *slot == BucketSlots::<RivenId>::EMPTY
-                    || self.newer(auction, seen[*slot as usize].0)
-                {
-                    *slot = pos as i64;
+        let mut b = first;
+        while b <= last {
+            let end = b + bucket;
+            // Prices as of the bucket's end, carried over from earlier buckets.
+            while let Some(o) = observations.next_if(|o| o.t < end) {
+                if !matching[o.auction] {
+                    continue;
+                }
+                let a = o.auction;
+                if price[a] == UNSEEN {
+                    let riven = rows[a].riven;
+                    let slot = newest[riven];
+                    if slot == NOBODY || self.newer(a, AuctionId::from_index(slot as usize)) {
+                        newest[riven] = a.index() as u32;
+                    }
+                    if !in_listed[riven] {
+                        in_listed[riven] = true;
+                        listed.push(riven);
+                    }
+                }
+                let p = o.price();
+                let counts =
+                    Self::price_ok(q, p, o.direct_sell) && (id_search || !rows[a].outlier_price(p));
+                price[a] = p.filter(|_| counts).unwrap_or(NO_PRICE);
+            }
+            // Gone before this bucket: gone for every later one too. A listing that goes in
+            // this bucket was still listed in it.
+            while let Some((_, a)) = removals.next_if(|&(t, _)| t < b) {
+                if price[a] == UNSEEN {
+                    continue;
+                }
+                price[a] = GONE;
+                let riven = rows[a].riven;
+                if newest[riven] as usize == a.index() {
+                    // Rare: an older copy may still be listed.
+                    newest[riven] = self.riven_auctions[riven]
+                        .iter()
+                        .copied()
+                        .filter(|&c| !matches!(price[c], UNSEEN | GONE))
+                        .reduce(|x, y| if self.newer(y, x) { y } else { x })
+                        .map_or(NOBODY, |c| c.index() as u32);
                 }
             }
-            let mut v: Vec<i64> = newest_seen
-                .drain()
-                .filter_map(|(_, pos)| seen[pos? as usize].1)
+            listed.retain(|&r| {
+                let keep = newest[r] != NOBODY;
+                in_listed[r] = keep;
+                keep
+            });
+            let mut v: Vec<i64> = listed
+                .iter()
+                .map(|&r| price[AuctionId::from_index(newest[r] as usize)])
+                .filter(|&p| p != NO_PRICE)
                 .collect();
+            let gone: Vec<i64> = gone_by_bucket
+                .remove(&b)
+                .map(|g| g.into_values().collect())
+                .unwrap_or_default();
+            b = end;
             if v.is_empty() {
-                return;
+                continue;
             }
             // Four ranks are needed, not a sorted list: select them, which is linear.
-            let last = (v.len() - 1) as f64;
-            let rank = |p: f64| (last * p).round() as usize;
+            let top = (v.len() - 1) as f64;
+            let rank = |p: f64| (top * p).round() as usize;
             let (r25, r50, r75) = (rank(0.25), rank(0.5), rank(0.75));
             let (below, &mut median_value, above) = v.select_nth_unstable(r50);
             let p75 = if r75 > r50 {
@@ -667,12 +750,8 @@ impl Data {
             };
             // Everything up to rank 25 is at most p25, so the minimum is among those.
             let min = v[..=r25].iter().copied().min().unwrap_or(median_value);
-            let gone: Vec<i64> = gone_by_bucket
-                .remove(&t)
-                .map(|g| g.into_values().collect())
-                .unwrap_or_default();
             history.push(HistoryPoint {
-                t,
+                t: end - bucket,
                 count: v.len() as u32,
                 min,
                 p25,
@@ -681,42 +760,8 @@ impl Data {
                 gone_count: gone.len() as u32,
                 gone_median: median(gone),
             });
-        };
-        // Observations come in time order, so a bucket ends at a known time; dividing for
-        // every one of up to a million observations would cost more than the rest.
-        let mut bucket_end = i64::MIN;
-        for o in observations {
-            if !matching[o.auction] {
-                continue;
-            }
-            if o.t >= bucket_end {
-                let b = bucket_of(o.t);
-                if let Some(prev) = current_bucket {
-                    flush(prev, &mut prices);
-                }
-                current_bucket = Some(b);
-                bucket_end = b + bucket;
-            }
-            let price = o.price();
-            let eligible = Self::price_ok(q, price, o.direct_sell)
-                && (id_search || !rows[o.auction].outlier_price(price));
-            prices.set(o.auction, price.filter(|_| eligible));
         }
-        if let Some(prev) = current_bucket {
-            flush(prev, &mut prices);
-        }
-
-        SearchResult {
-            listings,
-            total,
-            gone,
-            gone_total,
-            outliers_hidden,
-            price_limit: weapon.and_then(|w| self.weapons[w].price_limit),
-            history,
-            bucket_hours,
-            server_time: now,
-        }
+        Ok(history)
     }
 
     /// Which stats raise or lower the asking price of this weapon's rivens. Positive and negative

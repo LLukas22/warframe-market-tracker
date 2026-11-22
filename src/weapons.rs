@@ -377,7 +377,7 @@ pub fn WeaponHeader(weapon: WeaponInfo, now: Option<i64>) -> Element {
                 }
             }
             div { class: "kpis",
-                div { class: "kpi",
+                div { class: "kpi", title: "Every current listing of this weapon, before any filter",
                     div { class: "kpi-value", "{w.listings}" }
                     div { class: "kpi-label", "listings" }
                 }
@@ -393,14 +393,12 @@ pub fn WeaponHeader(weapon: WeaponInfo, now: Option<i64>) -> Element {
                     }
                     div { class: "kpi-label", "cheapest" }
                 }
-                div { class: "kpi", title: "Listings that disappeared in the last 7 days (sold or delisted), median last price",
-                    div { class: "kpi-value",
-                        "{w.gone_7d}"
-                        if let Some(p) = w.gone_median_7d {
-                            span { class: "kpi-sub", " @ {format_plat(p)}p" }
-                        }
+                div { class: "kpi", title: "Listings that disappeared in the last 7 days (sold or delisted), and their median last price",
+                    div { class: "kpi-value", "{w.gone_7d}" }
+                    div { class: "kpi-label",
+                        "gone 7d"
+                        if let Some(p) = w.gone_median_7d { " · {format_plat(p)}p" }
                     }
-                    div { class: "kpi-label", "gone 7d" }
                 }
             }
         }

@@ -112,8 +112,65 @@ pub(super) fn gone_files(dir: &Path) -> Vec<PathBuf> {
 
 pub(super) type LoadResult<T> = anyhow::Result<T>;
 
-pub(super) fn read_batches(path: &Path) -> LoadResult<ParquetRecordBatchReader> {
-    Ok(ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?
+fn read_batches(path: &Path, table: layout::Table) -> LoadResult<ParquetRecordBatchReader> {
+    use layout::Table;
+    let columns: &[&str] = match table {
+        Table::Auctions => &[
+            auctions::SCRAPED_AT,
+            auctions::AUCTION_ID,
+            auctions::WEAPON_SLUG,
+            auctions::WEAPON_NAME,
+            auctions::WEAPON_CLASS,
+            auctions::RIVEN_NAME,
+            auctions::POLARITY,
+            auctions::MASTERY_LEVEL,
+            auctions::RE_ROLLS,
+            auctions::RANK,
+            auctions::LEGACY_STATS,
+            auctions::FIT_OK,
+            auctions::MEAN_POSITIVE_QUALITY,
+            auctions::BUYOUT_PRICE,
+            auctions::STARTING_PRICE,
+            auctions::TOP_BID,
+            auctions::IS_DIRECT_SELL,
+            auctions::VISIBLE,
+            auctions::CLOSED,
+            auctions::CREATED,
+            auctions::OWNER_NAME,
+            auctions::OWNER_REPUTATION,
+            auctions::OWNER_STATUS,
+            auctions::PLATFORM,
+            auctions::RIVEN_ID,
+            auctions::SOURCE,
+        ],
+        Table::Attributes => &[
+            attributes::SCRAPED_AT,
+            attributes::AUCTION_ID,
+            attributes::POSITION,
+            attributes::ATTRIBUTE,
+            attributes::POSITIVE,
+            attributes::VALUE,
+            attributes::VALUE_RANK8,
+            attributes::QUALITY,
+        ],
+        Table::Gone => &[
+            gone::DETECTED_AT,
+            gone::AUCTION_ID,
+            gone::REASON,
+            gone::LAST_PRICE,
+            gone::DIRECT_SELL,
+        ],
+    };
+    let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?;
+    let indices = reader
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, field)| columns.contains(&field.name().as_str()).then_some(i));
+    let mask = parquet::arrow::ProjectionMask::roots(reader.parquet_schema(), indices);
+    Ok(reader
+        .with_projection(mask)
         .with_batch_size(READ_BATCH_SIZE)
         .build()?)
 }
@@ -255,19 +312,40 @@ impl Data {
     }
 
     pub(super) fn load(&mut self, auctions_path: &Path, attributes_path: &Path) -> LoadResult<()> {
-        self.load_parts(
-            read_batches(auctions_path)?.map(|b| b.map_err(Into::into)),
-            read_batches(attributes_path)?.map(|b| b.map_err(Into::into)),
-        )
+        let mut part = history::Part::new(auctions_path)?;
+        part.bounds = self.load_parts(
+            read_batches(auctions_path, layout::Table::Auctions)?.map(|b| b.map_err(Into::into)),
+            read_batches(attributes_path, layout::Table::Attributes)?
+                .map(|b| b.map_err(Into::into)),
+        )?;
+        self.history.files.push(part);
+        Ok(())
     }
 
     pub(super) fn load_parts(
         &mut self,
         auctions: impl IntoIterator<Item = LoadResult<RecordBatch>>,
         attributes: impl IntoIterator<Item = LoadResult<RecordBatch>>,
-    ) -> LoadResult<()> {
+    ) -> LoadResult<Option<(i64, i64)>> {
+        let mut bounds: Option<(i64, i64)> = None;
         let attributes = checked_batches(attributes, validate_attributes)?;
         let auctions = checked_batches(auctions, validate_auctions)?;
+        // Repeated sightings need a timestamp and price, but only the last one supplies
+        // listing details. Borrow the ids from the validated Arrow batches for this pass.
+        let mut latest: HashMap<&str, i64> = HashMap::default();
+        for b in &auctions {
+            let id = column!(b, auctions::AUCTION_ID, StringArray);
+            let time = column!(b, auctions::SCRAPED_AT, TimestampMillisecondArray);
+            let visible = column!(b, auctions::VISIBLE, BooleanArray);
+            let closed = column!(b, auctions::CLOSED, BooleanArray);
+            for i in 0..b.num_rows() {
+                if visible.value(i) && !closed.value(i) {
+                    let t = time.value(i);
+                    let last = latest.entry(id.value(i)).or_insert(t);
+                    *last = (*last).max(t);
+                }
+            }
+        }
         // The attributes of each auction's newest sighting in this part, with its scraped_at.
         // Older sightings never end up as an auction's current version, so their attributes
         // aren't kept. Keyed by the id alone so lookups borrow it instead of allocating.
@@ -281,7 +359,17 @@ impl Data {
             let value = column!(b, attributes::VALUE, Float64Array);
             let rank8 = column!(b, attributes::VALUE_RANK8, Float64Array);
             let quality = column!(b, attributes::QUALITY, Float64Array);
-            let mut rows: Vec<usize> = (0..b.num_rows()).collect();
+            let mut rows = Vec::new();
+            for i in 0..b.num_rows() {
+                if latest
+                    .get(id.value(i))
+                    .is_some_and(|&t| scraped.value(i) >= t)
+                {
+                    rows.push(i);
+                } else {
+                    self.intern_attr(attr.value(i));
+                }
+            }
             rows.sort_by_key(|&i| position.value(i));
             for i in rows {
                 let a = Attr {
@@ -307,7 +395,7 @@ impl Data {
             }
         }
 
-        for b in auctions {
+        for b in &auctions {
             let scraped = column!(b, auctions::SCRAPED_AT, TimestampMillisecondArray);
             let id = column!(b, auctions::AUCTION_ID, StringArray);
             let weapon_slug = column!(b, auctions::WEAPON_SLUG, StringArray);
@@ -355,6 +443,9 @@ impl Data {
                     .filter(|c| c.is_valid(i))
                     .map_or("", |c| c.value(i));
                 let t = scraped.value(i);
+                let (lo, hi) = bounds.get_or_insert((t, t));
+                *lo = (*lo).min(t);
+                *hi = (*hi).max(t);
                 let class = weapon_class
                     .is_valid(i)
                     .then(|| weapon_class.value(i).parse().ok())
@@ -378,6 +469,17 @@ impl Data {
                 let starting_price = opt(starting, i, Int64Array::value);
                 let top = opt(top_bid, i, Int64Array::value);
                 let existing = self.auction_index.get(auction_id).copied();
+                if let Some(index) = existing {
+                    let previous = &self.auctions[index];
+                    if previous.direct_sell != direct.value(i)
+                        || auction_price(previous) != price_of(buyout_price, top, starting_price)
+                    {
+                        self.history.variable.insert(index);
+                    }
+                    if previous.weapon != weapon {
+                        self.history.changed_weapon.insert(index);
+                    }
+                }
                 // Most rows are repeat sightings; an older one only moves `first_seen`, so
                 // build the full auction (strings, attributes) only for rows that become the
                 // latest version.
@@ -390,8 +492,8 @@ impl Data {
                         .unwrap_or_default()
                 };
                 let index = match existing {
-                    // An older sighting only moves `first_seen`.
-                    Some(index) if t < self.auctions[index].last_seen => {
+                    // An earlier row only moves the start of the listing.
+                    Some(index) if t < self.auctions[index].last_seen || t < latest[auction_id] => {
                         let a = &mut self.auctions[index];
                         a.first_seen = a.first_seen.min(t);
                         index
@@ -465,19 +567,17 @@ impl Data {
                         index
                     }
                 };
-                self.observations.push(Observation::new(
-                    t,
-                    index,
-                    price_of(buyout_price, top, starting_price),
-                    direct.value(i),
-                ));
+                self.history
+                    .record(t, index, price_of(buyout_price, top, starting_price));
             }
         }
-        Ok(())
+        Ok(bounds)
     }
 
     pub(super) fn load_gone(&mut self, path: &Path) -> LoadResult<()> {
-        self.load_gone_batches(read_batches(path)?.map(|b| b.map_err(Into::into)))
+        self.load_gone_batches(
+            read_batches(path, layout::Table::Gone)?.map(|b| b.map_err(Into::into)),
+        )
     }
 
     pub(super) fn load_gone_batches(
@@ -519,13 +619,18 @@ impl Data {
     }
 
     pub(super) fn finish_load(&mut self) {
-        // Nothing depends on the order of observations at the same time: an auction has at most
-        // one per time, and copies of a riven are told apart by `recency`.
+        #[cfg(test)]
         self.observations.sort_by_key(|o| o.t);
         self.sort_gone();
 
         self.riven_changes = self.rivens.same_ids(RivenChanges::default());
         let mut first_prices = self.rivens.same_ids(None);
+        for (&auction, &(min, max)) in &self.history.prices {
+            let riven = self.auctions[auction].riven;
+            self.riven_changes[riven].price |=
+                min != max || *first_prices[riven].get_or_insert(min) != min;
+        }
+        #[cfg(test)]
         for o in &self.observations {
             let riven = self.auctions[o.auction].riven;
             // Missing prices aren't evidence of a change; compare known numeric prices only.
