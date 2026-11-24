@@ -212,6 +212,10 @@ pub struct WeaponInfo {
     /// Median last price of those.
     pub gone_median_7d: Option<i64>,
     pub last_scrape: i64,
+    /// How much its rivens were traded in game on PC in the newest weekly riven report, from
+    /// 1 to 100 for the most traded weapon. Digital Extremes gives no counts, only this.
+    #[serde(default)]
+    pub trade_popularity: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -285,7 +289,10 @@ pub struct Listing {
 pub struct HistoryPoint {
     /// Bucket start, unix ms.
     pub t: i64,
+    /// Matching rivens listed in the bucket; `min` is the cheapest of them.
     pub count: u32,
+    /// How many of them, the recently priced ones, `p25`, `median` and `p75` are of.
+    pub recent: u32,
     pub min: i64,
     pub p25: i64,
     pub median: i64,
@@ -563,7 +570,56 @@ pub struct ScraperSnapshot {
     /// `WFMT_ENABLE_SCRAPER` isn't set: this server only hosts its data.
     pub disabled: bool,
     pub hub: HubStatus,
+    /// Fetching Warframe's weekly riven trade report.
+    pub weekly: WeeklyStatus,
     pub server_time: i64,
+}
+
+/// Fetching Warframe's weekly riven trade report, which every server does.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WeeklyStatus {
+    pub running: bool,
+    pub last_check_at: Option<i64>,
+    /// The newest stored week of each platform that has one, as `(platform, YYYY-MM-DD)`.
+    pub newest: Vec<(String, String)>,
+    /// Stored weeks, all platforms together.
+    pub weeks: usize,
+    /// What the last check did.
+    pub outcome: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Prices paid in in-game trades in one week, from Warframe's weekly riven report.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TradeStats {
+    pub median: f64,
+    pub avg: f64,
+    pub stddev: f64,
+    pub min: f64,
+    pub max: f64,
+    /// How often it was traded compared to the rest of the report, from 1 to 100.
+    pub pop: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TradeWeek {
+    /// When the report was published, `YYYY-MM-DD`. It covers the week before.
+    pub date: String,
+    /// Rivens never rerolled.
+    pub unrolled: Option<TradeStats>,
+    pub rerolled: Option<TradeStats>,
+}
+
+/// A weapon's rivens in Warframe's weekly reports, for one platform.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WeaponTrades {
+    pub platform: String,
+    /// The platforms whose reports list this weapon, `pc` first.
+    pub platforms: Vec<String>,
+    /// Newest first. Empty when the reports don't list this weapon on `platform`.
+    pub weeks: Vec<TradeWeek>,
+    /// The newest report of `platform`, listing this weapon or not.
+    pub latest_report: Option<String>,
 }
 
 /// Uploads of finished days to a Hugging Face dataset, or downloads of them when `pull` is set.

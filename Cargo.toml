@@ -69,13 +69,13 @@ wfmt-store = { workspace = true, optional = true }
 gloo-timers = { version = "0.3", features = ["futures"] }
 dioxus = { version = "0.7", features = ["fullstack", "router"] }
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 
 # Server only
 tower-http = { version = "0.6", features = ["compression-gzip"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "fs", "time", "io-util", "signal"], optional = true }
 reqwest = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
 futures-util = { version = "0.3", optional = true }
@@ -88,11 +88,12 @@ subtle = { version = "2", optional = true }
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-server = ["dep:tower-http", "dep:wfmt-scraper", "dep:wfmt-store", "dep:wfmt-dataset", "dioxus/server", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub", "dep:subtle"]
+server = ["dep:tower-http", "dep:wfmt-scraper", "dep:wfmt-store", "dep:wfmt-dataset", "dioxus/server", "dep:tokio", "dep:reqwest", "dep:chrono", "dep:flate2", "dep:futures-util", "dep:tar", "dep:tokio-util", "dep:hf-hub", "dep:subtle"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true
 js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window"] }
 
 [dev-dependencies]
 # Tests write small parquet files to move around.

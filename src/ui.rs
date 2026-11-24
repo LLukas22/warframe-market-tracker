@@ -4,10 +4,15 @@ use crate::api::{
     self, AttrInfo, CurseFilter, DAY_MS, HOUR_MS, Listing, LiveStats, Overview, Period, Query,
     SIMILAR_LIMIT, SearchResult, Sort, attribute_name, format_value, is_spliced,
 };
-use crate::chart::{PriceChart, StatEffectsPanel};
+use crate::chart::StatEffectsPanel;
+use crate::trades::TradesChart;
 use crate::weapons::{WeaponGrid, WeaponHeader, WeaponImage, WeaponPicker};
 use wfmt_types::{MINUTE_MS, SECOND_MS, riven};
 
+const FOCUSGROUP: Asset = asset!(
+    "/assets/vendor/focusgroup.js",
+    AssetOptions::js().with_module(true)
+);
 const CSS: Asset = asset!("/assets/main.css");
 
 /// `YYYY-MM-DD` (UTC) from unix ms.
@@ -115,6 +120,105 @@ const LIVE_POLL_MS: u32 = 5 * SECOND_MS as u32;
 
 pub(crate) use route::Route;
 
+/// Share only overrides. The router decodes the query before handing it to FromQuery.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct MarketView {
+    query: Query,
+    gone: bool,
+}
+
+impl From<Query> for MarketView {
+    fn from(query: Query) -> Self {
+        Self { query, gone: false }
+    }
+}
+
+impl std::fmt::Display for MarketView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let values = serde_json::to_value(&self.query).map_err(|_| std::fmt::Error)?;
+        let defaults = serde_json::to_value(Query::default()).map_err(|_| std::fmt::Error)?;
+        let mut params = Vec::new();
+        for (key, value) in values.as_object().ok_or(std::fmt::Error)? {
+            if value != &defaults[key] && !matches!(key.as_str(), "weapon" | "riven_id") {
+                // Keep a literal ampersand or percent inside a JSON string through
+                // the router's decode-before-split step.
+                let value = value
+                    .to_string()
+                    .replace('&', r"\u0026")
+                    .replace('%', r"\u0025");
+                params.push(format!("{key}={value}"));
+            }
+        }
+        if self.gone {
+            params.push("tab=gone".into());
+        }
+        f.write_str(&params.join("&"))
+    }
+}
+
+impl From<&str> for MarketView {
+    fn from(search: &str) -> Self {
+        let mut values = serde_json::to_value(Query::default()).unwrap();
+        let mut gone = false;
+        for (key, raw) in search.split('&').filter_map(|arg| arg.split_once('=')) {
+            if key == "tab" {
+                gone = raw == "gone";
+            } else if let Some(field) = values.get_mut(key)
+                && !matches!(key, "weapon" | "riven_id")
+                && let Ok(value) = serde_json::from_str(raw)
+            {
+                *field = value;
+            }
+        }
+        let query: Query = serde_json::from_value(values).unwrap_or_default();
+        if query.period.validate().is_err()
+            || !(0.0..=1.0).contains(&query.min_quality)
+            || query.min_price.is_some_and(|v| v < 0)
+            || query
+                .max_price
+                .is_some_and(|v| v < query.min_price.unwrap_or(0))
+        {
+            return Self {
+                gone,
+                ..Self::default()
+            };
+        }
+        Self { query, gone }
+    }
+}
+
+impl Route {
+    fn market_view_mut(&mut self) -> Option<&mut MarketView> {
+        match self {
+            Self::Market { view } | Self::Weapon { view, .. } | Self::Search { view, .. } => {
+                Some(view)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn change_view(edit: impl FnOnce(&mut MarketView)) {
+    let router = router();
+    let mut route = router.current::<Route>();
+    if let Some(view) = route.market_view_mut() {
+        edit(view);
+        // WebHistory scrolls to the top on replace. A filter or tab edit stays in place.
+        #[cfg(target_arch = "wasm32")]
+        let viewport =
+            web_sys::window().and_then(|w| Some((w.scroll_x().ok()?, w.scroll_y().ok()?, w)));
+        router.replace(route);
+        #[cfg(target_arch = "wasm32")]
+        if let Some((x, y, window)) = viewport {
+            window.scroll_to_with_x_and_y(x, y);
+        }
+    }
+}
+
+fn change_query(edit: impl FnOnce(&mut Query)) {
+    change_view(|view| edit(&mut view.query));
+}
+
 /// In a module of its own so the lint can be allowed for the derive's code, which an attribute
 /// on the enum doesn't reach: since Rust 1.100, `Routable` (dioxus-router 0.7) generates a call
 /// the compiler sees as unreachable.
@@ -127,18 +231,18 @@ mod route {
     #[derive(Clone, Debug, PartialEq, Routable)]
     pub(crate) enum Route {
         #[layout(Shell)]
-        #[route("/")]
-        Market {},
+        #[route("/?:..view")]
+        Market { view: MarketView },
         #[route("/alerts?:weapon")]
         AlertsPage { weapon: Option<String> },
         #[route("/people")]
         PeoplePage {},
         #[route("/people/:name")]
         PersonPage { name: String },
-        #[route("/weapons/:slug")]
-        Weapon { slug: String },
-        #[route("/search/:id")]
-        Search { id: String },
+        #[route("/weapons/:slug?:..view")]
+        Weapon { slug: String, view: MarketView },
+        #[route("/search/:id?:..view")]
+        Search { id: String, view: MarketView },
         #[route("/riven/:id?:auction")]
         RivenPage { id: String, auction: String },
         /// An editable riven read from a screenshot (see `RivenScan::to_param`).
@@ -362,8 +466,20 @@ impl ViewCache {
 
 #[component]
 fn Shell() -> Element {
+    use_effect(|| {
+        document::eval(&format!(
+            "if (!('focusGroup' in HTMLElement.prototype)) await import('{FOCUSGROUP}');"
+        ));
+    });
     let mut scraper_open = use_signal(|| false);
-    let query = use_signal(Query::default);
+    let mut current_route = use_route::<Route>();
+    let mut query = use_signal(Query::default);
+    if let Some(view) = current_route.market_view_mut()
+        && *query.peek() != view.query
+    {
+        query.set(view.query.clone());
+    }
+    let link_view = MarketView::from(query());
     use_context_provider(|| query);
     // Bumped when the server's data changes; cached answers from before are stale.
     let mut data_version = use_signal(|| 0u64);
@@ -425,7 +541,6 @@ fn Shell() -> Element {
             live.restart();
         }
     });
-    let current_route = use_route::<Route>();
     let on_alerts = matches!(current_route, Route::AlertsPage { .. });
     let on_people = matches!(
         current_route,
@@ -454,10 +569,11 @@ fn Shell() -> Element {
         document::Stylesheet { href: CSS }
         document::Title { "Riven Tracker" }
         crate::alerts::AlertRuntime {}
+        a { class: "skip-link", href: "#main-content", "Skip to main content" }
         header {
             div { class: "brand",
                 h1 {
-                    Link { to: Route::Market {}, onclick: move |_| scraper_open.set(false), "Riven Tracker" }
+                    Link { to: Route::Market { view: link_view.clone() }, onclick: move |_| scraper_open.set(false), "Riven Tracker" }
                 }
             }
             if let Some(o) = &data {
@@ -467,7 +583,7 @@ fn Shell() -> Element {
             }
             nav { class: "market-nav", aria_label: "Tracker pages",
                 // Weapon, riven and scan pages all belong to the market tab.
-                Link { to: Route::Market {}, class: tab(!on_alerts && !on_people), "Market" }
+                Link { to: Route::Market { view: link_view.clone() }, class: tab(!on_alerts && !on_people), "Market" }
                 Link { to: Route::PeoplePage {}, class: tab(on_people), "People" }
                 Link { to: Route::AlertsPage { weapon: None }, class: tab(on_alerts), "Alerts" }
             }
@@ -502,7 +618,7 @@ fn Shell() -> Element {
         if scraper_open() {
             crate::scraper::ScraperPanel {}
         } else if let Some(error) = load_error {
-            div { class: "fatal", "Failed to load data: {error}" }
+            main { id: "main-content", tabindex: "-1", class: "fatal", "Failed to load data: {error}" }
         } else {
             // Pages start their own requests right away and render placeholders for the
             // catalog until it is loaded, instead of waiting for it one after the other.
@@ -514,28 +630,28 @@ fn Shell() -> Element {
 /// Weapon and ID selection belongs to the URL; the shared signal holds filter preferences.
 fn query_for_route(mut query: Query, route: &Route) -> Query {
     query.weapon = match route {
-        Route::Weapon { slug } => Some(slug.clone()),
+        Route::Weapon { slug, .. } => Some(slug.clone()),
         _ => None,
     };
     query.riven_id = match route {
-        Route::Search { id } => Some(id.clone()),
+        Route::Search { id, .. } => Some(id.clone()),
         _ => None,
     };
     query
 }
 
 #[component]
-fn Weapon(slug: String) -> Element {
-    rsx! { Market { key: "weapon-{slug}" } }
+fn Weapon(slug: String, view: MarketView) -> Element {
+    rsx! { Market { key: "weapon-{slug}", view } }
 }
 
 #[component]
-fn Search(id: String) -> Element {
-    rsx! { Market { key: "search-{id}" } }
+fn Search(id: String, view: MarketView) -> Element {
+    rsx! { Market { key: "search-{id}", view } }
 }
 
 #[component]
-fn Market() -> Element {
+fn Market(view: MarketView) -> Element {
     let route = use_route::<Route>();
     let loaded = use_context::<Signal<Option<Overview>>>();
     let query = use_context::<Signal<Query>>();
@@ -543,21 +659,24 @@ fn Market() -> Element {
     let overview = loaded();
     let unknown = matches!(
         (&overview, &route),
-        (Some(o), Route::Weapon { slug }) if !o.weapons.iter().any(|w| &w.slug == slug)
+        (Some(o), Route::Weapon { slug, .. }) if !o.weapons.iter().any(|w| &w.slug == slug)
     );
     rsx! {
         if unknown {
-            main { class: "riven-page",
+            main { id: "main-content", tabindex: "-1", class: "riven-page",
                 document::Title { "Weapon not found · Riven Tracker" }
                 h2 { "Weapon not found" }
                 p {
                     "This weapon is not in the catalog. Choose a weapon from the search box or "
-                    Link { to: Route::Market {}, "browse all weapons" }
+                    Link { to: Route::Market { view: view.clone() }, "browse all weapons" }
                     "."
                 }
             }
         } else {
-            MarketPage { key: "{route}", overview, query, data_version, route }
+            for page_key in [route.to_string().split('?').next().unwrap_or_default().to_owned()] {
+                MarketPage { key: "{page_key}", overview: overview.clone(), query, data_version,
+                    route: route.clone(), gone: view.gone }
+            }
         }
     }
 }
@@ -610,7 +729,7 @@ fn RivenPageContent(id: String, auction: String) -> Element {
     });
     let shown = detail.read().clone().or_else(|| seed.clone().map(Ok));
     rsx! {
-        main { class: "riven-page",
+        main { id: "main-content", tabindex: "-1", class: "riven-page",
             crate::scan::ScanNotice { target: id_for_notice, matched: true }
             match &shown {
                 None => rsx! { p { role: "status", "Loading riven…" } },
@@ -627,15 +746,17 @@ fn RivenPageContent(id: String, auction: String) -> Element {
                     rsx! {
                         document::Title { "{selected.weapon_name} {selected.riven_name} · Riven Tracker" }
                         crate::riven_view::RivenSummary { listing: selected.clone(), now: Some(data.server_time) }
-                        div { class: "listing-bar",
-                            div { class: "listing-tabs", role: "tablist", aria_label: "Riven sections",
+                        div { class: "listing-bar", id: "market-listings", tabindex: "-1",
+                            div { class: "listing-tabs", role: "tablist", "focusgroup": "tablist nomemory", aria_label: "Riven sections",
                                 button {
+                                    r#type: "button", "focusgroupstart": (!similar_tab()).then_some(""),
                                     role: "tab", id: "history-tab", aria_selected: !similar_tab(), aria_controls: "history-panel",
                                     class: if !similar_tab() { "active" } else { "" },
                                     onclick: move |_| similar_tab.set(false),
                                     "History"
                                 }
                                 button {
+                                    r#type: "button", "focusgroupstart": (similar_tab()).then_some(""),
                                     role: "tab", id: "similar-tab", aria_selected: similar_tab(), aria_controls: "similar-panel",
                                     class: if similar_tab() { "active" } else { "" },
                                     onclick: move |_| similar_tab.set(true),
@@ -731,7 +852,7 @@ fn ScannedRivenContent(scan: String) -> Element {
     let listed_before = matched.read().clone().flatten();
 
     rsx! {
-        main { class: "riven-page scan-page",
+        main { id: "main-content", tabindex: "-1", class: "riven-page scan-page",
             div { class: "scan-intro",
                 h2 { "Check your scan" }
                 p { class: "muted",
@@ -958,6 +1079,7 @@ fn MarketPage(
     query: Signal<Query>,
     data_version: Signal<u64>,
     route: Route,
+    gone: bool,
 ) -> Element {
     let requested = query_for_route(query(), &route);
     let request_route = route.clone();
@@ -975,7 +1097,7 @@ fn MarketPage(
             cache.store_search(requested.clone(), result);
         }
     });
-    let results = use_resource(move || {
+    let mut results = use_resource(move || {
         data_version.read();
         let q = query_for_route(query(), &request_route);
         async move {
@@ -1031,7 +1153,7 @@ fn MarketPage(
                     }
                 }
                 Link {
-                    to: Route::Market {},
+                    to: Route::Market { view: query().into() },
                     class: "picker-clear",
                     title: "All weapons",
                     "×"
@@ -1055,8 +1177,7 @@ fn MarketPage(
     let body = match &current {
         Some((shown, Ok(r))) => rsx! {
             Results {
-                key: "{shown:?}",
-                search_query: shown.clone(),
+                gone, search_query: shown.clone(),
                 result: r.clone(),
                 show_weapon: requested.weapon.is_none(),
                 weapons,
@@ -1064,7 +1185,10 @@ fn MarketPage(
                 weapon: requested.weapon.clone(),
             }
         },
-        Some((_, Err(e))) => rsx! { div { class: "error", "Search failed: {e}" } },
+        Some((_, Err(e))) => rsx! { div { class: "listing-load", role: "alert",
+            p { class: "error", "Could not load listings: {e}" }
+            button { disabled: results.pending(), onclick: move |_| results.restart(), "Retry" }
+        } },
         None => rsx! {
             div { class: "results-skeleton", role: "status", aria_label: "Loading listings",
                 if riven_search.is_none() {
@@ -1079,17 +1203,25 @@ fn MarketPage(
         document::Title {
             {selected.as_ref().map(|w| format!("{} rivens · Riven Tracker", w.name)).unwrap_or_else(|| "Riven Tracker".into())}
         }
-        main { class: "market-page",
+        main { id: "main-content", tabindex: "-1", class: "market-page",
+            if current.as_ref().is_some_and(|(_, result)| result.is_ok()) {
+                a { class: "skip-link skip-listings", href: "#market-listings", "Skip to listings" }
+            }
             aside { class: if filters_open() { "filters-open" } else { "" },
-                button {
-                    class: "filters-toggle",
-                    aria_expanded: filters_open(),
-                    onclick: move |_| filters_open.toggle(),
-                    span {
-                        "Filters"
-                        if filter_count > 0 { " · {filter_count} changed" }
+                div { class: "mobile-market-actions",
+                    button {
+                        class: "filters-toggle",
+                        aria_expanded: filters_open(),
+                        onclick: move |_| filters_open.toggle(),
+                        span {
+                            "Filters"
+                            if filter_count > 0 { " · {filter_count} changed" }
+                        }
+                        span { class: "filters-toggle-icon", if filters_open() { "▴" } else { "▾" } }
                     }
-                    span { class: "filters-toggle-icon", if filters_open() { "▴" } else { "▾" } }
+                    if current.as_ref().is_some_and(|(_, result)| result.is_ok()) {
+                        a { class: "listings-jump", href: "#market-listings", "View listings" }
+                    }
                 }
                 if let Some(o) = overview.clone() {
                     Filters {
@@ -1192,6 +1324,30 @@ pub(crate) fn PeriodPicker(
     }
 }
 
+/// The error identifies the field to describe (true for the minimum).
+fn validate_prices(min: &str, max: &str) -> Result<(Option<i64>, Option<i64>), (bool, String)> {
+    let parse = |value: &str, minimum| {
+        if value.trim().is_empty() {
+            return Ok(None);
+        }
+        value
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|v| *v >= 0)
+            .map(Some)
+            .ok_or_else(|| (minimum, "Enter a whole price of 0p or more.".into()))
+    };
+    let low = parse(min, true)?;
+    let high = parse(max, false)?;
+    if let (Some(l), Some(h)) = (low, high)
+        && l > h
+    {
+        return Err((false, format!("Maximum price must be at least {l}p.")));
+    }
+    Ok((low, high))
+}
+
 #[component]
 fn Filters(
     overview: Overview,
@@ -1200,7 +1356,6 @@ fn Filters(
     /// Server time of the shown results, to show which days a period preset covers.
     now: Option<i64>,
 ) -> Element {
-    let mut query = query;
     let q = query();
     // The slider's position while dragging, before it's applied.
     let mut quality_drag = use_signal(|| None::<f64>);
@@ -1236,7 +1391,22 @@ fn Filters(
         .collect();
 
     let curse_value = q.curse.key();
-    let price_input = |v: Option<i64>| v.map(|v| v.to_string()).unwrap_or_default();
+    let mut price_draft = use_signal(|| None::<(String, String)>);
+    let price_text = |v: Option<i64>| v.map(|v| v.to_string()).unwrap_or_default();
+    let (minimum, maximum) =
+        price_draft().unwrap_or_else(|| (price_text(q.min_price), price_text(q.max_price)));
+    let price_error = validate_prices(&minimum, &maximum).err();
+    let update_price = EventHandler::new(move |(min, max): (String, String)| {
+        if let Ok((low, high)) = validate_prices(&min, &max) {
+            price_draft.set(None);
+            change_query(|q| {
+                q.min_price = low;
+                q.max_price = high;
+            });
+        } else {
+            price_draft.set(Some((min, max)));
+        }
+    });
 
     let changed = active_filters(&q);
     let d = Query::default();
@@ -1256,12 +1426,12 @@ fn Filters(
         div { class: "filters",
             div { class: "filters-head",
                 h2 { "Filters" }
-                if changed > 0 {
+                if changed > 0 || price_error.is_some() {
                     button {
                         class: "link-button",
                         // Sorting isn't a filter, so it survives a reset.
-                        onclick: move |_| query.with_mut(|q| *q = Query { sort: q.sort, ..Query::default() }),
-                        "Reset ({changed})"
+                        onclick: move |_| { price_draft.set(None); change_query(|q| *q = Query { sort: q.sort, ..Query::default() }); },
+                        "Reset filters"
                     }
                 }
             }
@@ -1271,7 +1441,7 @@ fn Filters(
                 PeriodPicker {
                     period: q.period,
                     now,
-                    onchange: move |period| query.with_mut(|q| q.period = period),
+                    onchange: move |period| change_query(|q| q.period = period),
                 }
                 p { class: "muted small", "Applies to the chart and to gone listings. Days are UTC." }
             }
@@ -1289,7 +1459,7 @@ fn Filters(
                                 crate::riven_view::SplicedMark { slug: slug.clone() }
                                 button {
                                     aria_label: "Remove {attribute_name(&slug)}",
-                                    onclick: move |_| query.with_mut(|q| q.positives.retain(|p| p != &slug)),
+                                    onclick: move |_| change_query(|q| q.positives.retain(|p| p != &slug)),
                                     "×"
                                 }
                             }
@@ -1303,7 +1473,7 @@ fn Filters(
                         onchange: move |e| {
                             let v = e.value();
                             if !v.is_empty() {
-                                query.with_mut(|q| {
+                                change_query(|q| {
                                     if !q.positives.contains(&v) {
                                         q.positives.push(v);
                                     }
@@ -1330,7 +1500,7 @@ fn Filters(
                     value: "{curse_value}",
                     onchange: move |e| {
                         let curse = CurseFilter::from_key(&e.value());
-                        query.with_mut(|q| q.curse = curse);
+                        change_query(|q| q.curse = curse);
                     },
                     option { value: CurseFilter::Any.key(), "Any negative" }
                     option { value: CurseFilter::None.key(), "No negative" }
@@ -1349,7 +1519,7 @@ fn Filters(
                     input {
                         r#type: "checkbox",
                         checked: q.spliced,
-                        onchange: move |e| query.with_mut(|q| q.spliced = e.checked()),
+                        onchange: move |e| change_query(|q| q.spliced = e.checked()),
                     }
                     "Has a spliced stat"
                     span { "aria-hidden": "true",
@@ -1374,43 +1544,39 @@ fn Filters(
                     onchange: move |e| {
                         let v = e.value().parse::<f64>().unwrap_or(0.0) / 100.0;
                         quality_drag.set(None);
-                        query.with_mut(|q| q.min_quality = v);
+                        change_query(|q| q.min_quality = v);
                     },
                 }
             }
 
             div { class: "filter-group",
                 h3 { "Price" }
-                div { class: "row",
-                    input {
-                        r#type: "number",
-                        aria_label: "Min price",
-                        placeholder: "min",
-                        min: "0",
-                        value: "{price_input(q.min_price)}",
-                        onchange: move |e| {
-                            let v = e.value().parse().ok();
-                            query.with_mut(|q| q.min_price = v);
-                        },
+                div { class: "row price-range",
+                    label { r#for: "market-min-price", "Min (p)"
+                        input { id: "market-min-price", inputmode: "numeric", pattern: "[0-9]+", value: minimum.clone(),
+                            aria_invalid: price_error.as_ref().is_some_and(|e| e.0),
+                            aria_describedby: price_error.as_ref().filter(|e| e.0).map(|_| "price-error"),
+                            onchange: { let max = maximum.clone(); move |e| update_price.call((e.value(), max.clone())) },
+                        }
                     }
-                    span { class: "muted", "–" }
-                    input {
-                        r#type: "number",
-                        aria_label: "Max price",
-                        placeholder: "max",
-                        min: "0",
-                        value: "{price_input(q.max_price)}",
-                        onchange: move |e| {
-                            let v = e.value().parse().ok();
-                            query.with_mut(|q| q.max_price = v);
-                        },
+                    label { r#for: "market-max-price", "Max (p)"
+                        input { id: "market-max-price", inputmode: "numeric", pattern: "[0-9]+", value: maximum.clone(),
+                            aria_invalid: price_error.as_ref().is_some_and(|e| !e.0),
+                            aria_describedby: price_error.as_ref().filter(|e| !e.0).map(|_| "price-error"),
+                            onchange: move |e| update_price.call((minimum.clone(), e.value())),
+                        }
+                    }
+                }
+                div { aria_live: "polite",
+                    if let Some((_, ref message)) = price_error {
+                        p { class: "error small", id: "price-error", "{message}" }
                     }
                 }
                 label { class: "check",
                     input {
                         r#type: "checkbox",
                         checked: q.direct_only,
-                        onchange: move |e| query.with_mut(|q| q.direct_only = e.checked()),
+                        onchange: move |e| change_query(|q| q.direct_only = e.checked()),
                     }
                     "Buyout only (no bidding)"
                 }
@@ -1435,7 +1601,7 @@ fn Filters(
                             input {
                                 r#type: "checkbox",
                                 checked: q.price_changed,
-                                onchange: move |e| query.with_mut(|q| q.price_changed = e.checked()),
+                                onchange: move |e| change_query(|q| q.price_changed = e.checked()),
                             }
                             "Price changed"
                         }
@@ -1443,7 +1609,7 @@ fn Filters(
                             input {
                                 r#type: "checkbox",
                                 checked: q.owner_changed,
-                                onchange: move |e| query.with_mut(|q| q.owner_changed = e.checked()),
+                                onchange: move |e| change_query(|q| q.owner_changed = e.checked()),
                             }
                             "Owner changed"
                         }
@@ -1452,7 +1618,7 @@ fn Filters(
                             input {
                                 r#type: "checkbox",
                                 checked: q.include_legacy,
-                                onchange: move |e| query.with_mut(|q| q.include_legacy = e.checked()),
+                                onchange: move |e| change_query(|q| q.include_legacy = e.checked()),
                             }
                             "Pre-rework stats"
                         }
@@ -1460,7 +1626,7 @@ fn Filters(
                             input {
                                 r#type: "checkbox",
                                 checked: q.include_unfit,
-                                onchange: move |e| query.with_mut(|q| q.include_unfit = e.checked()),
+                                onchange: move |e| change_query(|q| q.include_unfit = e.checked()),
                             }
                             "Unverifiable stats"
                         }
@@ -1468,7 +1634,7 @@ fn Filters(
                             input {
                                 r#type: "checkbox",
                                 checked: q.include_outliers,
-                                onchange: move |e| query.with_mut(|q| q.include_outliers = e.checked()),
+                                onchange: move |e| change_query(|q| q.include_outliers = e.checked()),
                             }
                             "Invalid prices"
                         }
@@ -1483,6 +1649,7 @@ fn Filters(
 fn Results(
     result: SearchResult,
     search_query: Query,
+    gone: bool,
     show_weapon: bool,
     weapons: Vec<crate::api::WeaponInfo>,
     /// ID searches choose a riven, then open the shared detail page.
@@ -1490,9 +1657,7 @@ fn Results(
     /// The weapon being looked at, if any.
     weapon: Option<String>,
 ) -> Element {
-    let mut query = use_context::<Signal<Query>>();
     let now = result.server_time;
-    let mut gone_tab = use_signal(|| false);
     let has_image = |l: &Listing| {
         weapons
             .iter()
@@ -1507,7 +1672,7 @@ fn Results(
             .filter(|l| seen.insert(l.riven_id.clone()))
             .collect();
         return rsx! {
-            h2 { "Matching rivens" }
+            h2 { id: "market-listings", tabindex: "-1", "Matching rivens" }
             for listing in matches {
                 ListingRow { key: "{listing.riven_id}", listing: listing.clone(), now,
                     show_weapon: true, has_image: has_image(listing) }
@@ -1522,35 +1687,41 @@ fn Results(
                 " · invalid prices excluded"
             }
         }
-        PriceChart { points: result.history.clone(), bucket_hours: result.bucket_hours }
+        TradesChart {
+            points: result.history.clone(),
+            bucket_hours: result.bucket_hours,
+            weapon: weapon.as_ref().and_then(|slug| weapons.iter().find(|w| &w.slug == slug)).map(|w| w.name.clone()),
+        }
         if let Some(slug) = weapon {
             StatEffectsPanel { key: "{slug}", weapon: slug.clone() }
         }
-        div { class: "listing-bar",
-            div { class: "listing-tabs", role: "tablist", aria_label: "Listing status",
+        div { class: "listing-bar", id: "market-listings", tabindex: "-1",
+            div { class: "listing-tabs", role: "tablist", "focusgroup": "tablist nomemory", aria_label: "Listing status",
                 button {
-                    role: "tab", id: "active-tab", aria_selected: !gone_tab(), aria_controls: "listing-panel",
+                    r#type: "button", "focusgroupstart": (!gone).then_some(""),
+                    role: "tab", id: "active-tab", aria_selected: !gone, aria_controls: "listing-panel",
                     title: "Current listings matching the filters, one per riven. By default those are buyouts of at least 10p.",
-                    class: if !gone_tab() { "active" } else { "" },
-                    onclick: move |_| gone_tab.set(false),
+                    class: if !gone { "active" } else { "" },
+                    onclick: move |_| change_view(|v| v.gone = false),
                     "Active ({result.total})"
                 }
                 button {
-                    role: "tab", id: "gone-tab", aria_selected: gone_tab(), aria_controls: "listing-panel",
-                    class: if gone_tab() { "active" } else { "" },
-                    onclick: move |_| gone_tab.set(true),
+                    r#type: "button", "focusgroupstart": (gone).then_some(""),
+                    role: "tab", id: "gone-tab", aria_selected: gone, aria_controls: "listing-panel",
+                    class: if gone { "active" } else { "" },
+                    onclick: move |_| change_view(|v| v.gone = true),
                     "Gone / sold ({result.gone_total})"
                 }
             }
             // Gone listings are always newest first.
-            if !gone_tab() {
+            if !gone {
                 select {
                     class: "compact",
                     aria_label: "Sort listings",
                     value: search_query.sort.key(),
                     onchange: move |e| {
                         let sort = Sort::from_key(&e.value()).unwrap_or_default();
-                        query.with_mut(|q| q.sort = sort);
+                        change_query(|q| q.sort = sort);
                     },
                     for sort in Sort::ALL {
                         option { key: "{sort.key()}", value: sort.key(), "{sort_label(sort)}" }
@@ -1558,27 +1729,28 @@ fn Results(
                 }
             }
         }
-        if gone_tab() {
+        if gone {
             p { class: "muted small",
                 if search_query.period != Period::All { "Disappeared {period_label(search_query.period)}. " }
                 "Disappeared listings may be sold or delisted; warframe.market does not confirm sales."
             }
         }
-        if result.outliers_hidden > 0 && !gone_tab() {
+        if result.outliers_hidden > 0 && !gone {
             button {
                 class: "link-button",
-                onclick: move |_| query.with_mut(|q| q.include_outliers = true),
+                onclick: move |_| change_query(|q| q.include_outliers = true),
                 "{result.outliers_hidden} with invalid prices hidden"
             }
         }
-        {rsx! { ListingFeed {
-            key: "{gone_tab()}",
-            query: search_query,
-            gone: gone_tab(),
-            initial: if gone_tab() { result.gone.clone() } else { result.listings.clone() },
-            total: if gone_tab() { result.gone_total } else { result.total },
-            now, show_weapon, weapons,
-        } }}
+        for feed_key in [format!("{search_query:?}/{gone}")] {
+            ListingFeed { key: "{feed_key}",
+                query: search_query.clone(),
+                gone,
+                initial: if gone { result.gone.clone() } else { result.listings.clone() },
+                total: if gone { result.gone_total } else { result.total },
+                now, show_weapon, weapons: weapons.clone(),
+            }
+        }
     }
 }
 
@@ -1630,7 +1802,7 @@ fn ListingFeed(
         });
     });
     rsx! {
-        div { id: "listing-panel", role: "tabpanel",
+        div { id: "listing-panel", role: "tabpanel", tabindex: rows.read().is_empty().then_some("0"),
             aria_labelledby: if gone { "gone-tab" } else { "active-tab" },
             aria_busy: loading(),
             div { class: if gone { "listings gone" } else { "listings" },
@@ -1915,15 +2087,43 @@ mod route_tests {
     #[test]
     fn weapon_and_search_routes_round_trip() {
         for slug in ["torid", "arca_plasmor", "kuva_bramma"] {
-            let route = Route::Weapon { slug: slug.into() };
-            assert_eq!(route.to_string(), format!("/weapons/{slug}"));
+            let route = Route::Weapon {
+                slug: slug.into(),
+                view: Default::default(),
+            };
+            assert_eq!(route.to_string(), format!("/weapons/{slug}?"));
             assert_eq!(route.to_string().parse::<Route>().unwrap(), route);
         }
         let route = Route::Search {
             id: "1234abcd".into(),
+            view: Default::default(),
         };
-        assert_eq!(route.to_string(), "/search/1234abcd");
+        assert_eq!(route.to_string(), "/search/1234abcd?");
         assert_eq!(route.to_string().parse::<Route>().unwrap(), route);
+    }
+
+    #[test]
+    fn filtered_market_url_restores_the_view() {
+        let query = Query {
+            min_price: None,
+            max_price: Some(1500),
+            positives: vec!["fire_rate_/_attack_speed".into(), "test&%20".into()],
+            curse: CurseFilter::Attr("impact".into()),
+            sort: Sort::QualityDesc,
+            period: Period::custom(Some(DAY_MS), None),
+            direct_only: false,
+            ..Query::default()
+        };
+        let route = Route::Weapon {
+            slug: "torid".into(),
+            view: MarketView { query, gone: true },
+        };
+        let url = route.to_string();
+        assert!(url.contains("tab=gone") && url.contains("max_price=1500"));
+        assert!(!url.contains("min_quality="));
+        assert_eq!(url.parse::<Route>().unwrap(), route);
+        assert_eq!(validate_prices("", "0").unwrap(), (None, Some(0)));
+        assert!(validate_prices("500", "100").is_err());
     }
 
     #[test]
@@ -1949,11 +2149,11 @@ mod route_tests {
             assert!(query.price_changed && query.owner_changed);
             assert_eq!(query.min_price, Some(250));
             match route {
-                Route::Weapon { slug } => {
+                Route::Weapon { slug, .. } => {
                     assert_eq!(query.weapon, Some(slug));
                     assert_eq!(query.riven_id, None);
                 }
-                Route::Search { id } => {
+                Route::Search { id, .. } => {
                     assert_eq!(query.weapon, None);
                     assert_eq!(query.riven_id, Some(id));
                 }
@@ -2102,7 +2302,12 @@ mod route_tests {
                 auction: String::new()
             }
         );
-        assert_eq!("/".parse::<Route>().unwrap(), Route::Market {});
+        assert_eq!(
+            "/".parse::<Route>().unwrap(),
+            Route::Market {
+                view: Default::default()
+            }
+        );
     }
 
     #[test]

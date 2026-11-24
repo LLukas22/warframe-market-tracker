@@ -10,9 +10,25 @@ use crate::app::now_ms;
 
 #[get("/api/overview")]
 pub async fn overview() -> Result<Overview, ServerFnError> {
-    crate::app::get()
+    let overview = crate::app::get()
         .query(|store| store.overview_memo(now_ms()))
-        .await
+        .await?;
+    Ok(with_trade_popularity(overview))
+}
+
+/// The weapons' in-game trade popularity, from the weekly riven report.
+#[cfg(feature = "server")]
+fn with_trade_popularity(mut overview: Overview) -> Overview {
+    let app = crate::app::get();
+    match app.weekly.popularity(&app.data_dir) {
+        Ok(popularity) => {
+            for weapon in &mut overview.weapons {
+                weapon.trade_popularity = popularity.get(&weapon.name.to_lowercase()).copied();
+            }
+        }
+        Err(error) => tracing::warn!("can't read the weekly riven report: {error:#}"),
+    }
+    overview
 }
 
 #[post("/api/search")]
@@ -125,6 +141,23 @@ pub async fn person(
         .await
 }
 
+/// A weapon's rivens in Warframe's weekly trade reports on `platform`, found by the weapon's
+/// English `name`. `None` when the server has no report yet.
+#[post("/api/trades")]
+pub async fn weapon_trades(
+    name: String,
+    platform: String,
+) -> Result<Option<WeaponTrades>, ServerFnError> {
+    if name.len() > 100 || platform.len() > 10 {
+        return Err(ServerFnError::new("The weapon name is too long"));
+    }
+    let app = crate::app::get();
+    tokio::task::spawn_blocking(move || app.weekly.trades(&app.data_dir, &name, &platform))
+        .await
+        .map_err(ServerFnError::new)?
+        .map_err(|e| ServerFnError::new(format!("{e:#}")))
+}
+
 #[get("/api/live")]
 pub async fn live_stats() -> Result<LiveStats, ServerFnError> {
     let app = crate::app::get();
@@ -147,6 +180,7 @@ pub async fn scraper_status() -> Result<ScraperSnapshot, ServerFnError> {
         admin: app.admin.enabled(),
         disabled: !app.scraper.enabled(),
         hub: app.hub.status(),
+        weekly: app.weekly.status(&app.data_dir),
         server_time: now_ms(),
     })
 }
@@ -228,7 +262,8 @@ pub mod seed {
     }
 
     seeds! {
-        fn overview() -> Overview = |store| store.overview_memo(crate::app::now_ms());
+        fn overview() -> Overview =
+            |store| super::with_trade_popularity(store.overview_memo(crate::app::now_ms()));
         fn stat_effects(weapon: &str) -> StatEffects = |store| store.stat_effects(weapon);
         fn riven_detail(id: &str, auction: Option<&str>) -> Option<RivenDetail> =
             |store| store.riven_detail(id, auction, super::Comparisons::default(), crate::app::now_ms());

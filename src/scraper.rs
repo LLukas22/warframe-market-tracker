@@ -4,7 +4,7 @@ use wfmt_types::{
     SweepSummary, Trigger,
 };
 
-use crate::api::{self, HubStatus, ScraperSnapshot};
+use crate::api::{self, HubStatus, ScraperSnapshot, WeeklyStatus};
 use crate::ui::{format_datetime, sleep_ms};
 
 const POLL_MS: u32 = 2000;
@@ -66,7 +66,7 @@ pub fn ScraperPanel() -> Element {
         document::Title { "Scraper · Riven Tracker" }
         main { class: "scraper-page",
             div { class: "scraper-heading",
-                h2 { "Scraper" }
+                h2 { id: "main-content", tabindex: "-1", "Scraper" }
                 if admin {
                     input {
                         id: "admin-token",
@@ -112,6 +112,9 @@ pub fn ScraperPanel() -> Element {
             }
             if let Some(value) = snapshot().filter(|s| admin || s.hub.dataset.is_some() || s.hub.error.is_some()) {
                 HubCard { hub: value.hub, now: value.server_time, admin, token: token() }
+            }
+            if let Some(value) = snapshot() {
+                WeeklyCard { weekly: value.weekly, now: value.server_time }
             }
             if let Some(entries) = snapshot().and_then(|s| s.status).map(|s| s.recent).filter(|r| !r.is_empty()) {
                 RecentFetches { entries, now: snapshot().map_or(0, |s| s.server_time) }
@@ -361,6 +364,53 @@ fn HubCard(hub: HubStatus, now: i64, admin: bool, token: String) -> Element {
             } else {
                 p { class: "muted small", role: "status",
                     {hub.outcome.clone().unwrap_or_else(|| idle_text.into())}
+                }
+            }
+        }
+    }
+}
+
+/// Fetching Warframe's weekly riven trade report.
+#[component]
+fn WeeklyCard(weekly: WeeklyStatus, now: i64) -> Element {
+    let newest = if weekly.newest.is_empty() {
+        "—".to_owned()
+    } else {
+        weekly
+            .newest
+            .iter()
+            .map(|(platform, date)| format!("{} {date}", platform.to_uppercase()))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    rsx! {
+        section { class: "scraper-card",
+            div { class: "scraper-now",
+                span { class: if weekly.running { "scraper-dot busy" } else if weekly.error.is_none() { "scraper-dot online" } else { "scraper-dot" } }
+                strong { "Warframe's weekly riven report" }
+            }
+            dl {
+                div {
+                    dt { "Newest week" }
+                    dd { "{newest}" }
+                }
+                div {
+                    dt { "Stored" }
+                    dd { "{weekly.weeks} reports" }
+                }
+                div {
+                    dt { "Last check" }
+                    dd {
+                        title: weekly.last_check_at.map_or(String::new(), |t| format!("{} UTC", format_datetime(t))),
+                        {weekly.last_check_at.map_or("—".into(), |t| format!("{} ago", duration(now - t)))}
+                    }
+                }
+            }
+            if let Some(error) = &weekly.error {
+                p { class: "error small", role: "alert", "{error}" }
+            } else {
+                p { class: "muted small", role: "status",
+                    {weekly.outcome.clone().unwrap_or_else(|| "In-game trade prices, published by Digital Extremes every Monday for each platform. Checked every 6 hours, and each new week is kept.".into())}
                 }
             }
         }
@@ -719,6 +769,7 @@ mod tests {
             admin: true,
             disabled: false,
             hub: HubStatus::default(),
+            weekly: Default::default(),
             status: Some(ScraperStatus {
                 pid: 42,
                 started_at: 1_799_999_000_000,

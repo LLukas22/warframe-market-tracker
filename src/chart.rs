@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::api::{
     self, DAY_MS, EFFECT_MIN_RIVENS, EFFECT_MIN_STAT_RIVENS, HOUR_MS, HistoryPoint, StatEffect,
-    attribute_name,
+    TradeStats, TradeWeek, attribute_name,
 };
 use crate::ui::{format_date, format_datetime, format_plat, format_short_datetime, format_time};
 
@@ -44,8 +44,42 @@ pub(crate) fn nice_axis(max: f64) -> (f64, f64) {
     ((max / step).ceil() * step, step)
 }
 
+fn period_start(t: i64, hourly: bool) -> String {
+    if hourly {
+        format!("{} UTC", format_datetime(t))
+    } else {
+        format_date(t)
+    }
+}
+
+type TradeKind = fn(&TradeWeek) -> Option<&TradeStats>;
+
+/// The weapon's in-game trades in a report: of rivens never rerolled, and rerolled.
+const TRADE_KINDS: [(&str, TradeKind); 2] = [
+    ("unrolled", |w| w.unrolled.as_ref()),
+    ("rerolled", |w| w.rerolled.as_ref()),
+];
+/// An in-game median may stretch the y axis to this many times the asking prices' top; a
+/// higher one isn't drawn, as it would squash the asking prices.
+const TRADE_STRETCH: f64 = 1.5;
+
+/// A median keeps its half platinum.
+fn format_trade(median: f64) -> String {
+    if median.fract().abs() < 0.05 {
+        format_plat(median.round() as i64)
+    } else {
+        format!("{median:.1}")
+    }
+}
+
+/// Asking prices over time. `trades` are the weapon's weeks in Warframe's weekly riven report,
+/// drawn as in-game medians, see `trades::trade_steps`.
 #[component]
-pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
+pub fn PriceChart(
+    points: Vec<HistoryPoint>,
+    bucket_hours: u32,
+    #[props(default)] trades: Vec<TradeWeek>,
+) -> Element {
     let mut hovered = use_signal(|| None::<usize>);
     // Start at the last measured width: a remounted chart drawn at a guessed width
     // visibly rescales once it is measured.
@@ -60,11 +94,20 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
     let bucket_ms = i64::from(bucket_hours.max(1)) * HOUR_MS;
     let t0 = points.first().unwrap().t;
     let t1 = points.last().unwrap().t.max(t0 + bucket_ms);
-    let top = points
+    let steps = crate::trades::trade_steps(&trades, t0, t1);
+    let asking_top = points
         .iter()
         .map(|p| p.p75.max(p.gone_median.unwrap_or(0)))
         .max()
         .unwrap_or(1);
+    let trade_top = steps
+        .iter()
+        .flat_map(|(_, _, w)| TRADE_KINDS.map(|(_, get)| get(w).map(|s| s.median)))
+        .flatten()
+        .filter(|m| *m <= asking_top as f64 * TRADE_STRETCH)
+        .fold(0.0, f64::max)
+        .ceil() as i64;
+    let top = asking_top.max(trade_top);
     let (y_max, y_step) = nice_axis(top as f64);
 
     // Hourly buckets need times; a chart within one day needs nothing else.
@@ -75,14 +118,6 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
         (true, true) => format_time(t),
         (true, false) => format_short_datetime(t),
     };
-    let tooltip_label = move |t: i64| {
-        if hourly {
-            format!("{} UTC", format_datetime(t))
-        } else {
-            format_date(t)
-        }
-    };
-
     let x = move |t: i64| LEFT + (t - t0) as f64 / (t1 - t0) as f64 * (w - LEFT - RIGHT);
     let y = move |v: i64| TOP + (1.0 - v as f64 / y_max) * (H - TOP - BOTTOM);
 
@@ -146,15 +181,53 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
 
     let roomy = (w - LEFT - RIGHT) / points.len() as f64 >= MIN_MARKER_SPACING;
 
+    // The in-game medians as step lines, one per kind, broken where a week has none or one
+    // too high to draw.
+    let trade_lines: Vec<(String, &'static str, String)> = TRADE_KINDS
+        .iter()
+        .flat_map(|&(kind, get)| {
+            let mut runs: Vec<Vec<String>> = vec![Vec::new()];
+            for (start, end, week) in &steps {
+                match get(week).map(|s| s.median).filter(|m| *m <= y_max) {
+                    Some(m) => {
+                        let ty = TOP + (1.0 - m / y_max) * (H - TOP - BOTTOM);
+                        let run = runs.last_mut().unwrap();
+                        run.push(format!("{:.1},{ty:.1}", x(*start)));
+                        run.push(format!("{:.1},{ty:.1}", x(*end)));
+                    }
+                    None => runs.push(Vec::new()),
+                }
+            }
+            runs.into_iter()
+                .filter(|run| !run.is_empty())
+                .enumerate()
+                .map(move |(i, run)| (format!("{kind}-{i}"), kind, run.join(" ")))
+        })
+        .collect();
+
     let tooltip = hovered().and_then(|i| points.get(i)).map(|p| {
         let left = x(p.t) / w * 100.0;
         rsx! {
             div { class: "tooltip", style: "left: clamp(110px, {left:.1}%, calc(100% - 110px))",
-                div { class: "tooltip-date", "{tooltip_label(p.t)}" }
+                div { class: "tooltip-date", "{period_start(p.t, hourly)}" }
                 div { "median {format_plat(p.median)}" }
                 div { "p25–p75 {format_plat(p.p25)} – {format_plat(p.p75)}" }
+                div { class: "muted small", "of the {p.recent} newest prices" }
                 div { "cheapest {format_plat(p.min)}" }
                 div { class: "muted", "{p.count} rivens listed" }
+                if let Some((_, _, week)) = steps.iter().find(|(s, e, _)| (*s..*e).contains(&p.t)) {
+                    div { class: "tooltip-trade",
+                        "in-game median "
+                        {TRADE_KINDS
+                            .iter()
+                            .filter_map(|&(kind, get)| get(week).map(|s| {
+                                let m = format_trade(s.median);
+                                if kind == "rerolled" { format!("↻ {m}") } else { m }
+                            }))
+                            .collect::<Vec<_>>()
+                            .join(" · ")}
+                    }
+                }
                 if let Some(g) = p.gone_median {
                     div { class: "tooltip-gone", "{p.gone_count} disappeared · median {format_plat(g)}" }
                 }
@@ -224,6 +297,9 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
                         r: "{(2.0 + (p.gone_count as f64).sqrt() * 0.6).min(6.0):.1}",
                     }
                 }
+                for (key, kind, line) in trade_lines {
+                    polyline { key: "trade-{key}", class: "trade-line {kind}", points: "{line}" }
+                }
                 polyline { class: "min-line", points: "{min}" }
                 polyline { class: "median-line", points: "{median}" }
                 // Markers only where points have room; packed tight they'd merge into a
@@ -252,10 +328,58 @@ pub fn PriceChart(points: Vec<HistoryPoint>, bucket_hours: u32) -> Element {
             }
             {tooltip}
             div { class: "legend",
-                span { class: "legend-item", span { class: "swatch median" } "median" }
+                span { class: "legend-item",
+                    title: "Of recent asking prices: those listed or changed in the 2 days before each point, or the 20 newest where there were fewer. The cheapest is of every listed riven.",
+                    span { class: "swatch median" }
+                    "median"
+                }
                 span { class: "legend-item", span { class: "swatch band" } "25–75%" }
                 span { class: "legend-item", span { class: "swatch min" } "cheapest" }
                 span { class: "legend-item", span { class: "swatch gone" } "disappeared (≈ sold), size = count" }
+                if !steps.is_empty() {
+                    span { class: "legend-item",
+                        title: "What rivens for this weapon sold for in in-game trades on PC: the medians in Digital Extremes' weekly report, each from the week it covers until the next. The listings are asking prices.",
+                        span { class: "swatch trade" }
+                        "in-game unrolled"
+                        span { class: "swatch trade rerolled" }
+                        "↻ rerolled"
+                    }
+                }
+            }
+            PriceData { points, hourly }
+        }
+    }
+}
+
+#[component]
+fn PriceData(points: Vec<HistoryPoint>, hourly: bool) -> Element {
+    rsx! {
+        details { class: "chart-data",
+            summary { "View price data" }
+            div { class: "chart-table-scroll", tabindex: "0", role: "region", aria_label: "Price data",
+                table {
+                    caption { "Asking prices in platinum by UTC period" }
+                    thead { tr {
+                        for heading in ["Period (UTC)", "Median", "25th percentile", "75th percentile", "Cheapest", "Listed", "Newest prices", "Disappeared", "Disappeared median"] {
+                            th { scope: "col", "{heading}" }
+                        }
+                    } }
+                    tbody {
+                        for p in &points {
+                            tr { key: "{p.t}",
+                                th { scope: "row", "{period_start(p.t, hourly)}" }
+                                td { "{format_plat(p.median)}" }
+                                td { "{format_plat(p.p25)}" }
+                                td { "{format_plat(p.p75)}" }
+                                td { "{format_plat(p.min)}" }
+                                td { "{p.count}" }
+                                td { "{p.recent}" }
+                                td { "{p.gone_count}" }
+                                td { {p.gone_median.map(format_plat).unwrap_or_else(|| "—".into())} }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -397,8 +521,6 @@ const MIN_EFFECT_SCALE: f64 = std::f64::consts::LN_2;
 
 #[component]
 fn EffectRow(stat: StatEffect, scale: f64) -> Element {
-    // Touch screens have no title tooltips, so a tap shows the same text in the row.
-    let mut open = use_signal(|| false);
     let name = attribute_name(&stat.slug);
     let position = |effect: f64| (50.0 + effect.ln_1p() / scale * 50.0).clamp(0.0, 100.0);
     let (low, dot, high) = (
@@ -407,11 +529,6 @@ fn EffectRow(stat: StatEffect, scale: f64) -> Element {
         position(stat.high),
     );
     let width = high - low;
-    let center = if width > 0.0 {
-        (dot - low) / width * 100.0
-    } else {
-        50.0
-    };
     let kind = if stat.effect >= 0.0 {
         "effect-up"
     } else {
@@ -425,20 +542,22 @@ fn EffectRow(stat: StatEffect, scale: f64) -> Element {
         stat.rivens
     );
     rsx! {
-        li { class: "effect-row", title: "{tooltip}", onclick: move |_| open.toggle(),
-            span { class: "effect-name",
-                "{name}"
-                crate::riven_view::SplicedMark { slug: stat.slug.clone() }
-            }
-            span { class: "effect-track {kind}",
-                span {
-                    class: "effect-range",
-                    style: "left: {low:.2}%; width: {width:.2}%; --center: {center:.1}%",
+        li {
+            details {
+                summary { class: "effect-row",
+                    span { class: "effect-name",
+                        "{name}"
+                        crate::riven_view::SplicedMark { slug: stat.slug.clone() }
+                    }
+                    span { class: "effect-track {kind}",
+                        span {
+                            class: "effect-range",
+                            style: "left: {low:.2}%; width: {width:.2}%",
+                        }
+                        span { class: "effect-dot", style: "left: {dot:.2}%" }
+                    }
                 }
-                span { class: "effect-dot", style: "left: {dot:.2}%" }
-            }
-            if open() {
-                span { class: "effect-detail", "{tooltip}" }
+                p { class: "effect-detail", "{tooltip}" }
             }
         }
     }

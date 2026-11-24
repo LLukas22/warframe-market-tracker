@@ -26,6 +26,11 @@ pub(super) const BUCKET_HOURS: [u32; 7] = [1, 3, 6, 12, 24, 72, 168];
 /// The bucket width of empty charts.
 pub(super) const DAY_BUCKET_HOURS: u32 = 24;
 pub(super) const MAX_CHART_POINTS: i64 = 100;
+/// A chart point's median and quartiles are of the asking prices set (listed or changed) in
+/// this long before the bucket's end...
+const RECENT: i64 = 2 * wfmt_types::DAY_MS;
+/// ...and of at least this many, the newest, where fewer were.
+const RECENT_MIN: usize = 20;
 
 /// Chart bucket width for a time span: the finest that keeps the chart at `MAX_CHART_POINTS`
 /// points or fewer.
@@ -195,6 +200,8 @@ impl Data {
                     median_price: prices.get(prices.len() / 2).copied(),
                     min_price: prices.first().copied(),
                     last_scrape: w.last_scrape,
+                    // The server adds it, see `Weekly::popularity`.
+                    trade_popularity: None,
                 }
             })
             .collect();
@@ -605,6 +612,8 @@ impl Data {
         // or not a scrape happened to see it in that bucket: sweeps and the newest-listings
         // feed see very different parts of the market, and counting only what each bucket
         // saw made the chart jump between them. A relisted riven counts with its newest copy.
+        // The cheapest is of all of them; the median and quartiles only of recent asking
+        // prices (see `RECENT`), as listings stay up for weeks and their median barely moves.
         let history = if first_in_period.is_none() && start.is_some() {
             Vec::new()
         } else {
@@ -652,6 +661,8 @@ impl Data {
         const NOBODY: u32 = u32::MAX;
         // Per auction: its price as of the bucket's end, or one of the markers above.
         let mut price = self.auctions.same_ids(UNSEEN);
+        // Per auction: when its price was last set, by listing it or repricing it.
+        let mut priced_at = self.auctions.same_ids(0i64);
         // Per riven: its newest listed copy, kept up as listings appear and go, so a bucket
         // reads one price per riven rather than comparing every copy again.
         let mut newest = self.rivens.same_ids(NOBODY);
@@ -695,7 +706,18 @@ impl Data {
                 let p = o.price();
                 let counts =
                     Self::price_ok(q, p, o.direct_sell) && (id_search || !rows[a].outlier_price(p));
-                price[a] = p.filter(|_| counts).unwrap_or(NO_PRICE);
+                let new = p.filter(|_| counts).unwrap_or(NO_PRICE);
+                if price[a] == UNSEEN {
+                    let auction = &self.auctions[a];
+                    priced_at[a] = if auction.created > 0 {
+                        auction.created
+                    } else {
+                        auction.first_seen
+                    };
+                } else if price[a] != new {
+                    priced_at[a] = o.t;
+                }
+                price[a] = new;
             }
             // Gone before this bucket: gone for every later one too. A listing that goes in
             // this bucket was still listed in it.
@@ -720,20 +742,33 @@ impl Data {
                 in_listed[r] = keep;
                 keep
             });
-            let mut v: Vec<i64> = listed
+            let mut sample: Vec<(i64, i64)> = listed
                 .iter()
-                .map(|&r| price[AuctionId::from_index(newest[r] as usize)])
-                .filter(|&p| p != NO_PRICE)
+                .map(|&r| AuctionId::from_index(newest[r] as usize))
+                .map(|a| (priced_at[a], price[a]))
+                .filter(|&(_, p)| p != NO_PRICE)
                 .collect();
+            let count = sample.len();
+            let min = sample.iter().map(|&(_, p)| p).min();
+            // The recent asking prices, and at least the newest few.
+            let since = end - RECENT;
+            if sample.iter().filter(|&&(at, _)| at >= since).count() >= RECENT_MIN {
+                sample.retain(|&(at, _)| at >= since);
+            } else if sample.len() > RECENT_MIN {
+                let older = sample.len() - RECENT_MIN;
+                sample.select_nth_unstable_by_key(older, |&(at, _)| at);
+                sample.drain(..older);
+            }
+            let mut v: Vec<i64> = sample.into_iter().map(|(_, p)| p).collect();
             let gone: Vec<i64> = gone_by_bucket
                 .remove(&b)
                 .map(|g| g.into_values().collect())
                 .unwrap_or_default();
             b = end;
-            if v.is_empty() {
+            let Some(min) = min else {
                 continue;
-            }
-            // Four ranks are needed, not a sorted list: select them, which is linear.
+            };
+            // Three ranks are needed, not a sorted list: select them, which is linear.
             let top = (v.len() - 1) as f64;
             let rank = |p: f64| (top * p).round() as usize;
             let (r25, r50, r75) = (rank(0.25), rank(0.5), rank(0.75));
@@ -748,11 +783,10 @@ impl Data {
             } else {
                 median_value
             };
-            // Everything up to rank 25 is at most p25, so the minimum is among those.
-            let min = v[..=r25].iter().copied().min().unwrap_or(median_value);
             history.push(HistoryPoint {
                 t: end - bucket,
-                count: v.len() as u32,
+                count: count as u32,
+                recent: v.len() as u32,
                 min,
                 p25,
                 median: median_value,

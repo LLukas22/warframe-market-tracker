@@ -19,6 +19,9 @@ anyhow.workspace = true
 arrow.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"], optional = true }
+flate2.workspace = true
+# Warframe's weekly riven report is a JavaScript literal rather than JSON, see `weekly`.
+json5 = "0.4"
 parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true

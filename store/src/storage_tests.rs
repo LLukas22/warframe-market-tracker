@@ -715,6 +715,43 @@ fn history_filters_combine_and_paginate_active_and_gone_rivens() {
 }
 
 #[test]
+fn the_chart_median_is_of_recent_asking_prices_and_the_cheapest_of_all() {
+    let now = now_ms();
+    let chart = |recent: usize| {
+        let mut inner = Data::default();
+        let weapon = inner.intern_weapon("w", "W", Some(WeaponClass::Rifle));
+        for i in 0..30 {
+            add_auction(
+                &mut inner,
+                weapon,
+                &format!("old{i}"),
+                100,
+                now - 20 * DAY_MS,
+            );
+        }
+        for i in 0..recent {
+            add_auction(&mut inner, weapon, &format!("new{i}"), 300, now - DAY_MS);
+        }
+        inner.finish_load();
+        let history = inner.search(&all_time(), now_ms()).unwrap().history;
+        (
+            history.first().cloned().unwrap(),
+            history.last().cloned().unwrap(),
+        )
+    };
+
+    // Plenty of recent prices: they alone make the median.
+    let (first, last) = chart(25);
+    assert_eq!((first.count, first.recent, first.median), (30, 30, 100));
+    assert_eq!((last.count, last.recent), (55, 25));
+    assert_eq!((last.median, last.p25, last.min), (300, 300, 100));
+
+    // Few: the newest 20 do, these and 15 older ones.
+    let (_, last) = chart(5);
+    assert_eq!((last.count, last.recent, last.median), (35, 20, 100));
+}
+
+#[test]
 fn period_limits_chart_and_gone_listings_but_not_current_ones() {
     let now = now_ms();
     let mut inner = Data::default();

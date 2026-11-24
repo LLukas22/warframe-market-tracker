@@ -33,8 +33,10 @@ const MANIFEST: &str = "wfmt-export.json";
 const FORMAT: u32 = 1;
 /// Everything that makes up a dataset. The scraper's status and locks stay with their server.
 const RETENTION: &str = "storage/raw-retention.json";
-const ENTRIES: [&str; 7] = [
+const ENTRIES: [&str; 8] = [
     PARQUET_DIR,
+    // An export without it keeps this server's weeks.
+    wfmt_dataset::weekly::DIR,
     "raw",
     "seen",
     "cache",
@@ -532,6 +534,10 @@ mod tests {
         write(&root.join("seen/rubico.json"), marker.as_bytes());
         write(&root.join("raw/2026-11-01/.committed/a.json"), b"[]");
         write(&root.join("cache/images/rubico.png"), marker.as_bytes());
+        write(
+            &root.join("weekly_rivens/pc/2026-11-16.parquet"),
+            marker.as_bytes(),
+        );
     }
 
     fn exported(root: &Path, out: &Path) -> PathBuf {
@@ -555,6 +561,7 @@ mod tests {
         assert_eq!(fs::read(stage.0.join("seen/rubico.json")).unwrap(), b"one");
         assert!(stage.0.join("raw/2026-11-01/.committed/a.json").exists());
         assert!(stage.0.join(RETENTION).exists());
+        assert!(stage.0.join("weekly_rivens/pc/2026-11-16.parquet").exists());
         for excluded in [
             "scraper",
             "storage/lock",

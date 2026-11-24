@@ -8,7 +8,9 @@
 //! in the same commit. `hub/upload.json` remembers the files of every uploaded day, so the hourly
 //! check only contacts the Hub when a day is new or has changed. Today is never uploaded, it's
 //! still being written. Days that only exist on the Hub stay there. The weapon list goes along
-//! as `riven_weapons.json`, so servers that pull the data have names, groups and images.
+//! as `riven_weapons.json`, so servers that pull the data have names, groups and images, and so
+//! do the weeks of Warframe's riven trade report (`weekly_rivens/`, see `crate::weekly`) that
+//! the Hub doesn't have yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -25,7 +27,7 @@ use hf_hub::repository::{AddSource, CommitOperation, RepoTreeEntry};
 use hf_hub::{HFClient, HFRepository, RepoTypeDataset};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
-use wfmt_dataset::{DatasetLock, compact, durable_write, maintenance};
+use wfmt_dataset::{DatasetLock, compact, durable_write, maintenance, weekly};
 
 use crate::api::HubStatus;
 
@@ -122,6 +124,9 @@ struct State {
     /// [`fingerprint`] of the weapon list last uploaded.
     #[serde(default)]
     catalog: Option<u64>,
+    /// The weeks of Warframe's riven trade report last uploaded, with their sizes.
+    #[serde(default)]
+    weekly: BTreeMap<String, u64>,
 }
 
 fn load_state(root: &Path, dataset: &str) -> Result<State> {
@@ -331,6 +336,8 @@ struct Prepared {
     held_back: Vec<String>,
     /// [`fingerprint`] of the weapon list, copied into the snapshot, if the scraper has one.
     catalog: Option<u64>,
+    /// The stored weeks of the weekly riven report, linked into the snapshot.
+    weekly: BTreeMap<String, u64>,
 }
 
 /// 64-bit FNV-1a: tells whether the weapon list changed since it was uploaded.
@@ -402,6 +409,7 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
             uncompacted: true,
             held_back: Vec::new(),
             catalog: None,
+            weekly: BTreeMap::new(),
         });
     };
     // Replaced in one rename, so a plain read sees either the old list or the new one.
@@ -414,6 +422,11 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
+    // Written once and never changed, so they need no lock.
+    let weekly = weekly::files(root)?;
+    for path in weekly.keys() {
+        link_into(&snapshot, root, path, path)?;
+    }
     let _lock = DatasetLock::read(root)?;
     let mut pending = Vec::new();
     let mut held_back = Vec::new();
@@ -429,13 +442,7 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
             continue;
         }
         for path in files.keys() {
-            let link = snapshot.join(path);
-            fs::create_dir_all(link.parent().unwrap())?;
-            let source = root.join(PARQUET_DIR).join(path);
-            if fs::hard_link(&source, &link).is_err() {
-                fs::copy(&source, &link)
-                    .with_context(|| format!("copying {} for upload", source.display()))?;
-            }
+            link_into(&snapshot, root, Path::new(PARQUET_DIR).join(path), path)?;
         }
         pending.push(Day { date, files });
     }
@@ -445,7 +452,20 @@ fn prepare(root: &Path, dataset: &str, forced: bool) -> Result<Prepared> {
         uncompacted: false,
         held_back,
         catalog,
+        weekly,
     })
+}
+
+/// Links `source` (relative to `root`) into the snapshot at `path`, or copies it.
+fn link_into(snapshot: &Path, root: &Path, source: impl AsRef<Path>, path: &str) -> Result<()> {
+    let link = snapshot.join(path);
+    fs::create_dir_all(link.parent().unwrap())?;
+    let source = root.join(source);
+    if fs::hard_link(&source, &link).is_err() {
+        fs::copy(&source, &link)
+            .with_context(|| format!("copying {} for upload", source.display()))?;
+    }
+    Ok(())
 }
 
 /// Every file in the repository with its size, at `revision` or the newest commit.
@@ -531,6 +551,8 @@ fn dataset_card(dataset: &str, settings: &[String]) -> String {
             header.push("  default: true".into());
         }
     }
+    header.push(format!("- config_name: {}", weekly::DIR));
+    header.push(format!("  data_files: \"{}/*/*.parquet\"", weekly::DIR));
     let header = header.join("\n");
     format!(
         r#"---
@@ -555,6 +577,14 @@ hours and follows the site's newest listings in between. Each finished UTC day i
 - `gone`: listings that disappeared (sold or removed), at `detected_at`. `reason` is `missing`
   (absent from a search that returned everything), `verified` (warframe.market said it no longer
   exists) or `expired` (not seen for four days).
+
+- `weekly_rivens`: Warframe's own weekly riven trade report, which Digital Extremes publishes
+  for each `platform` (`pc`, `ps4`, `xb1`, `swi`) every Monday and replaces a week later. Unlike
+  the auctions, these are prices paid in in-game trades. One row per weapon (`compatibility`, its
+  English name), rerolled or not, with `avg`, `stddev`, `min`, `max` and `median` in platinum, and
+  `pop`, how often it was traded compared to the rest, from 1 to 100. Rows without a weapon are
+  veiled rivens of an `item_type`. `date` is the day the report was published, a file per
+  platform and week in `weekly_rivens/<platform>/<date>.parquet`.
 
 `riven_weapons.json` is warframe.market's weapon list, with names, groups and images. It isn't a
 table, it's there for trackers that use this dataset instead of scraping.
@@ -620,6 +650,29 @@ fn listing(items: &[String]) -> String {
     }
 }
 
+/// Counts the files of the weekly riven report: one per platform and week.
+fn weeks_text(count: usize) -> String {
+    if count == 1 {
+        "1 weekly riven report".into()
+    } else {
+        format!("{count} weekly riven reports")
+    }
+}
+
+/// Uploads the weeks of the riven trade report the repository lacks, or has differently.
+/// Weeks only on the Hub stay there.
+fn weekly_operations(
+    weekly: &BTreeMap<String, u64>,
+    remote: &BTreeMap<String, u64>,
+    snapshot: &Path,
+) -> Vec<CommitOperation> {
+    weekly
+        .iter()
+        .filter(|(path, size)| remote.get(*path) != Some(*size))
+        .map(|(path, _)| CommitOperation::add_file(path, snapshot.join(path)))
+        .collect()
+}
+
 fn days_text(count: usize) -> String {
     if count == 1 {
         "1 day".into()
@@ -645,6 +698,7 @@ async fn sync(
         uncompacted,
         held_back,
         catalog,
+        weekly,
     } = prepared;
     if uncompacted {
         return Ok("Waiting for the scraper's first maintenance pass.".into());
@@ -656,7 +710,8 @@ async fn sync(
         [day] => format!("{outcome} {day} waits for compaction."),
         days => format!("{outcome} {} wait for compaction.", listing(days)),
     };
-    if pending.is_empty() && !check_card && !catalog_changed {
+    let weekly_changed = forced || weekly != state.weekly;
+    if pending.is_empty() && !check_card && !catalog_changed && !weekly_changed {
         return Ok(held_back_note("Up to date.".into()));
     }
     let remote = remote_files(repo, None).await.with_context(|| {
@@ -682,6 +737,13 @@ async fn sync(
     if upload_catalog {
         extras.push(CommitOperation::add_file(CATALOG, snapshot.join(CATALOG)));
     }
+    let weekly_ops = weekly_operations(&weekly, &remote, &snapshot);
+    let weeks_uploaded = weekly_ops.len();
+    extras.extend(weekly_ops);
+    if weekly_changed && weeks_uploaded == 0 {
+        state.weekly.clone_from(&weekly);
+        save_state(root, &state)?;
+    }
 
     // Days that need changes, grouped into commits of a reasonable size.
     let mut batches: Vec<(Vec<Day>, Vec<CommitOperation>)> = Vec::new();
@@ -706,11 +768,18 @@ async fn sync(
         hub.publish(&state);
     }
     if batches.is_empty() && !extras.is_empty() {
-        let message = match (card_added, upload_catalog) {
-            (true, true) => "Add the dataset card and the weapon list",
-            (true, false) => "Add the dataset card",
-            _ => "Update the weapon list",
-        };
+        let mut parts = Vec::new();
+        if card_added {
+            parts.push("the dataset card".to_owned());
+        }
+        if upload_catalog {
+            parts.push("the weapon list".to_owned());
+        }
+        if weeks_uploaded > 0 {
+            parts.push(weeks_text(weeks_uploaded));
+        }
+        let message = format!("Add {}", listing(&parts));
+        let message = message.as_str();
         repo.create_commit()
             .operations(std::mem::take(&mut extras))
             .commit_message(message)
@@ -719,8 +788,9 @@ async fn sync(
             .with_context(|| format!("{message} failed"))?;
         if upload_catalog {
             state.catalog = catalog;
-            save_state(root, &state)?;
         }
+        state.weekly.clone_from(&weekly);
+        save_state(root, &state)?;
     }
 
     let mut uploaded = 0;
@@ -749,6 +819,9 @@ async fn sync(
         if with_extras && upload_catalog {
             state.catalog = catalog;
         }
+        if with_extras {
+            state.weekly.clone_from(&weekly);
+        }
         save_state(root, &state)?;
         hub.publish(&state);
     }
@@ -765,6 +838,9 @@ async fn sync(
     }
     if upload_catalog {
         done.push("the weapon list".into());
+    }
+    if weeks_uploaded > 0 {
+        done.push(weeks_text(weeks_uploaded));
     }
     let outcome = if !done.is_empty() {
         format!("Uploaded {}.", listing(&done))
@@ -1005,11 +1081,40 @@ mod tests {
     }
 
     #[test]
+    fn only_new_or_changed_weeks_are_uploaded() {
+        let local = BTreeMap::from([
+            ("weekly_rivens/pc/2026-11-09.parquet".to_owned(), 10),
+            ("weekly_rivens/pc/2026-11-16.parquet".to_owned(), 12),
+            ("weekly_rivens/ps4/2026-11-16.parquet".to_owned(), 8),
+        ]);
+        let remote = BTreeMap::from([
+            ("weekly_rivens/pc/2026-11-02.parquet".to_owned(), 9),
+            ("weekly_rivens/pc/2026-11-09.parquet".to_owned(), 10),
+            ("weekly_rivens/ps4/2026-11-16.parquet".to_owned(), 7),
+        ]);
+        let paths: Vec<String> = weekly_operations(&local, &remote, Path::new("snap"))
+            .into_iter()
+            .map(|op| match op {
+                CommitOperation::Add { path_in_repo, .. } => path_in_repo,
+                CommitOperation::Delete { path_in_repo } => panic!("deletes {path_in_repo}"),
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "weekly_rivens/pc/2026-11-16.parquet",
+                "weekly_rivens/ps4/2026-11-16.parquet"
+            ]
+        );
+    }
+
+    #[test]
     fn card_lists_every_table_and_links_back() {
         let card = dataset_card("LLukas22/wf-riven-data", &[]);
         for table in Table::ALL {
             assert!(card.contains(&format!("data_files: \"{table}/*/*.parquet\"")));
         }
+        assert!(card.contains("data_files: \"weekly_rivens/*/*.parquet\""));
         assert!(card.starts_with("---\npretty_name: Warframe riven auctions\nconfigs:\n"));
         assert!(card.contains("load_dataset(\"LLukas22/wf-riven-data\", \"auctions\""));
         assert!(card.contains("(https://github.com/LLukas22/warframe-market-tracker)"));

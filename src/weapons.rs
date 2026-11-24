@@ -83,7 +83,7 @@ pub fn WeaponImage(slug: String, has_image: bool, name: String, size: &'static s
 #[component]
 pub fn WeaponPicker(weapons: Vec<WeaponInfo>) -> Element {
     let selected = match use_route::<Route>() {
-        Route::Weapon { slug } => Some(slug),
+        Route::Weapon { slug, .. } => Some(slug),
         _ => None,
     };
     rsx! { WeaponDropdown { weapons, selected } }
@@ -104,6 +104,7 @@ pub fn WeaponDropdown(
     let mut active = use_signal(|| 0usize);
 
     let market = on_change.is_none();
+    let link_view = crate::ui::MarketView::from(filters());
     let input_id = if market {
         "weapon-search"
     } else {
@@ -140,6 +141,9 @@ pub fn WeaponDropdown(
     let active_index = active().min(count.saturating_sub(1));
 
     let id_like = market && looks_like_riven_id(&needle);
+    let expanded = open() && (count > 0 || id_like);
+    let menu_id = format!("{input_id}-options");
+    let option_id = |i: usize| format!("{input_id}-option-{i}");
     let close = move || {
         let (mut text, mut open, mut active) = (text, open, active);
         text.set(String::new());
@@ -150,12 +154,18 @@ pub fn WeaponDropdown(
         if let Some(on_change) = on_change {
             on_change.call(Some(slug));
         } else {
-            navigator.push(Route::Weapon { slug });
+            navigator.push(Route::Weapon {
+                slug,
+                view: filters.peek().clone().into(),
+            });
         }
         close();
     };
     let mut find_id = move |id: String| {
-        navigator.push(Route::Search { id });
+        navigator.push(Route::Search {
+            id,
+            view: filters.peek().clone().into(),
+        });
         text.set(String::new());
         open.set(false);
     };
@@ -185,11 +195,11 @@ pub fn WeaponDropdown(
                     },
                     class: if has_selection { "has-selection" } else { "" },
                     value: if !market && let Some(w) = selected { w.name.clone() } else { text() },
-                    role: (!market).then_some("combobox"),
-                    aria_autocomplete: (!market).then_some("list"),
-                    aria_expanded: (!market).then(|| open() && count > 0),
-                    aria_controls: (!market && open() && count > 0).then_some("alert-weapon-options"),
-                    aria_activedescendant: (!market && open() && count > 0).then(|| format!("alert-weapon-option-{active_index}")),
+                    role: "combobox",
+                    aria_autocomplete: "list",
+                    aria_expanded: expanded,
+                    aria_controls: expanded.then_some(menu_id.clone()),
+                    aria_activedescendant: expanded.then(|| option_id(if id_like { 0 } else { active_index })),
                     autocomplete: "off",
                     spellcheck: "false",
                     onfocus: move |_| open.set(true),
@@ -233,7 +243,7 @@ pub fn WeaponDropdown(
                 }
                 if has_selection && market {
                     Link {
-                        to: Route::Market {},
+                        to: Route::Market { view: link_view.clone() },
                         class: "picker-clear",
                         title: "All weapons",
                         onclick: move |_| {
@@ -254,8 +264,8 @@ pub fn WeaponDropdown(
                 }
             }
             if open() && id_like {
-                div { class: "picker-menu",
-                    div {
+                div { class: "picker-menu", id: menu_id.clone(), role: "listbox", aria_label: "Riven ID",
+                    div { id: option_id(0), role: "option", aria_selected: true,
                         class: "picker-item active",
                         onmousedown: move |e: MouseEvent| {
                             e.prevent_default();
@@ -270,11 +280,11 @@ pub fn WeaponDropdown(
                 }
             } else if open() && count > 0 {
                 div { class: "picker-menu",
-                    id: (!market).then_some("alert-weapon-options"),
-                    role: (!market).then_some("listbox"),
-                    aria_label: (!market).then_some("Weapons"),
+                    id: menu_id.clone(),
+                    role: "listbox",
+                    aria_label: "Weapons",
                     if needle.is_empty() {
-                        div { class: "picker-hint", aria_hidden: !market, "Most valuable right now" }
+                        div { class: "picker-hint", aria_hidden: true, "Most valuable right now" }
                     }
                     for (i, w) in matches.into_iter().enumerate() {
                         div {
@@ -292,14 +302,15 @@ pub fn WeaponDropdown(
                             onmousedown: move |e: MouseEvent| e.prevent_default(),
                             if market {
                                 Link {
-                                    to: Route::Weapon { slug: w.slug.clone() },
+                                    to: Route::Weapon { slug: w.slug.clone(), view: link_view.clone() },
+                                    id: option_id(i), role: "option", aria_selected: i == active_index, tabindex: "-1",
                                     class: if i == active_index { "picker-item active" } else { "picker-item" },
                                     onclick: move |_| close(),
                                     WeaponSuggestion { weapon: w.clone(), show_price: true }
                                 }
                             } else {
                                 button {
-                                    id: "alert-weapon-option-{i}",
+                                    id: option_id(i),
                                     role: "option",
                                     aria_selected: i == active_index,
                                     r#type: "button", tabindex: -1,
@@ -314,9 +325,9 @@ pub fn WeaponDropdown(
                         }
                     }
                 }
-            } else if !market && open() && !needle.is_empty() {
+            } else if open() && !needle.is_empty() {
                 div { class: "picker-menu", role: "status",
-                    div { class: "picker-empty", "No weapons match" }
+                    div { class: "picker-empty", "No weapons match ‘{needle}’" }
                 }
             }
         }
@@ -346,6 +357,8 @@ fn WeaponSuggestion(weapon: WeaponInfo, show_price: bool) -> Element {
         }
     }
 }
+
+const TRADE_POPULARITY_HELP: &str = "How much this weapon's rivens were traded in game on PC last week, from 1 to 100 for the most traded weapon. From Digital Extremes' weekly riven report, which gives no counts.";
 
 /// Header card for the selected weapon.
 #[component]
@@ -400,6 +413,12 @@ pub fn WeaponHeader(weapon: WeaponInfo, now: Option<i64>) -> Element {
                         if let Some(p) = w.gone_median_7d { " · {format_plat(p)}p" }
                     }
                 }
+                if let Some(p) = w.trade_popularity {
+                    div { class: "kpi", title: TRADE_POPULARITY_HELP,
+                        div { class: "kpi-value", "{p}" }
+                        div { class: "kpi-label", "traded in game" }
+                    }
+                }
             }
         }
     }
@@ -409,17 +428,19 @@ pub fn WeaponHeader(weapon: WeaponInfo, now: Option<i64>) -> Element {
 enum GridSort {
     Value,
     Listings,
+    Traded,
     Name,
 }
 
 impl GridSort {
-    const ALL: [Self; 3] = [Self::Value, Self::Listings, Self::Name];
+    const ALL: [Self; 4] = [Self::Value, Self::Listings, Self::Traded, Self::Name];
 
     /// How the `<select>` names it.
     fn key(self) -> &'static str {
         match self {
             Self::Value => "value",
             Self::Listings => "listings",
+            Self::Traded => "traded",
             Self::Name => "name",
         }
     }
@@ -428,6 +449,7 @@ impl GridSort {
         match self {
             Self::Value => "Most valuable",
             Self::Listings => "Most listed",
+            Self::Traded => "Most traded in game",
             Self::Name => "Name",
         }
     }
@@ -462,6 +484,7 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
     } = use_context();
     let cache = use_context::<crate::ui::ViewCache>();
     let filters = use_context::<Signal<crate::api::Query>>();
+    let link_view = crate::ui::MarketView::from(filters());
     // Hovering a card starts loading its page, so the click usually finds it ready.
     let prefetch = move |slug: String| cache.prefetch_weapon(filters.peek().clone(), slug);
 
@@ -477,6 +500,9 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                 .then(b.listings.cmp(&a.listings))
         }),
         GridSort::Listings => list.sort_by_key(|w| std::cmp::Reverse(w.listings)),
+        GridSort::Traded => {
+            list.sort_by_key(|w| std::cmp::Reverse((w.trade_popularity, w.listings)));
+        }
         GridSort::Name => list.sort_by(|a, b| a.name.cmp(&b.name)),
     }
     let total = list.len();
@@ -518,7 +544,7 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                 }
             }
         }
-        div { class: "weapon-grid",
+        div { class: if show_all() { "weapon-grid" } else { "weapon-grid collapsed" },
             for w in list {
                 // A cell around the link, which takes no event handlers besides clicks.
                 div {
@@ -529,7 +555,7 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                         move |_| prefetch(slug.clone())
                     },
                     Link {
-                        to: Route::Weapon { slug: w.slug.clone() },
+                        to: Route::Weapon { slug: w.slug.clone(), view: link_view.clone() },
                         class: if w.listings == 0 { "weapon-card empty" } else { "weapon-card" },
                         WeaponImage {
                             slug: w.slug.clone(),
@@ -555,13 +581,19 @@ pub fn WeaponGrid(weapons: Vec<WeaponInfo>) -> Element {
                                 " · {w.gone_7d} gone"
                             }
                         }
+                        if let Some(p) = w.trade_popularity {
+                            div { class: "muted small", title: TRADE_POPULARITY_HELP,
+                                "in-game popularity {p}"
+                            }
+                        }
                     }
                 }
             }
         }
-        if total > GRID_COLLAPSED {
+        if total > 4 {
             button {
-                class: "show-all",
+                class: if total > GRID_COLLAPSED { "show-all" } else { "show-all phone-only" },
+                aria_expanded: show_all(),
                 onclick: move |_| show_all.toggle(),
                 if show_all() { "Show fewer" } else { "Show all {total} weapons" }
             }

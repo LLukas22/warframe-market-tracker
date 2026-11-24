@@ -15,7 +15,8 @@ expression: data.overview(NOW)
       "min_price": 10,
       "gone_7d": 0,
       "gone_median_7d": null,
-      "last_scrape": 1793620800000
+      "last_scrape": 1793620800000,
+      "trade_popularity": null
     }
   ],
   "attributes": [

@@ -22,10 +22,13 @@ mod people;
 mod riven_view;
 mod scan;
 mod scraper;
+mod trades;
 #[cfg(feature = "server")]
 mod transfer;
 mod ui;
 mod weapons;
+#[cfg(feature = "server")]
+mod weekly;
 #[cfg(feature = "server")]
 mod worker;
 
@@ -54,6 +57,7 @@ fn main() {
         transfer::recover(app.data_dir.clone()).await?;
         app.scraper.start(&app.data_dir).await?;
         app.hub.start(app.data_dir.clone());
+        app.weekly.start(app.data_dir.clone());
         // Load the data in the background while the server starts listening, so the first
         // visitor doesn't pay for it. Pages rendered before it's done fetch from the browser.
         tokio::task::spawn_blocking(|| app.store.refresh());

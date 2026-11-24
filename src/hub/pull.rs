@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use chrono::NaiveDate;
 use hf_hub::{HFRepository, RepoTypeDataset};
 use serde::{Deserialize, Serialize};
-use wfmt_dataset::{DatasetLock, Transaction, durable_write};
+use wfmt_dataset::{DatasetLock, Transaction, durable_write, weekly};
 
 use super::{CATALOG, Hub, LOCAL_CATALOG, Repo, day_files, now_ms};
 use wfmt_dataset::layout::{DATE_PREFIX, PARQUET_DIR, Table};
@@ -259,6 +259,11 @@ async fn pull(
         }
     }
 
+    let reports = pull_weekly(repo, &commit, &dir, root, &remote).await?;
+    if reports > 0 {
+        state.updated_at = Some(now_ms());
+    }
+
     state.last_day = remote
         .keys()
         .filter_map(|path| table_file(path))
@@ -268,12 +273,43 @@ async fn pull(
     durable_write(&root.join(STATE), &serde_json::to_vec(&state)?)?;
     publish(hub, &state);
 
-    Ok(match (total, catalog_updated) {
-        (0, false) if forced => "Everything was already here.".into(),
-        (0, false) => "Up to date.".into(),
-        (0, true) => "Updated the weapon list.".into(),
-        (n, _) => format!("Downloaded {}.", super::days_text(n)),
+    let mut done = Vec::new();
+    if total > 0 {
+        done.push(super::days_text(total));
+    }
+    if reports > 0 {
+        done.push(super::weeks_text(reports));
+    }
+    Ok(match (done.is_empty(), catalog_updated) {
+        (true, false) if forced => "Everything was already here.".into(),
+        (true, false) => "Up to date.".into(),
+        (true, true) => "Updated the weapon list.".into(),
+        (false, _) => format!("Downloaded {}.", super::listing(&done)),
     })
+}
+
+/// Downloads the weeks of Warframe's riven trade report that aren't here, or are different.
+/// Weeks only here stay. Answers with how many it downloaded.
+async fn pull_weekly(
+    repo: &HFRepository<RepoTypeDataset>,
+    commit: &str,
+    dir: &Path,
+    root: &Path,
+    remote: &BTreeMap<String, u64>,
+) -> Result<usize> {
+    let local = weekly::files(root)?;
+    let mut count = 0;
+    for (path, size) in remote {
+        if weekly::parse_path(path).is_none() || local.get(path) == Some(size) {
+            continue;
+        }
+        download(repo, commit, dir, path, *size).await?;
+        let file = dir.join(path);
+        weekly::read(&file).with_context(|| format!("{path} from the dataset is damaged"))?;
+        durable_write(&root.join(path), &fs::read(&file)?)?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 #[cfg(test)]

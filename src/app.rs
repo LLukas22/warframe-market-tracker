@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::hub::Hub;
 use crate::images::Images;
 use crate::transfer::Transfers;
+use crate::weekly::Weekly;
 use crate::worker::Scraper;
 
 pub struct App {
@@ -28,6 +29,8 @@ pub struct App {
     pub transfers: Transfers,
     /// Checks listings on warframe.market for the riven page.
     pub availability: Availability,
+    /// Warframe's weekly riven trade report.
+    pub weekly: Weekly,
     /// The screenshot scanner's files.
     pub ocr_dir: PathBuf,
     /// [`App::stop_on_signal`] is listening.
@@ -46,6 +49,7 @@ pub fn init(config: Config) -> Result<&'static App> {
         images: Images::new(&config.data_dir)?,
         transfers: Transfers::default(),
         availability: Availability::new()?,
+        weekly: Weekly::new()?,
         ocr_dir: config.ocr_dir,
         data_dir: config.data_dir,
         listening: AtomicBool::new(false),

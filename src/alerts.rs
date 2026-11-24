@@ -36,7 +36,7 @@ fn AlertsView(weapon: Option<String>) -> Element {
     rsx! {
         main { class: "alerts-page", id: "riven-alerts",
             div { class: "alerts-intro",
-                h1 { "Riven alerts" }
+                h1 { id: "main-content", tabindex: "-1", "Riven alerts" }
                 p { class: "muted", "Get pinged when a Riven for your weapon is listed at or under your price." }
             }
             div { class: "alert-notice", id: "alerts-notice", "data-state": "loading",

@@ -9,5 +9,6 @@ pub mod maintenance;
 pub mod schema;
 pub mod sink;
 pub mod tx;
+pub mod weekly;
 
 pub use tx::{DatasetLock, PARQUET_ZSTD_LEVEL, Transaction, durable_write, sync_dir, unique_id};

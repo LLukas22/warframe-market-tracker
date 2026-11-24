@@ -53,6 +53,24 @@ seller on the same riven most likely bought it, though warframe.market doesn't c
 rerolled riven counts as a new one. Each seller's page lists their rivens, with who listed each
 one before and after them. Seller names on listings and riven pages link there.
 
+## In-game trade prices
+
+Every Monday, Digital Extremes publishes what rivens sold for in in-game trades over the past
+week, for each platform: per weapon, rerolled or not, the median, average, spread, range and a
+popularity score from 1 to 100. Listings on warframe.market are asking prices, these were paid.
+A weapon's price chart draws the PC medians as two faint lines under the asking prices, solid
+for rivens never rerolled and dashed for rerolled ones, each report from the week it covers until
+the next one's. The report gives no trade counts, only a popularity relative to the most traded
+riven: adding up a weapon's two, scaled so the most traded weapon is 100, gives its in-game
+popularity, shown on its card and page, and the weapons can be sorted by it.
+
+DE only ever publishes the current week, so the tracker keeps them. Every server checks the
+reports every 6 hours and saves each new week in `weekly_rivens/<platform>/<date>.parquet` in
+the data folder, with the response as it came in `weekly_rivens/raw/`. An uploading server adds
+the weeks to its Hugging Face dataset as the `weekly_rivens` table, and a pulling server downloads
+the weeks it doesn't have, so it gets the history from before it started. The scraper page shows
+the newest week and the last check.
+
 ## Browser alerts
 
 Open **Alerts** to save a weapon, maximum platinum price, seller status, and minimum seller

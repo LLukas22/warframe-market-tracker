@@ -256,7 +256,7 @@ pub fn PeoplePage() -> Element {
 
     rsx! {
         document::Title { "People · Riven Tracker" }
-        main { class: "people-page",
+        main { id: "main-content", tabindex: "-1", class: "people-page",
             div { class: "alerts-intro",
                 h1 { "People" }
                 p { class: "muted",
@@ -521,7 +521,7 @@ fn PersonContent(name: String) -> Element {
     let shown = pages.shown.read().clone();
     let error = pages.error.read().clone();
     rsx! {
-        main { class: "riven-page person-page",
+        main { id: "main-content", tabindex: "-1", class: "riven-page person-page",
             match (shown, error) {
                 (None, Some(e)) if e.contains(NOT_FOUND) => rsx! {
                     document::Title { "Seller not found · Riven Tracker" }
@@ -544,11 +544,12 @@ fn PersonContent(name: String) -> Element {
                         p { class: "error", role: "alert", "Could not refresh this seller: {e}" }
                     }
                     div { class: "listing-bar",
-                        div { class: "listing-tabs", role: "tablist", aria_label: "Rivens",
+                        div { class: "listing-tabs", role: "tablist", "focusgroup": "tablist nomemory", aria_label: "Rivens",
                             for f in PersonFilter::ALL {
                                 button {
                                     key: "{f:?}",
-                                    role: "tab",
+                                    role: "tab", r#type: "button", id: "seller-tab-{f:?}",
+                                    "focusgroupstart": (filter() == f).then_some(""),
                                     title: filter_title(f),
                                     aria_selected: filter() == f,
                                     aria_controls: "person-rivens",
@@ -562,7 +563,7 @@ fn PersonContent(name: String) -> Element {
                         PeoplePeriodPicker { period: asked.2, now: Some(data.server_time) }
                     }
                     div { class: if loading { "results loading" } else { "results" }, aria_busy: loading,
-                        PersonRivens { detail: data.clone() }
+                        PersonRivens { detail: data.clone(), selected: filter() }
                     }
                     MoreRows {
                         loading: *pages.loading_more.read(),
@@ -601,7 +602,7 @@ fn PersonHeader(person: Person, now: i64) -> Element {
 
 /// A seller's loaded rivens for one tab. Holds no rows of its own, like `PeopleTable`.
 #[component]
-fn PersonRivens(detail: PersonDetail) -> Element {
+fn PersonRivens(detail: PersonDetail, selected: PersonFilter) -> Element {
     let overview = use_context::<Signal<Option<Overview>>>();
     let has_image = move |slug: &str| {
         overview
@@ -612,6 +613,7 @@ fn PersonRivens(detail: PersonDetail) -> Element {
     let now = detail.server_time;
     rsx! {
         div { id: "person-rivens", class: "listings", role: "tabpanel",
+            aria_labelledby: "seller-tab-{selected:?}", tabindex: detail.rivens.is_empty().then_some("0"),
             if detail.rivens.is_empty() {
                 div { class: "empty-state", "No rivens here for this period." }
             }
